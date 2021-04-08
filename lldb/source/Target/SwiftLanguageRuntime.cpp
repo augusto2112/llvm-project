@@ -538,6 +538,61 @@ void SwiftLanguageRuntime::ModulesDidLoad(const ModuleList &module_list) {
   }
 }
 
+bool SwiftLanguageRuntimeImpl::AddReflectionSections(ObjectFile &object_file) {
+  using swift::ReflectionSectionKind;
+  using RemoteRef = swift::reflection::RemoteRef<void>;
+  using RemoteRefAndSize = std::pair<RemoteRef, uint64_t>;
+
+  swift::SwiftObjectFileFormatMachO object_file_format;
+  auto section_names = {
+      ConstString(object_file_format.getSectionName(swift::fieldmd)),
+      ConstString(object_file_format.getSectionName(swift::assocty)),
+      ConstString(object_file_format.getSectionName(swift::builtin)),
+      ConstString(object_file_format.getSectionName(swift::capture)),
+      ConstString(object_file_format.getSectionName(swift::typeref)),
+      ConstString(object_file_format.getSectionName(swift::reflstr))};
+
+  auto section_list = object_file.GetSectionList();
+  llvm::SmallVector<SectionSP, 6> sections;
+  for (auto &name : section_names) {
+    auto section = section_list->FindSectionByName(name);
+    if (!section)
+      return false;
+    sections.push_back(section);
+  }
+
+  auto deleter = [](const void *ptr) {
+    free(const_cast<void *>(ptr));
+  };
+
+  llvm::SmallVector<RemoteRefAndSize, 6> refs;
+  for (auto section : sections) {
+    void *local_buffer = malloc(section->GetByteSize());
+    m_reflection_ctx->saveBuffer({local_buffer, deleter});
+    section->GetSectionData(local_buffer, section->GetByteSize());
+    auto start_address = section->GetLoadBaseAddress(&m_process.GetTarget());
+    auto ref = swift::reflection::RemoteRef<void>(start_address, local_buffer);
+    refs.emplace_back(ref, section->GetByteSize());
+  }
+
+  swift::reflection::ReflectionInfo info = {
+      {refs[0].first, refs[0].second}, {refs[1].first, refs[1].second},
+      {refs[2].first, refs[2].second}, {refs[3].first, refs[3].second},
+      {refs[4].first, refs[4].second}, {refs[5].first, refs[5].second},
+  };
+    m_reflection_ctx->addReflectionInfo(info);
+
+  auto base_address = object_file.GetBaseAddress();
+  auto start = base_address.GetLoadAddress(&(m_process.GetTarget()));
+
+  auto data_segment = section_list->FindSectionByName(ConstString("__DATA"));
+  auto end = data_segment->GetLoadBaseAddress(&m_process.GetTarget()) +
+             data_segment->GetByteSize();
+  m_reflection_ctx->saveImageRange(swift::remote::RemoteAddress(start),
+                                   swift::remote::RemoteAddress(end));
+  return true;
+}
+
 bool SwiftLanguageRuntimeImpl::AddModuleToReflectionContext(
     const lldb::ModuleSP &module_sp) {
   // This function is called from within SetupReflection so it cannot
@@ -571,6 +626,7 @@ bool SwiftLanguageRuntimeImpl::AddModuleToReflectionContext(
       m_reflection_ctx->readELF(swift::remote::RemoteAddress(load_ptr),
           llvm::Optional<llvm::sys::MemoryBlock>(file_buffer));
     } else {
+//      AddReflectionSections(*obj_file);
       m_reflection_ctx->addImage(swift::remote::RemoteAddress(load_ptr));
     }
   }

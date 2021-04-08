@@ -333,7 +333,9 @@ private:
   bool AddModuleToReflectionContext(const lldb::ModuleSP &module_sp);
   /// \}
 
-  /// Cache for the debug-info-originating type infos.
+  bool AddReflectionSections(lldb_private::ObjectFile &object_file);
+
+    /// Cache for the debug-info-originating type infos.
   /// \{
   llvm::DenseMap<lldb::opaque_compiler_type_t,
                  llvm::Optional<swift::reflection::TypeInfo>>
