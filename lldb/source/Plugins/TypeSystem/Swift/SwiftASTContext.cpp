@@ -217,7 +217,7 @@ swift::Type SwiftASTContext::GetSwiftType(CompilerType compiler_type) {
 swift::Type SwiftASTContext::GetSwiftType(opaque_compiler_type_t opaque_type) {
   assert(opaque_type && *reinterpret_cast<const char *>(opaque_type) != '$' &&
          "wrong type system");
-  return lldb_private::GetSwiftType(CompilerType(this, opaque_type));
+  return lldb_private::GetSwiftType(CompilerType(this, opaque_type));;;
 }
 
 swift::CanType

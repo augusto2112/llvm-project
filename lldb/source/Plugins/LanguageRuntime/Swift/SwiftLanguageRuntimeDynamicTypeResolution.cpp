@@ -36,7 +36,7 @@ using namespace lldb_private;
 
 namespace lldb_private {
 swift::Type GetSwiftType(CompilerType type) {
-  auto *ts = type.GetTypeSystem();
+  auto *ts = type.GetTypeSystem();;;
   if (auto *tr = llvm::dyn_cast_or_null<TypeSystemSwiftTypeRef>(ts))
     return tr->GetSwiftType(type);
   if (auto *ast = llvm::dyn_cast_or_null<SwiftASTContext>(ts))

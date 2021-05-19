@@ -1228,7 +1228,7 @@ TypeSystemSwiftTypeRef::GetMangledTypeName(opaque_compiler_type_t type) {
 }
 
 void *TypeSystemSwiftTypeRef::ReconstructType(opaque_compiler_type_t type) {
-  Status error;
+  Status error;;;
   return m_swift_ast_context->ReconstructType(GetMangledTypeName(type), error);
 }
 
@@ -1929,8 +1929,6 @@ uint32_t TypeSystemSwiftTypeRef::GetPointerByteSize() {
     return m_swift_ast_context->GetPointerByteSize();
   };
   return impl();
-  llvm::errs() << impl() << " " << m_swift_ast_context->GetPointerByteSize() <<
-  " " << m_swift_ast_context << "\n";
   VALIDATE_AND_RETURN_STATIC(impl, GetPointerByteSize);
 }
 // Accessors
@@ -2662,14 +2660,21 @@ TypeSystemSwiftTypeRef::GetNumTemplateArguments(opaque_compiler_type_t type) {
 CompilerType
 TypeSystemSwiftTypeRef::GetTypeForFormatters(opaque_compiler_type_t type) {
   auto impl = [&]() -> CompilerType {
-  if (type) {
-    swift::Type swift_type(GetSwiftType({this, type}));
-    return {this, swift_type.getPointer()};
-  }
-  return {};
+    if (type) {
+    using namespace swift::Demangle;
+    Demangler dem;
+    NodePointer node = GetDemangledType(dem, AsMangledName(type));
+    if (!node)
+      return {};
+      NodePointer type_node = dem.createNode(Node::Kind::Type);
+      type_node->addChild(node, dem);
+      return RemangleAsType(
+          dem, type_node); 
+    }
+    return {};
   };
   VALIDATE_AND_RETURN(impl, GetTypeForFormatters, type, (ReconstructType(type)),
-        (ReconstructType(type)));
+                      (ReconstructType(type)));
 }
 
 LazyBool
@@ -3164,8 +3169,10 @@ bool TypeSystemSwiftTypeRef::IsTypedefType(opaque_compiler_type_t type) {
   auto impl = [&]() {
     using namespace swift::Demangle;
     Demangler dem;
-    NodePointer node = GetDemangledType(dem, AsMangledName(type));
-    return node && node->getKind() == Node::Kind::TypeAlias;
+    auto *name = AsMangledName(type);
+    NodePointer node = GetDemangledType(dem, name);
+    return node && (node->getKind() == Node::Kind::TypeAlias ||
+                    node->getKind() == Node::Kind::BuiltinTypeName);
   };
 
   VALIDATE_AND_RETURN(impl, IsTypedefType, type, (ReconstructType(type)),
@@ -3178,8 +3185,16 @@ TypeSystemSwiftTypeRef::GetTypedefedType(opaque_compiler_type_t type) {
     using namespace swift::Demangle;
     Demangler dem;
     NodePointer node = GetDemangledType(dem, AsMangledName(type));
-    if (!node || node->getKind() != Node::Kind::TypeAlias)
+    if (!node)
       return {};
+    if (!IsTypedefType(type))
+      return {};
+    if (node->getKind() == Node::Kind::BuiltinTypeName) {
+      NodePointer type_node = dem.createNode(Node::Kind::Type);
+      type_node->addChild(node, dem);
+      return RemangleAsType(
+          dem, type_node); 
+    }
     auto pair = ResolveTypeAlias(m_swift_ast_context, dem, node);
     if (NodePointer resolved = std::get<swift::Demangle::NodePointer>(pair)) {
       NodePointer type_node = dem.createNode(Node::Kind::Type);

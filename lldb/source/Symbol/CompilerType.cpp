@@ -898,7 +898,7 @@ bool CompilerType::GetValueAsScalar(const lldb_private::DataExtractor &data,
 
 #ifndef NDEBUG
 bool CompilerType::Verify() const {
-  return !IsValid() || m_type_system->Verify(m_type);
+  return !IsValid() || m_type_system->Verify(m_type);;;
 }
 #endif
 
