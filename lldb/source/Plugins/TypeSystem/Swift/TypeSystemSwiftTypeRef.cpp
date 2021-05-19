@@ -1928,6 +1928,9 @@ uint32_t TypeSystemSwiftTypeRef::GetPointerByteSize() {
     // evaluation we might as well defer to the SwiftASTContext.
     return m_swift_ast_context->GetPointerByteSize();
   };
+  return impl();
+  llvm::errs() << impl() << " " << m_swift_ast_context->GetPointerByteSize() <<
+  " " << m_swift_ast_context << "\n";
   VALIDATE_AND_RETURN_STATIC(impl, GetPointerByteSize);
 }
 // Accessors
@@ -2658,7 +2661,15 @@ TypeSystemSwiftTypeRef::GetNumTemplateArguments(opaque_compiler_type_t type) {
 
 CompilerType
 TypeSystemSwiftTypeRef::GetTypeForFormatters(opaque_compiler_type_t type) {
-  return m_swift_ast_context->GetTypeForFormatters(ReconstructType(type));
+  auto impl = [&]() -> CompilerType {
+  if (type) {
+    swift::Type swift_type(GetSwiftType({this, type}));
+    return {this, swift_type.getPointer()};
+  }
+  return {};
+  };
+  VALIDATE_AND_RETURN(impl, GetTypeForFormatters, type, (ReconstructType(type)),
+        (ReconstructType(type)));
 }
 
 LazyBool
