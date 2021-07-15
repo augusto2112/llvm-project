@@ -413,16 +413,16 @@ public:
     Target &target(m_process.GetTarget());
     Address addr(address.getAddressData());
     Status error;
-    if (size > target.ReadMemory(addr, dest, size, error)) {
-      LLDB_LOGV(log, "[MemoryReader] memory read returned fewer bytes than asked for");
-      return false;
-    }
+    size_t memory_read = target.ReadMemory(addr, dest, size, error);
     if (error.Fail()) {
       LLDB_LOGV(log, "[MemoryReader] memory read returned error: {0}",
                 error.AsCString());
       return false;
     }
-
+    if (memory_read < size) {
+      LLDB_LOGV(log, "[MemoryReader] memory read returned fewer bytes than asked for");
+      return false;
+    }
     auto format_data = [](auto dest, auto size) {
       StreamString stream;
       for (uint64_t i = 0; i < size; i++) {
