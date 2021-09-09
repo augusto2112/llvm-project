@@ -386,7 +386,10 @@ public:
 
         CompilerType compiler_type =
             m_persistent_variable_sp->GetCompilerType();
-
+        if (auto *swift_ast_ctx = llvm::dyn_cast<SwiftASTContext>(
+                compiler_type.GetTypeSystem())) {
+          compiler_type = swift_ast_ctx->GetTypeRefType(compiler_type.GetOpaqueQualType());
+        }
         m_persistent_variable_sp->m_live_sp = ValueObjectConstResult::Create(
             exe_scope, compiler_type, m_persistent_variable_sp->GetName(),
             variable.m_remote_addr, eAddressTypeLoad,
@@ -503,6 +506,13 @@ private:
 uint32_t SwiftREPLMaterializer::AddPersistentVariable(
     lldb::ExpressionVariableSP &persistent_variable_sp,
     PersistentVariableDelegate *delegate, Status &err) {
+    auto compiler_type = persistent_variable_sp->GetCompilerType();;
+    if (auto *swift_ast_ctx =
+            llvm::dyn_cast<SwiftASTContext>(compiler_type.GetTypeSystem())) {
+      persistent_variable_sp->SetCompilerType(
+          swift_ast_ctx->GetTypeRefType(compiler_type.GetOpaqueQualType()));
+    }
+
   EntityVector::iterator iter = m_entities.insert(m_entities.end(), EntityUP());
   iter->reset(
       new EntityREPLPersistentVariable(persistent_variable_sp, this, delegate));

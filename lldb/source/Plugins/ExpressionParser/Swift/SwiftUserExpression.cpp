@@ -550,6 +550,13 @@ lldb::ExpressionVariableSP SwiftUserExpression::GetResultAfterDematerialization(
   } else
     result_sp = in_result_sp;
 
+  if (result_sp) {
+    if (auto *swift_ast_ctx = llvm::dyn_cast<SwiftASTContext>(
+            result_sp->GetCompilerType().GetTypeSystem())) {
+      result_sp->SetCompilerType(swift_ast_ctx->GetTypeRefType(
+          result_sp->GetCompilerType().GetOpaqueQualType()));
+    }
+  }
   return result_sp;
 }
 
