@@ -2509,7 +2509,7 @@ SBEnvironment SBTarget::GetEnvironment() {
   TargetSP target_sp(GetSP());
 
   if (target_sp) {
-    return LLDB_RECORD_RESULT(SBEnvironment(target_sp->GetEnvironment()));
+    return LLDB_RECORD_RESULT(SBEnvironment(target_sp->GetCompleteEnvironment()));
   }
 
   return LLDB_RECORD_RESULT(SBEnvironment());

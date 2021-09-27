@@ -194,6 +194,8 @@ lldb::REPLSP SwiftREPL::CreateInstanceFromDebugger(Status &err,
   } else {
     launch_info.SetExecutableFile(exe_module_sp->GetPlatformFileSpec(), true);
   }
+  // Set the environment as the target's ignoring any inherited settings
+  launch_info.GetEnvironment() = target_sp->GetCurrentEnvironment();
 
   debugger.SetAsyncExecution(false);
   err = target_sp->Launch(launch_info, nullptr);

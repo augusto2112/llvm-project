@@ -664,7 +664,7 @@ public:
 protected:
   bool DoExecute(Args &args, CommandReturnObject &result) override {
     Target *target = m_exe_ctx.GetTargetPtr();
-    Environment env = target->GetEnvironment();
+    Environment env = target->GetCompleteEnvironment();
 
     std::vector<Environment::value_type *> env_vector;
     env_vector.reserve(env.size());

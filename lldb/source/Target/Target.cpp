@@ -4275,7 +4275,7 @@ void TargetProperties::SetRunArguments(const Args &args) {
   m_launch_info.GetArguments() = args;
 }
 
-Environment TargetProperties::ComputeEnvironment() const {
+Environment TargetProperties::ComputeInheritedEnvironment() const {
   Environment env;
 
   if (m_target &&
@@ -4289,6 +4289,11 @@ Environment TargetProperties::ComputeEnvironment() const {
     }
   }
 
+  return env;
+}
+
+Environment TargetProperties::ComputeCurrentEnvironment() const {
+  Environment env;
   Args property_unset_env;
   m_collection_sp->GetPropertyAtIndexAsArgs(nullptr, ePropertyUnsetEnvVars,
                                             property_unset_env);
@@ -4304,14 +4309,25 @@ Environment TargetProperties::ComputeEnvironment() const {
   return env;
 }
 
-Environment TargetProperties::GetEnvironment() const {
-  return ComputeEnvironment();
+Environment TargetProperties::ComputeCompleteEnvironment() const {
+  auto env = ComputeInheritedEnvironment();
+  auto current_env = ComputeCurrentEnvironment();
+  env.insert(current_env.begin(), current_env.end());
+  return env;
 }
 
-void TargetProperties::SetEnvironment(Environment env) {
+Environment TargetProperties::GetCurrentEnvironment() const {
+  return ComputeCurrentEnvironment();
+}
+
+void TargetProperties::SetCurrentEnvironment(Environment env) {
   // TODO: Get rid of the Args intermediate step
   const uint32_t idx = ePropertyEnvVars;
   m_collection_sp->SetPropertyAtIndexFromArgs(nullptr, idx, Args(env));
+}
+
+Environment TargetProperties::GetCompleteEnvironment() const {
+  return ComputeCompleteEnvironment();
 }
 
 bool TargetProperties::GetSkipPrologue() const {
@@ -4631,7 +4647,7 @@ void TargetProperties::SetProcessLaunchInfo(
   m_launch_info = launch_info;
   SetArg0(launch_info.GetArg0());
   SetRunArguments(launch_info.GetArguments());
-  SetEnvironment(launch_info.GetEnvironment());
+  SetCurrentEnvironment(launch_info.GetEnvironment());
   const FileAction *input_file_action =
       launch_info.GetFileActionForFD(STDIN_FILENO);
   if (input_file_action) {
@@ -4682,7 +4698,7 @@ void TargetProperties::RunArgsValueChangedCallback() {
 }
 
 void TargetProperties::EnvVarsValueChangedCallback() {
-  m_launch_info.GetEnvironment() = ComputeEnvironment();
+  m_launch_info.GetEnvironment() = ComputeCompleteEnvironment();
 }
 
 void TargetProperties::InputPathValueChangedCallback() {

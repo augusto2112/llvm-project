@@ -135,8 +135,13 @@ public:
 
   void SetRunArguments(const Args &args);
 
-  Environment GetEnvironment() const;
-  void SetEnvironment(Environment env);
+  /// Returns the environment made of the current and inherited settings.
+  Environment GetCompleteEnvironment() const;
+
+  /// Returns the current environemt, ignoring inherited properties.
+  Environment GetCurrentEnvironment() const;
+
+  void SetCurrentEnvironment(Environment env);
 
   bool GetSkipPrologue() const;
 
@@ -267,7 +272,9 @@ private:
   void InheritTCCValueChangedCallback();
   void DisableSTDIOValueChangedCallback();
 
-  Environment ComputeEnvironment() const;
+  Environment ComputeInheritedEnvironment() const;
+  Environment ComputeCurrentEnvironment() const;
+  Environment ComputeCompleteEnvironment() const;
 
   // Member variables.
   ProcessLaunchInfo m_launch_info;

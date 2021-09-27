@@ -194,7 +194,7 @@ protected:
       m_options.launch_info.GetFlags().Set(eLaunchFlagDisableSTDIO);
 
     // Merge the launch info environment with the target environment.
-    Environment target_env = target->GetEnvironment();
+    Environment target_env = target->GetCompleteEnvironment();
     m_options.launch_info.GetEnvironment().insert(target_env.begin(),
                                                   target_env.end());
 
