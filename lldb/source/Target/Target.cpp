@@ -4200,6 +4200,7 @@ bool TargetProperties::GetSwiftUseReflectionSymbols() const {
 }
 
 bool TargetProperties::GetSwiftReadMetadataFromDSYM() const {
+  return true;
   const Property *exp_property = m_collection_sp->GetPropertyAtIndex(
       nullptr, false, ePropertyExperimental);
   OptionValueProperties *exp_values =

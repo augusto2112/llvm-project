@@ -19,7 +19,7 @@ class TestSwiftReflectionOnly(lldbtest.TestBase):
             self, 'Set breakpoint here', lldb.SBFileSpec('main.swift'),
             extra_images=['dynamic_lib'])
         log = self.getBuildArtifact('types.log')
-        self.expect('log enable lldb types -f ' + log)
+        self.expect('log enable lldb types -f /tmp/types_test')
 
         check_var = lldbutil.check_variable
         frame = thread.frames[0]

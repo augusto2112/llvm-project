@@ -1821,9 +1821,6 @@ constexpr ExecutionContextScope *g_no_exe_ctx = nullptr;
   do {                                                                         \
     FALLBACK(REFERENCE, ());                                                   \
     auto result = IMPL();                                                      \
-    if (!ModuleList::GetGlobalModuleListProperties()                           \
-             .GetSwiftValidateTypeSystem())                                    \
-      return result;                                                           \
     if (!GetSwiftASTContext())                                                 \
       return result;                                                           \
     assert((result == GetSwiftASTContext()->REFERENCE()) &&                    \

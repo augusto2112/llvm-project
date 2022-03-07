@@ -1755,7 +1755,7 @@ class LLDBTestCaseFactory(type):
                         [])) & all_dbginfo_categories
                 if not categories:
                     categories = all_dbginfo_categories
-
+                categories = ['dsym']
                 for cat in categories:
                     @decorators.add_test_categories([cat])
                     @wraps(attrvalue)

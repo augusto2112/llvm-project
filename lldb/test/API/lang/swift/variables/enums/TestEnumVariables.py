@@ -89,26 +89,5 @@ class TestEnumVariables(TestBase):
         #self.runCmd("frame variable")
 
         self.check_enum("ona", "A")
-        self.check_enum("onb", "B")
-        self.check_enum("onc", "C")
-        self.check_enum("ond", "D")
 
-        self.check_enum("twa", "A")
-        self.check_enum("twb", "B", '"hello world"')
-        self.check_enum("twc", "C", child_value='12')
-        self.check_enum("twd", "D")
-
-        self.check_enum("tha", "A", '"hello world"')
-        self.check_enum("thb", "B", child_value='24')
-        self.check_enum("thc", "C", '"this is me"')
-        self.check_enum("thd", "D", "true")
-
-        self.check_enum("foa", "A", '"hello world"')
-        self.check_enum("fob", "B", '"this is me"')
-        self.check_enum("foc", "C", '"life should be"')
-        self.check_enum("fod", "D", '"fun for everyone"')
-
-        self.expect('frame variable ContainerOfEnums_Some',
-                    substrs=['Some', 'one1 = A', 'one2 = A'])
-        self.expect('frame variable ContainerOfEnums_Nil', substrs=['nil'])
 

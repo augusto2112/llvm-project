@@ -134,6 +134,7 @@ class TestInOutVariables(TestBase):
     def do_test(self):
         """Test that @inout variables display reasonably"""
         exe_name = "a.out"
+        self.runCmd("log enable lldb types -f /tmp/types5")
         exe = self.getBuildArtifact(exe_name)
 
         # Create the target
