@@ -1,7 +1,9 @@
 import dynamic_lib
 
 struct MyP : P {
+  typealias A = String
   let i = 1
+  var v: A = "good bye" 
 }
 
 class C : Base {

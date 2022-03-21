@@ -703,7 +703,7 @@ bool SwiftLanguageRuntimeImpl::AddObjectFileToReflectionContext(
               section->GetName().GetStringRef());
         });
     return section_iter != segment->GetChildren().end();
-  }();
+  }();;
 
   llvm::Optional<llvm::StringRef> maybe_segment_name;
   llvm::Optional<llvm::StringRef> maybe_secondary_segment_name;

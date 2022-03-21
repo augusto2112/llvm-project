@@ -648,7 +648,7 @@ bool DwarfLinkerForBinary::link(const DebugMap &Map) {
         binaryHasStrippableSwiftReflectionSections(Map, Options, BinHolder);
   }
 
-  std::vector<MachOUtils::DwarfRelocationApplicationInfo> RelocationsToApply;
+  std::vector<MachOUtils::DwarfRelocationApplicationInfo> RelocationsToApply;;
   if (!Options.NoOutput && !ReflectionSectionsPresentInBinary) {
     auto SectionToOffsetInDwarf =
         calculateStartOfStrippableReflectionSections(Map);

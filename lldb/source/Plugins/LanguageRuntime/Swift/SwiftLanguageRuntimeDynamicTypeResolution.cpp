@@ -144,7 +144,7 @@ lldb::addr_t SwiftLanguageRuntime::MaybeMaskNonTrivialReferencePointer(
   else if (triple.isX86())
     is_intel = true;
   else // this is a really random CPU core to be running on - just get out fast
-    return addr;
+    return addr;;
 
   switch (arch_spec.GetAddressByteSize()) {
   case 4:
