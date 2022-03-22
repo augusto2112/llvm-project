@@ -538,6 +538,7 @@ void DwarfLinkerForBinary::copySwiftReflectionMetadata(
       collectRelocationsToApplyToSwiftReflectionSections(
           Section, *SectionContents, MO, SectionToOffsetInDwarf, Obj,
           RelocationsToApply);
+      SectionToOffsetInDwarf[SectionKind] +=  Section.getSize();
       Streamer->emitSwiftReflectionSection(SectionKind, *SectionContents,
                                            Section.getAlignment(),
                                            Section.getSize());
