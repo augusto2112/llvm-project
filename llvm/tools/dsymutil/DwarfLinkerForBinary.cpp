@@ -494,7 +494,7 @@ void DwarfLinkerForBinary::collectRelocationsToApplyToSwiftReflectionSections(
 
 void DwarfLinkerForBinary::copySwiftReflectionMetadata(
     const llvm::dsymutil::DebugMapObject *Obj, DwarfStreamer *Streamer,
-    const std::vector<uint64_t> &SectionToOffsetInDwarf,
+    std::vector<uint64_t> &SectionToOffsetInDwarf,
     std::vector<MachOUtils::DwarfRelocationApplicationInfo>
         &RelocationsToApply) {
   using binaryformat::Swift5ReflectionSectionKind;
