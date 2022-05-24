@@ -312,6 +312,13 @@ public:
         existential_address, existential_tr);
   }
 
+  llvm::Optional<std::pair<const swift::reflection::TypeRef *,
+                           swift::remote::RemoteAddress>>
+  projectEnumValue(swift::remote::RemoteAddress EnumAddress,
+                   const swift::reflection::TypeRef *EnumTR) override {
+    return m_reflection_ctx.projectEnumValue(EnumAddress, EnumTR);
+  }
+
   const swift::reflection::TypeRef *
   readTypeFromMetadata(lldb::addr_t metadata_address,
                        bool skip_artificial_subclasses) override {
@@ -2249,6 +2256,81 @@ bool SwiftLanguageRuntimeImpl::GetDynamicTypeAndAddress_Value(
 bool SwiftLanguageRuntimeImpl::GetDynamicTypeAndAddress_IndirectEnumCase(
     ValueObject &in_value, lldb::DynamicValueType use_dynamic,
     TypeAndOrName &class_type_or_name, Address &address) {
+  CompilerType enum_type = in_value.GetCompilerType(); 
+  Log *log(GetLog(LLDBLog::Types));
+  auto *tss =
+      llvm::dyn_cast_or_null<TypeSystemSwift>(enum_type.GetTypeSystem());
+  if (!tss) {
+    if (log)
+      log->Printf("Could not get type system swift");
+    return false;
+  }
+
+  const swift::reflection::TypeRef *enum_typeref =
+      GetTypeRef(enum_type, &tss->GetTypeSystemSwiftTypeRef());
+  if (!enum_typeref) {
+    if (log)
+      log->Printf("Could not get enum typeref");
+    return false;;
+  }
+  
+
+  lldb::addr_t enum_address;
+  bool use_local_buffer = false;
+
+  if (in_value.GetValueType() == eValueTypeConstResult &&
+      in_value.GetValue().GetValueType() ==
+          lldb_private::Value::ValueType::HostAddress) {
+    if (log)
+      log->Printf("existential value is a const result");
+
+    // We have a locally materialized value that is a host address;
+    // register it with MemoryReader so it does not treat it as a load
+    // address.  Note that this assumes that any address at that host
+    // address is also a load address. If this assumption breaks there
+    // will be a crash in readBytes().
+    enum_address = in_value.GetValue().GetScalar().ULongLong();
+    use_local_buffer = true;
+  } else {
+    enum_address = in_value.GetAddressOf();
+  }
+
+  if (log)
+    log->Printf("Enum address is 0x%llx", enum_address);
+
+  if (!enum_address || enum_address == LLDB_INVALID_ADDRESS) {
+    if (log)
+      log->Printf("Enum address is invalid");
+    return false;
+  }
+
+
+  if (use_local_buffer)
+    PushLocalBuffer(enum_address, in_value.GetByteSize().getValueOr(0));
+
+  swift::remote::RemoteAddress remote_enum(enum_address);
+
+  auto *reflection_ctx = GetReflectionContext();
+  auto pair = reflection_ctx->projectEnumValue(remote_enum, enum_typeref);
+  if (use_local_buffer)
+    PopLocalBuffer();
+
+  if (!pair) {
+    if (log)
+      log->Printf("Runtime failed to get dynamic type of enum");
+    return false;
+  }
+
+  const swift::reflection::TypeRef *typeref;
+  swift::remote::RemoteAddress out_address(nullptr);
+  std::tie(typeref, out_address) = *pair;
+  auto &ts = tss->GetTypeSystemSwiftTypeRef();
+  swift::Demangle::Demangler dem;
+  swift::Demangle::NodePointer node = typeref->getDemangling(dem);
+  class_type_or_name.SetCompilerType(ts.RemangleAsType(dem, node));
+  address.SetRawAddress(out_address.getAddressData());
+  return true;
+
   static ConstString g_offset("offset");
 
   DataExtractor data;
@@ -2590,7 +2672,7 @@ bool SwiftLanguageRuntimeImpl::GetDynamicTypeAndAddress(
   bool success = false;
   bool is_indirect_enum_case = IsIndirectEnumCase(in_value);
   // Type kinds with instance metadata don't need generic type resolution.
-  if (is_indirect_enum_case)
+  if (is_indirect_enum_case || type_info.AnySet(eTypeIsEnumeration)) 
     success = GetDynamicTypeAndAddress_IndirectEnumCase(
         in_value, use_dynamic, class_type_or_name, address);
   else if (type_info.AnySet(eTypeIsClass) ||

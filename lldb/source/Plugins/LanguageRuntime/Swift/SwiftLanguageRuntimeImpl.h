@@ -229,6 +229,11 @@ public:
     projectExistentialAndUnwrapClass(
         swift::remote::RemoteAddress existential_addess,
         const swift::reflection::TypeRef &existential_tr) = 0;
+
+    virtual llvm::Optional<std::pair<const swift::reflection::TypeRef *,
+                                     swift::remote::RemoteAddress>>
+    projectEnumValue(swift::remote::RemoteAddress EnumAddress,
+                     const swift::reflection::TypeRef *EnumTR) = 0;
     virtual const swift::reflection::TypeRef *
     readTypeFromMetadata(lldb::addr_t metadata_address,
                          bool skip_artificial_subclasses = false) = 0;
