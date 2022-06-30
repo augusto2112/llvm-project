@@ -213,7 +213,7 @@ public:
     virtual bool addImage(
         llvm::function_ref<std::pair<swift::remote::RemoteRef<void>, uint64_t>(
             swift::ReflectionSectionKind)>
-            find_section) = 0;
+            find_section, llvm::Optional<llvm::StringRef> Name = llvm::None) = 0;
     virtual bool addImage(swift::remote::RemoteAddress image_start) = 0;
     virtual bool readELF(swift::remote::RemoteAddress ImageStart,
                          llvm::Optional<llvm::sys::MemoryBlock> FileBuffer) = 0;

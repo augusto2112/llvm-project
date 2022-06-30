@@ -477,8 +477,8 @@ bool SwiftUserExpression::Parse(DiagnosticManager &diagnostic_manager,
   }
 
   StreamString jit_module_name;
-  jit_module_name.Printf("%s%u", FunctionName(),
-                         m_options.GetExpressionNumber());
+  jit_module_name.Printf("%s_%u", FunctionName(),
+                         m_options.GetExpressionNumber() - 1);
   auto module =
       m_execution_unit_sp->CreateJITModule(jit_module_name.GetString().data());
 

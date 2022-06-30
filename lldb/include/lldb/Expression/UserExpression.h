@@ -190,7 +190,7 @@ public:
 
   /// Return the function name that should be used for executing the
   /// expression.  Text() should contain the definition of this function.
-  const char *FunctionName() override { return "$__lldb_expr"; }
+  const char *FunctionName() override { return "__lldb_expr"; }
 
   /// Return the language that should be used when parsing.  To use the
   /// default, return eLanguageTypeUnknown.
