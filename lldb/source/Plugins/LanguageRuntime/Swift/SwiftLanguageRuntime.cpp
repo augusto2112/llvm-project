@@ -623,8 +623,8 @@ GetObjectFileFormat(llvm::Triple::ObjectFormatType obj_format_type) {
   return obj_file_format;
 }
 
-static llvm::Optional<llvm::StringRef>
-GetLikelyImageNameForModule(ModuleSP module) {
+static llvm::SmallVector<llvm::StringRef, 1>
+GetLikelyImageNamesForModule(ModuleSP module) {
   if (!module || !module->GetFileSpec())
     return {};
 
@@ -636,7 +636,7 @@ GetLikelyImageNameForModule(ModuleSP module) {
     name = name.drop_front(8);
   if (name.startswith("lib"))
     name = name.drop_front(3);
-  return name;
+  return {name};
 }
 
 bool SwiftLanguageRuntimeImpl::AddJitObjectFileToReflectionContext(
@@ -648,7 +648,7 @@ bool SwiftLanguageRuntimeImpl::AddJitObjectFileToReflectionContext(
   if (!obj_file_format)
     return false;
 
-  auto name = GetLikelyImageNameForModule(obj_file.GetModule());
+  auto names = GetLikelyImageNamesForModule(obj_file.GetModule());
   return m_reflection_ctx->addImage(
       [&](swift::ReflectionSectionKind section_kind)
           -> std::pair<swift::remote::RemoteRef<void>, uint64_t> {
@@ -675,7 +675,7 @@ bool SwiftLanguageRuntimeImpl::AddJitObjectFileToReflectionContext(
           }
         }
         return {};
-      }, name);
+      }, names);
 }
 
 bool SwiftLanguageRuntimeImpl::AddObjectFileToReflectionContext(
@@ -804,7 +804,7 @@ bool SwiftLanguageRuntimeImpl::AddObjectFileToReflectionContext(
     }
     return {};
   };
-  auto name = GetLikelyImageNameForModule(module);
+  auto name = GetLikelyImageNamesForModule(module);
   return m_reflection_ctx->addImage(
       [&](swift::ReflectionSectionKind section_kind)
           -> std::pair<swift::remote::RemoteRef<void>, uint64_t> {

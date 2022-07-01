@@ -247,8 +247,9 @@ public:
   bool addImage(
       llvm::function_ref<std::pair<swift::remote::RemoteRef<void>, uint64_t>(
           swift::ReflectionSectionKind)>
-          find_section, llvm::Optional<llvm::StringRef> Name) override {
-    return m_reflection_ctx.addImage(find_section, Name);
+          find_section,
+      llvm::SmallVector<llvm::StringRef, 1> PotentialModuleNames) override {
+    return m_reflection_ctx.addImage(find_section, PotentialModuleNames);
   }
 
   bool addImage(swift::remote::RemoteAddress image_start) override {
