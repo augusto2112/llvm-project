@@ -624,19 +624,24 @@ GetObjectFileFormat(llvm::Triple::ObjectFormatType obj_format_type) {
 }
 
 static llvm::SmallVector<llvm::StringRef, 1>
-GetLikelySwiftImageNamesForModule(ModuleSP module) {
+GetLikelySwiftImageNamesForModule(ModuleSP module, ModuleSP main_executable) {
   if (!module || !module->GetFileSpec())
     return {};
 
   auto name =
       module->GetFileSpec().GetFileNameStrippingExtension().GetStringRef();
+  static std::vector<std::string> strs;
+  auto n = main_executable->GetFileSpec().GetPath();
+  std::replace(n.begin(), n.end(), '/', '_');
+  strs.push_back(std::move(n));
+  std::string &ref = strs.back();
   if (name == "libswiftCore")
     name = "Swift";
   if (name.startswith("libswift"))
     name = name.drop_front(8);
   if (name.startswith("lib"))
     name = name.drop_front(3);
-  return {name};
+  return {name, ref };
 }
 
 bool SwiftLanguageRuntimeImpl::AddJitObjectFileToReflectionContext(
@@ -833,7 +838,7 @@ bool SwiftLanguageRuntimeImpl::AddModuleToReflectionContext(
   Address start_address = obj_file->GetBaseAddress();
   auto load_ptr = static_cast<uintptr_t>(
       start_address.GetLoadAddress(&target));
-  auto likely_module_names = GetLikelySwiftImageNamesForModule(module_sp);
+  auto likely_module_names = GetLikelySwiftImageNamesForModule(module_sp, target.GetExecutableModule());
   if (obj_file->GetType() == ObjectFile::eTypeJIT) {
     auto object_format_type =
         module_sp->GetArchitecture().GetTriple().getObjectFormat();
