@@ -623,11 +623,48 @@ GetObjectFileFormat(llvm::Triple::ObjectFormatType obj_format_type) {
   return obj_file_format;
 }
 
+static llvm::StringRef
+GetModuleNameFromModuleDescriptor(llvm::StringRef mangled_name) {
+  if (mangled_name.empty())
+    return {};
+
+  static Demangler dem;
+  NodePointer global = dem.demangleSymbol(mangled_name);
+
+  if (!global || global->getKind() != Node::Kind::Global ||
+      global->getNumChildren() != 1)
+    return {};
+
+  NodePointer module_descriptor = global->getFirstChild();
+  if (global->getKind() != Node::Kind::ModuleDescriptor ||
+      global->getNumChildren() != 1)
+    return {};
+
+  NodePointer module = module_descriptor->getFirstChild();
+  if (module->getKind() != Node::Kind::Module || !module->hasText())
+    return {};
+  return module->getText();
+}
+
 static llvm::SmallVector<llvm::StringRef, 1>
 GetLikelySwiftImageNamesForModule(ModuleSP module) {
   if (!module || !module->GetFileSpec())
     return {};
-
+  llvm::SmallVector<llvm::StringRef, 1> swift_module_names;
+  SymbolContextList list;
+  // A module descriptor is mangled as the module mangling followed by 'MXM'.
+  module->FindSymbolsMatchingRegExAndType(RegularExpression(".*MXM$"),
+                                          lldb::SymbolType::eSymbolTypeAny,
+                                          list, true);
+  for (size_t i = 0; i < list.GetSize(); ++i) {
+    SymbolContext sc;
+    if (list.GetContextAtIndex(i, sc) && sc.symbol) {
+      auto mangled_name = sc.symbol->GetMangled().GetMangledName().GetStringRef();
+      auto module_name = GetModuleNameFromModuleDescriptor(mangled_name);
+      if (!module_name.empty()) 
+        swift_module_names.emplace_back(module_name);
+    }
+  }
   auto name =
       module->GetFileSpec().GetFileNameStrippingExtension().GetStringRef();
   if (name == "libswiftCore")
@@ -636,7 +673,8 @@ GetLikelySwiftImageNamesForModule(ModuleSP module) {
     name = name.drop_front(8);
   if (name.startswith("lib"))
     name = name.drop_front(3);
-  return {name};
+  swift_module_names.emplace_back(name);
+  return swift_module_names;
 }
 
 bool SwiftLanguageRuntimeImpl::AddJitObjectFileToReflectionContext(

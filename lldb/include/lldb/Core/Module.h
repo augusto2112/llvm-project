@@ -264,7 +264,8 @@ public:
 
   void FindSymbolsMatchingRegExAndType(const RegularExpression &regex,
                                        lldb::SymbolType symbol_type,
-                                       SymbolContextList &sc_list);
+                                       SymbolContextList &sc_list,
+                                       bool match_against_demangled = false);
 
   /// Find a function symbols in the object file's symbol table.
   ///

@@ -768,7 +768,7 @@ uint32_t Symtab::AppendSymbolIndexesWithNameAndType(
 
 uint32_t Symtab::AppendSymbolIndexesMatchingRegExAndType(
     const RegularExpression &regexp, SymbolType symbol_type,
-    std::vector<uint32_t> &indexes) {
+    std::vector<uint32_t> &indexes, bool match_against_demangled) {
   std::lock_guard<std::recursive_mutex> guard(m_mutex);
 
   uint32_t prev_size = indexes.size();
@@ -777,7 +777,10 @@ uint32_t Symtab::AppendSymbolIndexesMatchingRegExAndType(
   for (uint32_t i = 0; i < sym_end; i++) {
     if (symbol_type == eSymbolTypeAny ||
         m_symbols[i].GetType() == symbol_type) {
-      const char *name = m_symbols[i].GetName().AsCString();
+      const char *name =
+          match_against_demangled
+              ? m_symbols[i].GetMangled().GetMangledName().AsCString()
+              : m_symbols[i].GetName().AsCString();
       if (name) {
         if (regexp.Execute(name))
           indexes.push_back(i);
@@ -790,7 +793,7 @@ uint32_t Symtab::AppendSymbolIndexesMatchingRegExAndType(
 uint32_t Symtab::AppendSymbolIndexesMatchingRegExAndType(
     const RegularExpression &regexp, SymbolType symbol_type,
     Debug symbol_debug_type, Visibility symbol_visibility,
-    std::vector<uint32_t> &indexes) {
+    std::vector<uint32_t> &indexes, bool match_against_demangled) {
   std::lock_guard<std::recursive_mutex> guard(m_mutex);
 
   uint32_t prev_size = indexes.size();
@@ -802,7 +805,10 @@ uint32_t Symtab::AppendSymbolIndexesMatchingRegExAndType(
       if (!CheckSymbolAtIndex(i, symbol_debug_type, symbol_visibility))
         continue;
 
-      const char *name = m_symbols[i].GetName().AsCString();
+      const char *name =
+          match_against_demangled
+              ? m_symbols[i].GetMangled().GetMangledName().AsCString()
+              : m_symbols[i].GetName().AsCString();
       if (name) {
         if (regexp.Execute(name))
           indexes.push_back(i);
@@ -871,11 +877,12 @@ void Symtab::FindAllSymbolsWithNameAndType(
 void Symtab::FindAllSymbolsMatchingRexExAndType(
     const RegularExpression &regex, SymbolType symbol_type,
     Debug symbol_debug_type, Visibility symbol_visibility,
-    std::vector<uint32_t> &symbol_indexes) {
+    std::vector<uint32_t> &symbol_indexes, bool match_against_demangled) {
   std::lock_guard<std::recursive_mutex> guard(m_mutex);
 
   AppendSymbolIndexesMatchingRegExAndType(regex, symbol_type, symbol_debug_type,
-                                          symbol_visibility, symbol_indexes);
+                                          symbol_visibility, symbol_indexes,
+                                          match_against_demangled);
 }
 
 Symbol *Symtab::FindFirstSymbolWithNameAndType(ConstString name,

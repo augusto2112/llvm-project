@@ -89,14 +89,13 @@ public:
                                               Debug symbol_debug_type,
                                               Visibility symbol_visibility,
                                               std::vector<uint32_t> &matches);
-  uint32_t
-  AppendSymbolIndexesMatchingRegExAndType(const RegularExpression &regex,
-                                          lldb::SymbolType symbol_type,
-                                          std::vector<uint32_t> &indexes);
+  uint32_t AppendSymbolIndexesMatchingRegExAndType(
+      const RegularExpression &regex, lldb::SymbolType symbol_type,
+      std::vector<uint32_t> &indexes, bool match_against_demangled = false);
   uint32_t AppendSymbolIndexesMatchingRegExAndType(
       const RegularExpression &regex, lldb::SymbolType symbol_type,
       Debug symbol_debug_type, Visibility symbol_visibility,
-      std::vector<uint32_t> &indexes);
+      std::vector<uint32_t> &indexes, bool match_against_demangled = false);
   void FindAllSymbolsWithNameAndType(ConstString name,
                                      lldb::SymbolType symbol_type,
                                      std::vector<uint32_t> &symbol_indexes);
@@ -105,10 +104,12 @@ public:
                                      Debug symbol_debug_type,
                                      Visibility symbol_visibility,
                                      std::vector<uint32_t> &symbol_indexes);
-  void FindAllSymbolsMatchingRexExAndType(
-      const RegularExpression &regex, lldb::SymbolType symbol_type,
-      Debug symbol_debug_type, Visibility symbol_visibility,
-      std::vector<uint32_t> &symbol_indexes);
+  void FindAllSymbolsMatchingRexExAndType(const RegularExpression &regex,
+                                          lldb::SymbolType symbol_type,
+                                          Debug symbol_debug_type,
+                                          Visibility symbol_visibility,
+                                          std::vector<uint32_t> &symbol_indexes,
+                                          bool match_against_demangled = false);
   Symbol *FindFirstSymbolWithNameAndType(ConstString name,
                                          lldb::SymbolType symbol_type,
                                          Debug symbol_debug_type,
