@@ -442,6 +442,9 @@ SwiftLanguageRuntimeImpl::GetReflectionContext() {
   return m_reflection_ctx.get();
 }
 
+TypeRefCacher & SwiftLanguageRuntimeImpl::GetTypeRefCacher() {
+  return m_typeref_cacher;
+}
 void SwiftLanguageRuntimeImpl::SetupReflection() {
   LLDB_SCOPED_TIMER();
  
@@ -675,7 +678,7 @@ bool SwiftLanguageRuntimeImpl::AddJitObjectFileToReflectionContext(
         }
         return {};
       },
-      likely_module_names);
+      likely_module_names) != llvm::None;
 }
 
 bool SwiftLanguageRuntimeImpl::AddObjectFileToReflectionContext(
@@ -806,7 +809,7 @@ bool SwiftLanguageRuntimeImpl::AddObjectFileToReflectionContext(
     return {};
   };
 
-  return m_reflection_ctx->addImage(
+  auto reflection_info_id = m_reflection_ctx->addImage(
       [&](swift::ReflectionSectionKind section_kind)
           -> std::pair<swift::remote::RemoteRef<void>, uint64_t> {
         auto pair = find_section_with_kind(segment, section_kind);
@@ -815,6 +818,10 @@ bool SwiftLanguageRuntimeImpl::AddObjectFileToReflectionContext(
         return find_section_with_kind(maybe_secondary_segment, section_kind);
       },
       likely_module_names);
+  if (reflection_info_id)
+    GetTypeRefCacher().registerModuleWithReflectionInfoID(module,
+                                                          *reflection_info_id);
+  return reflection_info_id.hasValue();
 }
 
 bool SwiftLanguageRuntimeImpl::AddModuleToReflectionContext(

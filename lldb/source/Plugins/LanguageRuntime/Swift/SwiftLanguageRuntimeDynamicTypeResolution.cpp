@@ -24,6 +24,7 @@
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Timer.h"
+#include "llvm/ADT/STLExtras.h"
 #include "swift/AST/Types.h"
 
 #include "swift/AST/ASTContext.h"
@@ -244,7 +245,7 @@ public:
       std::shared_ptr<swift::reflection::MemoryReader> reader)
       : m_reflection_ctx(reader) {}
 
-  bool addImage(
+  llvm::Optional<uint64_t> addImage(
       llvm::function_ref<std::pair<swift::remote::RemoteRef<void>, uint64_t>(
           swift::ReflectionSectionKind)>
           find_section,
@@ -661,6 +662,18 @@ public:
     }
     return m_runtime.emplaceClangTypeInfo(clang_type, size, bit_align, fields);
   }
+
+  void
+  registerFieldDescriptors(uint64_t InfoID,
+                           const swift::reflection::ReflectionInfo &Info,
+                           const std::vector<std::string> &Names) override {
+    return m_runtime.GetTypeRefCacher().registerFieldDescriptors(InfoID, Info,
+                                                                 Names);
+  }
+
+  llvm::Optional<std::pair<uint64_t, uint64_t>> getFieldDescriptor(const std::string &Name) override {
+    return m_runtime.GetTypeRefCacher().getFieldDescriptor(Name);
+  }
 };
 
 llvm::Optional<const swift::reflection::TypeInfo *>
@@ -1020,7 +1033,8 @@ SwiftLanguageRuntimeImpl::GetNumChildren(CompilerType type,
     if (auto *rti =
             llvm::dyn_cast_or_null<swift::reflection::RecordTypeInfo>(cti)) {
       // The superclass, if any, is an extra child.
-      if (builder.lookupSuperclass(tr))
+      LLDBTypeInfoProvider provider(*this, *ts);
+      if (builder.lookupSuperclass(tr, &provider))
         return rti->getNumFields() + 1;
       return rti->getNumFields();
     }
@@ -1246,7 +1260,8 @@ SwiftLanguageRuntimeImpl::GetIndexOfChildMemberWithName(
             tc.getClassInstanceTypeInfo(current_tr, 0, &tip));
         if (!record_ti)
           break;
-        auto *super_tr = builder.lookupSuperclass(current_tr);
+        LLDBTypeInfoProvider provider(*this, *ts);
+        auto *super_tr = builder.lookupSuperclass(current_tr, &provider);
         uint32_t offset = super_tr ? 1 : 0;
         auto found_size = findFieldWithName(record_ti->getFields(), name, false,
                                             child_indexes, offset);

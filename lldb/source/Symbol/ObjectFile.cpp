@@ -24,6 +24,8 @@
 #include "lldb/Utility/Timer.h"
 #include "lldb/lldb-private.h"
 
+#include "llvm/Support/DJB.h"
+
 using namespace lldb;
 using namespace lldb_private;
 
@@ -732,4 +734,13 @@ llvm::StringRef ObjectFile::GetReflectionSectionIdentifier(
   assert(false &&
          "Base class's GetReflectionSectionIdentifier should not be called");
   return "";
+}
+
+uint32_t ObjectFile::GetCacheHash() {
+  if (m_cache_hash)
+    return *m_cache_hash;
+  StreamString strm;
+  strm.Format("{0}-{1}-{2}", m_file, GetType(), GetStrata());
+  m_cache_hash = llvm::djbHash(strm.GetString());
+  return *m_cache_hash;
 }

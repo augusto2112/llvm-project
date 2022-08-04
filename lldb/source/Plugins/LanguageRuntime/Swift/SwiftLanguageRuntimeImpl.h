@@ -14,6 +14,7 @@
 #define liblldb_SwiftLanguageRuntimeImpl_h_
 
 #include "LLDBMemoryReader.h"
+#include "TypeRefCacher.h"
 #include "SwiftLanguageRuntime.h"
 #include "swift/Reflection/TypeLowering.h"
 #include "llvm/Support/Memory.h"
@@ -191,6 +192,7 @@ public:
     std::function<const swift::reflection::TypeRef *()> get_typeref;
   };
 
+  TypeRefCacher &GetTypeRefCacher();
   /// An abstract interface to swift::reflection::ReflectionContext
   /// objects of varying pointer sizes.  This class encapsulates all
   /// traffic to ReflectionContext and abstracts the detail that
@@ -210,7 +212,7 @@ public:
 
     virtual ~ReflectionContextInterface();
 
-    virtual bool addImage(
+    virtual llvm::Optional<uint64_t> addImage(
         llvm::function_ref<std::pair<swift::remote::RemoteRef<void>, uint64_t>(
             swift::ReflectionSectionKind)>
             find_section,
@@ -362,6 +364,7 @@ private:
   /// Lazily initialize the reflection context. Return \p nullptr on failure.
   ReflectionContextInterface *GetReflectionContext();
 
+
   /// Lazily initialize and return \p m_SwiftNativeNSErrorISA.
   llvm::Optional<lldb::addr_t> GetSwiftNativeNSErrorISA();
 
@@ -381,6 +384,9 @@ private:
   /// Reflection context.
   /// \{
   std::unique_ptr<ReflectionContextInterface> m_reflection_ctx;
+
+  TypeRefCacher m_typeref_cacher;
+
 
   /// Record modules added through ModulesDidLoad, which are to be
   /// added to the reflection context once it's being initialized.

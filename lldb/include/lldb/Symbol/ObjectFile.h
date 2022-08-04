@@ -19,6 +19,8 @@
 #include "lldb/Utility/FileSpec.h"
 #include "lldb/Utility/UUID.h"
 #include "lldb/lldb-private.h"
+#include "llvm/ADT/Optional.h"
+#include "llvm/Support/Threading.h"
 #include "llvm/Support/VersionTuple.h"
 
 namespace swift {
@@ -714,6 +716,15 @@ public:
     return false;
   }
 
+  /// Get a hash that can be used for caching object file releated information.
+  ///
+  /// Data for object files can be cached between runs of debug sessions and
+  /// a module can end up using a main file and a symbol file, both of which
+  /// can be object files. So we need a unique hash that identifies an object
+  /// file when storing cached data.
+  uint32_t GetCacheHash();
+
+
 protected:
   // Member variables.
   FileSpec m_file;
@@ -731,6 +742,13 @@ protected:
   std::unique_ptr<lldb_private::SectionList> m_sections_up;
   std::unique_ptr<lldb_private::Symtab> m_symtab_up;
   uint32_t m_synthetic_symbol_idx;
+  /// We need a llvm::once_flag that we can use to avoid locking the module
+  /// lock and deadlocking LLDB. See comments in ObjectFile::GetSymtab() for
+  /// the full details. We also need to be able to clear the symbol table, so we
+  /// need to use a std::unique_ptr to a llvm::once_flag so if we clear the
+  /// symbol table, we can have a new once flag to use when it is created again.
+  std::unique_ptr<llvm::once_flag> m_symtab_once_up;
+  llvm::Optional<uint32_t> m_cache_hash;
 
   /// Sets the architecture for a module.  At present the architecture can
   /// only be set if it is invalid.  It is not allowed to switch from one
