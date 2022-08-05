@@ -1,7 +1,9 @@
 #include "TypeRefCacher.h"
 
+#include "llvm/Support/Compression.h"
 #include "lldb/Core/DataFileCache.h"
 #include "lldb/Utility/DataEncoder.h"
+
 
 using namespace lldb;
 using namespace lldb_private;
@@ -68,7 +70,16 @@ void TypeRefCacher::registerFieldDescriptors(
   }
   auto module = m_info_to_module[InfoID];
   auto UUID = module->GetUUID().GetAsString();
-  index_cache->SetCachedData(UUID, encoder.GetData());
+  llvm::SmallString<1> Compressed;
+
+  llvm::StringRef data((const char *)encoder.GetData().data(), encoder.GetData().size());
+  auto error = llvm::zlib::compress(data, Compressed);
+  if (error) {
+    assert(false);
+    llvm::consumeError(std::move(error));
+  }
+  llvm::ArrayRef<uint8_t> compressed((uint8_t *)Compressed.data(), Compressed.size());
+  index_cache->SetCachedData(UUID, compressed); 
 }
 
 llvm::Optional<std::pair<uint64_t, uint64_t>> 
