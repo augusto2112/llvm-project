@@ -4323,7 +4323,7 @@ size_t SwiftASTContext::FindType(const char *name,
 }
 
 CompilerType SwiftASTContext::ImportType(CompilerType &type, Status &error) {
-  VALID_OR_RETURN(CompilerType());
+  VALID_OR_RETURN(CompilerType());;
   LLDB_SCOPED_TIMER();
 
   if (m_ast_context_ap.get() == NULL)
@@ -5696,8 +5696,7 @@ SwiftASTContext::GetBitSize(opaque_compiler_type_t type,
     if (swift_bound_type && swift_bound_type->hasTypeParameter()) {
       LOG_PRINTF(GetLog(LLDBLog::Types), "Can't bind type: %s",
                  bound_type.GetTypeName().AsCString());
-      return {};
-    }
+    } else 
 
     // Note thay the bound type may be in a different AST context.
     return bound_type.GetBitSize(exe_scope);
@@ -5707,14 +5706,14 @@ SwiftASTContext::GetBitSize(opaque_compiler_type_t type,
   // pointer in size to print them correctly. This is not true for
   // swift (where functions aren't necessarily a single pointer in
   // size), so we need to work around the limitation here.
-  if (swift_can_type->getKind() == swift::TypeKind::Function)
-    return GetPointerByteSize() * 8;
+  /* if (swift_can_type->getKind() == swift::TypeKind::Function) */
+  /*   return GetPointerByteSize() * 8; */
 
-  // Ask the static type type system.
-  const swift::irgen::FixedTypeInfo *fixed_type_info =
-      GetSwiftFixedTypeInfo(type);
-  if (fixed_type_info)
-    return fixed_type_info->getFixedSize().getValue() * 8;
+  /* // Ask the static type type system. */
+  /* const swift::irgen::FixedTypeInfo *fixed_type_info = */
+  /*     GetSwiftFixedTypeInfo(type); */
+  /* if (fixed_type_info) */
+  /*   return fixed_type_info->getFixedSize().getValue() * 8; */
 
   // Ask the dynamic type system.
   if (!exe_scope)
@@ -5746,18 +5745,18 @@ SwiftASTContext::GetByteStride(opaque_compiler_type_t type,
     if (swift_bound_type && swift_bound_type->hasTypeParameter()) {
       LOG_PRINTF(GetLog(LLDBLog::Types), "Can't bind type: %s",
                  bound_type.GetTypeName().AsCString());
-      return {};
     }
+    else
 
     // Note thay the bound type may be in a different AST context.
     return bound_type.GetByteStride(exe_scope);
   }
 
-  // Ask the static type type system.
-  const swift::irgen::FixedTypeInfo *fixed_type_info =
-      GetSwiftFixedTypeInfo(type);
-  if (fixed_type_info)
-    return fixed_type_info->getFixedStride().getValue();
+  /* // Ask the static type type system. */
+  /* const swift::irgen::FixedTypeInfo *fixed_type_info = */
+  /*     GetSwiftFixedTypeInfo(type); */
+  /* if (fixed_type_info) */
+  /*   return fixed_type_info->getFixedStride().getValue(); */
 
   // Ask the dynamic type system.
   if (!exe_scope)
@@ -5789,17 +5788,17 @@ SwiftASTContext::GetTypeBitAlign(opaque_compiler_type_t type,
     if (swift_bound_type && swift_bound_type->hasTypeParameter()) {
       LOG_PRINTF(GetLog(LLDBLog::Types), "Can't bind type: %s",
                  bound_type.GetTypeName().AsCString());
-      return {};
 
     }
+    else
     // Note thay the bound type may be in a different AST context.
     return bound_type.GetTypeBitAlign(exe_scope);
   }
 
-  const swift::irgen::FixedTypeInfo *fixed_type_info =
-      GetSwiftFixedTypeInfo(type);
-  if (fixed_type_info)
-    return fixed_type_info->getFixedAlignment().getValue() * 8;
+  /* const swift::irgen::FixedTypeInfo *fixed_type_info = */
+  /*     GetSwiftFixedTypeInfo(type); */
+  /* if (fixed_type_info) */
+  /*   return fixed_type_info->getFixedAlignment().getValue() * 8; */
 
   // Ask the dynamic type system.
   if (!exe_scope)

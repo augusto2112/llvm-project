@@ -68,14 +68,15 @@ public:
     swift::VarDecl::Introducer GetVarIntroducer() const;
     bool GetIsCaptureList() const;
 
-    VariableInfo() : m_type(), m_name(), m_metadata() {}
+    VariableInfo() : m_type(), m_name(), m_metadata(), m_fully_realized() {}
 
     VariableInfo(CompilerType &type, swift::Identifier name,
-                 VariableMetadataSP metadata, 
-                 swift::VarDecl::Introducer introducer, 
+                 VariableMetadataSP metadata,
+                 swift::VarDecl::Introducer introducer, bool fully_realized,
                  bool is_capture_list = false)
         : m_type(type), m_name(name), m_var_introducer(introducer),
-          m_is_capture_list(is_capture_list), m_metadata(metadata) {}
+          m_is_capture_list(is_capture_list), m_metadata(metadata),
+          m_fully_realized(fully_realized) {}
 
     template <class T> bool MetadataIs() const {
       return (m_metadata && m_metadata->GetType() == T::Type());
@@ -97,6 +98,9 @@ public:
 
   public:
     VariableMetadataSP m_metadata;
+    swift::FuncDecl *containing_function = nullptr;
+    bool m_fully_realized;
+    
   };
 
   SwiftASTManipulatorBase(swift::SourceFile &source_file, bool repl)
@@ -126,6 +130,8 @@ protected:
   swift::FuncDecl *m_function_decl = nullptr;
   /// The wrapper that invokes the right generic function.
   swift::FuncDecl *m_wrapper_decl = nullptr;
+
+  swift::FuncDecl *m_generic_decl = nullptr;
   /// The extension m_function_decl lives in, if it's a method.
   swift::ExtensionDecl *m_extension_decl = nullptr;
   /// The do{}catch(){} statement whose body is the main body.
@@ -184,6 +190,8 @@ public:
                                         bool make_private = true);
 
   bool FixupResultAfterTypeChecking(Status &error);
+
+  void AddTypeAsParameterToFunction();
 
   static const char *GetArgumentName() { return "$__lldb_arg"; }
   static const char *GetResultName() { return "$__lldb_result"; }

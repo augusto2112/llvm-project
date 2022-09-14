@@ -44,6 +44,7 @@
 
 #include "llvm-c/Analysis.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/LLVMContext.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
@@ -451,9 +452,9 @@ static CompilerType GetSwiftTypeForVariableValueObject(
   CompilerType result = valobj_sp->GetCompilerType();
   if (!result)
     return {};
-  result = runtime->BindGenericTypeParameters(*stack_frame_sp, result);
-  if (!result)
-    return {};
+  /* result = runtime->BindGenericTypeParameters(*stack_frame_sp, result); */
+  /* if (!result) */
+  /*   return {}; */
   if (!result.GetTypeSystem()->SupportsLanguage(lldb::eLanguageTypeSwift))
     return {};
   return result;
@@ -544,11 +545,11 @@ static void AddRequiredAliases(Block *block, lldb::StackFrameSP &stack_frame_sp,
   if (!imported_self_type.IsValid())
     return;
 
-  auto *stack_frame = stack_frame_sp.get();
-  imported_self_type = swift_runtime->BindGenericTypeParameters(
-      *stack_frame, imported_self_type);
-  if (!imported_self_type)
-    return;
+  /* auto *stack_frame = stack_frame_sp.get(); */
+  /* imported_self_type = swift_runtime->BindGenericTypeParameters( */
+  /*     *stack_frame, imported_self_type); */
+  /* if (!imported_self_type) */
+  /*   return; */
 
   {
     auto *swift_type_system = llvm::dyn_cast_or_null<TypeSystemSwift>(
@@ -665,7 +666,7 @@ static llvm::Optional<llvm::Error> AddVariableInfo(
   const char *overridden_name = name_cstr;
   if (is_self)
     overridden_name = "$__lldb_injected_self";
-
+  
   if (processed_variables.count(overridden_name))
     return {};
 
@@ -678,27 +679,32 @@ static llvm::Optional<llvm::Error> AddVariableInfo(
   Status error;
   CompilerType target_type = ast_context.ImportType(var_type, error);
 
+   /* if (is_self) { */ 
+   /*   auto &ts = ast_context.GetTypeSystemSwiftTypeRef(); */ 
+   /*   target_type = ts.GetTypeFromMangledTypename(ConstString("$sBpD")); */ 
+   /* } */ 
   // If the import failed, give up.
   if (!target_type.IsValid())
     return {};
 
   // If we couldn't fully realize the type, then we aren't going
   // to get very far making a local out of it, so discard it here.
+  bool fully_realized = SwiftASTContext::IsFullyRealized(target_type);
   Log *log = GetLog(LLDBLog::Types | LLDBLog::Expressions);
-  if (!SwiftASTContext::IsFullyRealized(target_type)) {
-    if (log)
-      log->Printf("Discarding local %s because we couldn't fully realize it, "
-                  "our best attempt was: %s.",
-                  name_cstr, target_type.GetDisplayTypeName().AsCString("<unknown>"));
-    // Not realizing self is a fatal error for an expression and the
-    // Swift compiler error alone is not particularly useful.
-    if (is_self)
-      return make_error<StringError>(
-          inconvertibleErrorCode(),
-          "Couldn't realize Swift AST type of self. Hint: using `v` to "
-          "directly inspect variables and fields may still work.");
-    return {};
-  }
+  /* if (!SwiftASTContext::IsFullyRealized(target_type)) { */
+  /*   if (log) */
+  /*     log->Printf("Discarding local %s because we couldn't fully realize it, " */
+  /*                 "our best attempt was: %s.", */
+  /*                 name_cstr, target_type.GetDisplayTypeName().AsCString("<unknown>")); */
+  /*   // Not realizing self is a fatal error for an expression and the */
+  /*   // Swift compiler error alone is not particularly useful. */
+  /*   if (is_self) */
+  /*     return make_error<StringError>( */
+  /*         inconvertibleErrorCode(), */
+  /*         "Couldn't realize Swift AST type of self. Hint: using `v` to " */
+  /*         "directly inspect variables and fields may still work."); */
+  /*   return {}; */
+  /* } */
 
   if (log && is_self)
     if (swift::Type swift_type = GetSwiftType(target_type)) {
@@ -729,13 +735,16 @@ static llvm::Optional<llvm::Error> AddVariableInfo(
       variable_sp->IsArtificial(),
       variable_sp->GetLocationIsConstantValueData(),
       variable_sp->IsStaticMember(), variable_sp->IsConstant());
+
   SwiftASTManipulatorBase::VariableMetadataSP metadata_sp(
       new VariableMetadataVariable(patched_variable_sp));
+
   SwiftASTManipulator::VariableInfo variable_info(
       target_type, ast_context.GetASTContext()->getIdentifier(overridden_name),
       metadata_sp,
       variable_sp->IsConstant() ? swift::VarDecl::Introducer::Let
-                                : swift::VarDecl::Introducer::Var);
+                                : swift::VarDecl::Introducer::Var,
+      fully_realized);
 
   local_variables.push_back(variable_info);
   processed_variables.insert(overridden_name);
@@ -867,7 +876,7 @@ static void ResolveSpecialNames(
                    : swift::VarDecl::Introducer::Let;
     SwiftASTManipulator::VariableInfo variable_info(
         target_type, ast_context.GetASTContext()->getIdentifier(name.str()),
-        metadata_sp, introducer);
+        metadata_sp, introducer, false);
 
     local_variables.push_back(variable_info);
   }
@@ -1023,11 +1032,11 @@ MaterializeVariable(SwiftASTManipulatorBase::VariableInfo &variable,
 
   auto compiler_type = variable.GetType();
   // Add the persistent variable as a typeref compiler type.
-  if (auto *swift_ast_ctx =
-          llvm::dyn_cast<SwiftASTContext>(compiler_type.GetTypeSystem())) {
-    variable.SetType(
-        swift_ast_ctx->GetTypeRefType(compiler_type.GetOpaqueQualType()));
-  }
+  /* if (auto *swift_ast_ctx = */
+  /*         llvm::dyn_cast<SwiftASTContext>(compiler_type.GetTypeSystem())) { */
+  /*   variable.SetType( */
+  /*       swift_ast_ctx->GetTypeRefType(compiler_type.GetOpaqueQualType())); */
+  /* } */
 
   if (is_result || is_error) {
     needs_init = true;
@@ -1457,6 +1466,8 @@ static llvm::Expected<ParsedExpression> ParseAndImport(
       return make_error<StringError>(inconvertibleErrorCode(),
                                      "Could not add external variables.");
 
+    code_manipulator->AddTypeAsParameterToFunction();
+
     stack_frame_sp.reset();
   }
 
@@ -1495,6 +1506,92 @@ bool SwiftExpressionParser::Complete(CompletionRequest &request, unsigned line,
   return false;
 }
 
+static void RedirectDummyCallBackToRealFunction(llvm::Module *module, uint64_t metadata_address) {
+  static int flag = 1;
+  if (!flag)
+    return;
+  flag = 0;
+  llvm::Function *lldb_expr_func = nullptr;
+  llvm::Function *wrapped_func = nullptr;
+  llvm::Function *generic_func = nullptr;
+  for (auto &f : module->getFunctionList()) {
+    if (f.getName().contains("__lldb_expr")) {
+      if (f.getName().contains("wrapped"))
+        wrapped_func = &f;
+      else if (f.getName().contains("generic"))
+        generic_func = &f;
+      else
+        lldb_expr_func = &f;
+    }
+    if (f.getName().contains("instantiateConcreteTypeFunc"))
+      generic_func = &f;
+  }
+
+  assert(lldb_expr_func && wrapped_func && generic_func);
+
+  auto &basic_blocks = lldb_expr_func->getBasicBlockList();
+  if (basic_blocks.size() != 1)
+    return;
+
+  // Iterate backwards since the call will be at the end.
+  auto &basic_block = basic_blocks.back();
+  auto it = basic_block.getInstList().rbegin();
+  llvm::IRBuilder<> builder(&*it);
+  auto generic_func_type = generic_func->getFunctionType();
+  llvm::Type *param1 = generic_func_type->getParamType(1);
+  llvm::Type *param2 = generic_func_type->getParamType(2);
+
+  llvm::Instruction *first = nullptr;
+  llvm::Instruction *second = nullptr;
+
+  int i = 0;
+  for (auto &I : basic_block) {
+   if (i == 6) 
+      first = &I;
+
+   if (i == 10) 
+      second = &I;
+   i++;
+  }
+  auto *arg0 = lldb_expr_func->getArg(0);
+
+  auto ptr_type = generic_func_type->getParamType(0);
+  auto l2 = builder.CreateLoad(ptr_type,
+                     second);
+  auto *new_arg1 = builder.CreateBitCast(first, param1);
+  auto *new_arg2 = builder.CreateBitCast(l2, param2);
+  builder.CreateCall(generic_func_type, generic_func, {arg0, new_arg1, new_arg2});
+  /* define hidden swiftcc void @"$s13__lldb_expr_103$__a1_B0yySpyypGF"(i8* %0) #0 { */
+  /* %2 = alloca i8*, align 8 */
+  /* %3 = bitcast i8** %2 to i8* */
+  /* call void @llvm.memset.p0i8.i64(i8* align 8 %3, i8 0, i64 8, i1 false) */
+  /* store i8* %0, i8** %2, align 8 */
+  /* %4 = bitcast i8* %0 to i8** */
+  /* %5 = load i8*, i8** %4, align 8 */
+  /* %6 = bitcast i8* %5 to i8** */
+  /* %7 = getelementptr inbounds i8, i8* %0, i64 8 */
+  /* %8 = bitcast i8* %7 to i8** */
+  /* %9 = load i8*, i8** %8, align 8 */
+  /* %10 = bitcast i8* %9 to i8** */
+  /* ret void */
+/* } */
+  /* builder.CreateBitCast(, param1) */
+  /* auto *arg = lldb_expr_func->getArg(2); */
+  /* auto alloca = builder.CreateAlloca(arg->getType()->getPointerElementType()); */
+  /* arg->getType()->dump(); */
+  /* alloca->getType()->dump(); */
+  /* arg->replaceAllUsesWith(alloca); */
+  /* llvm::Argument *buffer = lldb_expr_func->getArg(0); */
+  /* auto i64_type = llvm::IntegerType::get(module->getContext(), 64); */
+  /* auto gep = */
+  /*     builder.CreateInBoundsGEP(llvm::Type::getInt8Ty(module->getContext()), */
+  /*                               buffer, llvm::ConstantInt::get(i64_type, 8)); */
+  /* auto memcpy = builder.CreateMemCpy(alloca, {}, gep, {}, 8); */
+  module->dump();
+  /* %32 = getelementptr inbounds i8, i8* %0, i64 8 */
+  /* %33 = bitcast i8* %32 to i8** */
+  /* %34 = load i8*, i8** %33, align 8 */
+}
 unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
                                       uint32_t first_line, uint32_t last_line) {
   Log *log = GetLog(LLDBLog::Expressions);
@@ -1560,6 +1657,16 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
     if (!user_import)
       m_sc.target_sp->SetUseScratchTypesystemPerModule(true);
     return 2;
+  }
+
+  if (log) {
+    std::string s;
+    llvm::raw_string_ostream ss(s);
+    parsed_expr->source_file.dump(ss);
+    ss.flush();
+
+    log->Printf("Source file before type checking:");
+    log->PutCString(s.c_str());
   }
 
   swift::bindExtensions(parsed_expr->module);
@@ -1725,6 +1832,15 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
         variable_map[name] = *var_info;
       }
 
+  if (log) {
+    std::string s;
+    llvm::raw_string_ostream ss(s);
+    parsed_expr->source_file.dump(ss);
+    ss.flush();
+
+    log->Printf("Source file before SILgen:");;
+    log->PutCString(s.c_str());
+  }
   // FIXME: Should share TypeConverter instances
   std::unique_ptr<swift::Lowering::TypeConverter> sil_types(
       new swift::Lowering::TypeConverter(
@@ -1824,6 +1940,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
     return 1;
   }
 
+  RedirectDummyCallBackToRealFunction(m_module.get(), 0);
   if (log) {
     std::string s;
     llvm::raw_string_ostream ss(s);

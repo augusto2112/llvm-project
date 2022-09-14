@@ -27,6 +27,7 @@
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsFrontend.h"
 #include "swift/AST/Expr.h"
+#include "swift/AST/GenericParamList.h"
 #include "swift/AST/Initializer.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/NameLookup.h"
@@ -204,27 +205,39 @@ extension %s$__lldb_context {
     %s
   }
 }
+
 @LLDBDebuggerFunction %s
-func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+func $__lldb_generic_expr<T>(_ $__lldb_arg: UnsafeMutablePointer<Any>, variable: T, variable2: T) {
   do {
-    $__lldb_injected_self.$__lldb_wrapped_expr_%u(
+    variable.$__lldb_wrapped_expr_%u(
       $__lldb_arg
     )
   }
 }
+
+@LLDBDebuggerFunction %s
+func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+}
 )",
                           optional_extension, availability.c_str(),
-                          func_decorator, current_counter,
-                          wrapped_expr_text.GetData(), availability.c_str(),
-                          current_counter);
+                          func_decorator, current_counter, 
+                          wrapped_expr_text.GetData(), availability.c_str(), current_counter, availability.c_str());
 
-    first_body_line = 5;
+    first_body_line = 5;;
   } else {
-    wrapped_stream.Printf(
-        "@LLDBDebuggerFunction %s\n"
-        "func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {\n"
-        "%s" // This is the expression text (with newlines).
-        "}\n",
+    wrapped_stream.Printf(R"(
+@LLDBDebuggerFunction %s\n
+func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+$lldb_dummy($__lldb_arg, t)
+}
+
+@LLDBDebuggerFunction
+func $__lldb_wrapped_expr<T>(_ $__lldb_arg: UnsafeMutablePointer<Any>, _ t: T) {
+%s 
+}
+
+func $__lldb_dummy(_: UnsafeMutablePointer<Any>, _: UnsafeMutablePointer<Any>, _: UnsafeMutablePointer<Any>) {}
+)",
         availability.c_str(), wrapped_expr_text.GetData());
     first_body_line = 4;
   }
@@ -264,6 +277,9 @@ void SwiftASTManipulatorBase::DoInitialization() {
     swift::FuncDecl *toplevel_decl = nullptr;
     /// This is optional.
     swift::FuncDecl *ext_method_decl = nullptr;
+
+    swift::FuncDecl *generic_decl = nullptr;
+
     /// This is an optional extension holding the above function.
     swift::ExtensionDecl *extension_decl = nullptr;
 
@@ -285,7 +301,10 @@ void SwiftASTManipulatorBase::DoInitialization() {
         }
       }
       // Not in an extenstion,
-      toplevel_decl = FD;
+      if (!generic_decl)
+        generic_decl = FD;
+      else 
+        toplevel_decl = FD;
       return false;
     }
   };
@@ -297,6 +316,7 @@ void SwiftASTManipulatorBase::DoInitialization() {
   if (m_extension_decl) {
     m_function_decl = func_finder.ext_method_decl;
     m_wrapper_decl = func_finder.toplevel_decl;
+    m_generic_decl = func_finder.generic_decl;
   } else {
     m_function_decl = func_finder.toplevel_decl;
     m_wrapper_decl = nullptr;
@@ -839,6 +859,47 @@ void SwiftASTManipulator::InsertError(swift::VarDecl *error_var,
   m_catch_stmt->setBody(body_stmt);
 }
 
+void SwiftASTManipulator::AddTypeAsParameterToFunction() {
+  auto func = m_generic_decl;
+  auto interface = func->getInterfaceType();
+
+  auto param_list = func->getParameters();
+  auto gen_param_list = func->getGenericParams();
+  llvm::SmallVector<swift::ParamDecl *> new_params(param_list->begin(),
+                                                   param_list->end());
+  llvm::SmallVector<swift::GenericTypeParamDecl *> new_generic_params;
+
+  swift::ASTContext &ast_context = m_source_file.getASTContext();
+  int i = 0;
+  std::string arg ("arg_");
+  std::string t ("T");
+  int num_generic_params = 0;
+  for (auto &var : m_variables) {
+    if (var.containing_function == m_wrapper_decl) {
+      auto type = GetSwiftType(var.GetType());
+      type.dump();
+      auto identifier =
+          ast_context.getIdentifier((arg + std::to_string(i)).c_str());
+      auto *param_decl = swift::ParamDecl::createImplicit(
+          ast_context, identifier, identifier, type, func->getDeclContext());
+      new_params.emplace_back(param_decl);
+      if (type->hasArchetype()) {
+        auto generic_id = ast_context.getIdentifier(t + std::to_string(num_generic_params));
+        auto *generic_param = swift::GenericTypeParamDecl::create(
+            func->getDeclContext(), generic_id, swift::SourceLoc(), false,
+            0, num_generic_params, false, nullptr); 
+        new_generic_params.emplace_back(generic_param);
+      }
+    }
+  }
+  auto new_parameter_list = swift::ParameterList::create(ast_context, new_params);
+  auto new_generic_param_list =
+      swift::GenericParamList::create(ast_context, swift::SourceLoc(),
+                                      new_generic_params, swift::SourceLoc());
+  auto new_func = swift::FuncDecl::create(func->getASTContext(), func->getFuncLoc(), func->getStaticSpelling(), func->getFuncLoc(), func->getName(), func->getNameLoc(), func->isAsyncContext(), func->getAsyncLoc(), func->hasThrows(), func->getThrowsLoc(), new_generic_param_list, new_parameter_list, func->getResultTypeRepr(), func->getParent());
+  new_func->dump();
+}
+
 bool SwiftASTManipulator::FixupResultAfterTypeChecking(Status &error) {
   if (!IsValid()) {
     error.SetErrorString("Operating on invalid SwiftASTManipulator");
@@ -1013,11 +1074,21 @@ swift::FuncDecl *SwiftASTManipulator::GetFunctionToInjectVariableInto(
     const SwiftASTManipulator::VariableInfo &variable, bool is_self) const {
   // The only variable that we inject in the wrapper is self, so we can
   // call the function declared in the type extension.
-  return is_self ? m_wrapper_decl : m_function_decl;
+  if (is_self)
+    return m_wrapper_decl;
+  if(variable.GetType().IsPointerType())
+    return m_wrapper_decl;
+  return m_function_decl;
 }
 
 llvm::Optional<swift::Type> SwiftASTManipulator::GetSwiftTypeForVariable(
     const SwiftASTManipulator::VariableInfo &variable, bool is_self) const {
+  if (!variable.m_fully_realized) {
+    auto ts = llvm::cast<TypeSystemSwift>(variable.GetType().GetTypeSystem());
+    auto type = ts->GetTypeFromMangledTypename(ConstString("$sBpD"));
+    return GetSwiftType(type);
+  }
+
   auto *type_system_swift =
       llvm::dyn_cast_or_null<TypeSystemSwift>(variable.m_type.GetTypeSystem());
 
@@ -1065,6 +1136,7 @@ llvm::Optional<swift::Type> SwiftASTManipulator::GetSwiftTypeForVariable(
 swift::VarDecl *SwiftASTManipulator::GetVarDeclForVariableInFunction(
     const SwiftASTManipulator::VariableInfo &variable, bool is_self,
     swift::FuncDecl *containing_function) {
+
   const auto maybe_swift_type = GetSwiftTypeForVariable(variable, is_self);
 
   if (!maybe_swift_type)
@@ -1127,7 +1199,7 @@ bool SwiftASTManipulator::AddExternalVariables(
 
   Log *log = GetLog(LLDBLog::Expressions);
 
-  swift::ASTContext &ast_context = m_source_file.getASTContext();
+  swift::ASTContext &ast_context = m_source_file.getASTContext();;
 
   if (m_repl) {
     // In the REPL, we're only adding the result variable.
@@ -1233,6 +1305,7 @@ bool SwiftASTManipulator::AddExternalVariables(
                     s.c_str());
       }
 
+      variable.containing_function = containing_function;
       m_variables.push_back(variable);
     }
 

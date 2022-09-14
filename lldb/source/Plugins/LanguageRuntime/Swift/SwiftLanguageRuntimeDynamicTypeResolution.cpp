@@ -2633,9 +2633,9 @@ bool SwiftLanguageRuntimeImpl::GetDynamicTypeAndAddress(
       if (!frame)
         return false;
 
-      bound_type = BindGenericTypeParameters(*frame.get(), val_type);
-      if (!bound_type)
-        return false;
+    CompilerType bound_type = val_type; //BindGenericTypeParameters(*frame.get(), val_type);;;
+    if (!bound_type)
+      return false;
     } else {
       bound_type = val_type;
     }
