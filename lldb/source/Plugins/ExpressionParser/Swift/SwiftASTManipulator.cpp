@@ -207,9 +207,9 @@ extension %s$__lldb_context {
 }
 
 @LLDBDebuggerFunction %s
-func $__lldb_generic_expr<T>(_ $__lldb_arg: UnsafeMutablePointer<Any>, variable: T, variable2: T) {
+func $__lldb_generic_expr(_ $__lldb_arg: UnsafeMutablePointer<Any>) {
   do {
-    variable.$__lldb_wrapped_expr_%u(
+    $__lldb_injected_self.$__lldb_wrapped_expr_%u(
       $__lldb_arg
     )
   }
@@ -859,46 +859,6 @@ void SwiftASTManipulator::InsertError(swift::VarDecl *error_var,
   m_catch_stmt->setBody(body_stmt);
 }
 
-void SwiftASTManipulator::AddTypeAsParameterToFunction() {
-  auto func = m_generic_decl;
-  auto interface = func->getInterfaceType();
-
-  auto param_list = func->getParameters();
-  auto gen_param_list = func->getGenericParams();
-  llvm::SmallVector<swift::ParamDecl *> new_params(param_list->begin(),
-                                                   param_list->end());
-  llvm::SmallVector<swift::GenericTypeParamDecl *> new_generic_params;
-
-  swift::ASTContext &ast_context = m_source_file.getASTContext();
-  int i = 0;
-  std::string arg ("arg_");
-  std::string t ("T");
-  int num_generic_params = 0;
-  for (auto &var : m_variables) {
-    if (var.containing_function == m_wrapper_decl) {
-      auto type = GetSwiftType(var.GetType());
-      type.dump();
-      auto identifier =
-          ast_context.getIdentifier((arg + std::to_string(i)).c_str());
-      auto *param_decl = swift::ParamDecl::createImplicit(
-          ast_context, identifier, identifier, type, func->getDeclContext());
-      new_params.emplace_back(param_decl);
-      if (type->hasArchetype()) {
-        auto generic_id = ast_context.getIdentifier(t + std::to_string(num_generic_params));
-        auto *generic_param = swift::GenericTypeParamDecl::create(
-            func->getDeclContext(), generic_id, swift::SourceLoc(), false,
-            0, num_generic_params, false, nullptr); 
-        new_generic_params.emplace_back(generic_param);
-      }
-    }
-  }
-  auto new_parameter_list = swift::ParameterList::create(ast_context, new_params);
-  auto new_generic_param_list =
-      swift::GenericParamList::create(ast_context, swift::SourceLoc(),
-                                      new_generic_params, swift::SourceLoc());
-  auto new_func = swift::FuncDecl::create(func->getASTContext(), func->getFuncLoc(), func->getStaticSpelling(), func->getFuncLoc(), func->getName(), func->getNameLoc(), func->isAsyncContext(), func->getAsyncLoc(), func->hasThrows(), func->getThrowsLoc(), new_generic_param_list, new_parameter_list, func->getResultTypeRepr(), func->getParent());
-  new_func->dump();
-}
 
 bool SwiftASTManipulator::FixupResultAfterTypeChecking(Status &error) {
   if (!IsValid()) {
@@ -1190,6 +1150,64 @@ static void AddNodesToBeginningFunction(
       body->getRBraceLoc());
 
   function->setBody(new_function_body, function->getBodyKind());
+}
+
+void SwiftASTManipulator::AddTypeAsParameterToFunction() {
+  auto func = m_generic_decl;
+  auto interface = func->getInterfaceType();
+
+  auto param_list = func->getParameters();
+  auto gen_param_list = func->getGenericParams();
+  llvm::SmallVector<swift::ParamDecl *> new_params(param_list->begin(),
+                                                   param_list->end());
+  llvm::SmallVector<swift::GenericTypeParamDecl *> new_generic_params;
+
+  swift::ASTContext &ast_context = m_source_file.getASTContext();
+  int i = 0;
+  std::string arg ("arg_");
+  std::string t ("T");
+  int num_generic_params = 0;
+  for (auto &variable : m_variables) {
+    if (variable.containing_function == m_wrapper_decl) {
+      auto type2 = GetSwiftType(variable.GetType());
+      type2.dump();
+      bool is_self = !variable.m_name.str().compare("$__lldb_injected_self");
+      swift::Identifier identifier =
+          is_self
+              ? ast_context.getIdentifier("$__lldb_injected_self")
+              : ast_context.getIdentifier((arg + std::to_string(i)).c_str());
+      auto *param_decl = swift::ParamDecl::createImplicit(
+          ast_context, identifier, identifier, type2, func->getDeclContext());
+      new_params.emplace_back(param_decl);
+      if (type2->hasTypeParameter()) {
+        auto generic_id = ast_context.getIdentifier(t + std::to_string(num_generic_params));
+        auto *generic_param = swift::GenericTypeParamDecl::create(
+            func->getDeclContext(), generic_id, swift::SourceLoc(), false,
+            0, num_generic_params, false, nullptr); 
+        new_generic_params.emplace_back(generic_param);
+      }
+    }
+  }
+  auto new_parameter_list = swift::ParameterList::create(ast_context, new_params);
+  auto new_generic_param_list =
+      swift::GenericParamList::create(ast_context, swift::SourceLoc(),
+                                      new_generic_params, swift::SourceLoc());
+  auto identifier = ast_context.getIdentifier("$__lldb_new_generic_expr");
+  swift::DeclName declName(ast_context, swift::DeclBaseName(identifier),
+                  new_parameter_list);
+  auto new_func = swift::FuncDecl::create(
+      func->getASTContext(), func->getFuncLoc(), func->getStaticSpelling(),
+      func->getFuncLoc(), declName, swift::SourceLoc(),
+      func->isAsyncContext(), func->getAsyncLoc(), func->hasThrows(),
+      func->getThrowsLoc(), new_generic_param_list, new_parameter_list,
+      func->getResultTypeRepr(), func->getParent());
+  new_func->setBody(func->getBody(), func->getBodyKind());
+
+  func->setBody(nullptr, swift::FuncDecl::BodyKind::None);
+  m_source_file.addTopLevelDecl(new_func);
+  m_generic_decl = func;
+  new_func->dump();
+  m_source_file.dump();
 }
 
 bool SwiftASTManipulator::AddExternalVariables(
