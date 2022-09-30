@@ -77,6 +77,7 @@ public:
   CompilerType
   GetTypeFromMangledTypename(ConstString mangled_typename) override;
 
+  bool ContainsUnresolvedGenericType(lldb::opaque_compiler_type_t type);
   CompilerType GetGenericArgumentType(lldb::opaque_compiler_type_t type,
                                       size_t idx) override;
 

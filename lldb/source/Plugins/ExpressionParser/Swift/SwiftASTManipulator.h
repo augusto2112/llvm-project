@@ -59,6 +59,29 @@ public:
     unsigned GetType() override { return Type(); }
   };
 
+  class VariableMetadataPersistent
+      : public SwiftASTManipulatorBase::VariableMetadata {
+  public:
+    VariableMetadataPersistent(
+        lldb::ExpressionVariableSP &persistent_variable_sp)
+        : m_persistent_variable_sp(persistent_variable_sp) {}
+
+    static constexpr unsigned Type() { return 'Pers'; }
+    unsigned GetType() override { return Type(); }
+    lldb::ExpressionVariableSP m_persistent_variable_sp;
+  };
+
+  class VariableMetadataVariable
+      : public SwiftASTManipulatorBase::VariableMetadata {
+  public:
+    VariableMetadataVariable(lldb::VariableSP &variable_sp)
+        : m_variable_sp(variable_sp) {}
+
+    static constexpr unsigned Type() { return 'Vari'; }
+    unsigned GetType() override { return Type(); }
+    lldb::VariableSP m_variable_sp;
+  };
+
   typedef std::shared_ptr<VariableMetadata> VariableMetadataSP;
 
   struct VariableInfo {
@@ -67,6 +90,9 @@ public:
     swift::VarDecl *GetDecl() const { return m_decl; }
     swift::VarDecl::Introducer GetVarIntroducer() const;
     bool GetIsCaptureList() const;
+    bool IsSelf() const {
+      return !m_name.str().compare("$__lldb_injected_self");
+    }
 
     VariableInfo() : m_type(), m_name(), m_metadata() {}
 
@@ -97,6 +123,7 @@ public:
 
   public:
     VariableMetadataSP m_metadata;
+    std::string fake_name;
   };
 
   SwiftASTManipulatorBase(swift::SourceFile &source_file, bool repl)
@@ -139,14 +166,12 @@ class SwiftASTManipulator : public SwiftASTManipulatorBase {
 public:
   SwiftASTManipulator(swift::SourceFile &source_file, bool repl);
 
-  static void WrapExpression(Stream &wrapped_stream, const char *text,
-                             bool needs_object_ptr,
-                             bool static_method,
-                             bool is_class,
-                             bool weak_self,
-                             const EvaluateExpressionOptions &options,
-                             llvm::StringRef os_version,
-                             uint32_t &first_body_line);
+  static void WrapExpression(
+      Stream &wrapped_stream, const char *text, bool needs_object_ptr,
+      bool static_method, bool is_class, bool weak_self,
+      const EvaluateExpressionOptions &options, llvm::StringRef os_version,
+      uint32_t &first_body_line,
+      llvm::MutableArrayRef<SwiftASTManipulator::VariableInfo> variables);
 
   void FindSpecialNames(llvm::SmallVectorImpl<swift::Identifier> &names,
                         llvm::StringRef prefix);

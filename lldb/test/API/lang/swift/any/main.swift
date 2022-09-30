@@ -15,7 +15,7 @@ class Class {
 
 func main() {
 	var c = Class()
-	var q : Any = c.x
+	let q : Any = c.x
 	print("hello world") // Set breakpoint here
 }
 

@@ -3790,6 +3790,21 @@ bool TypeSystemSwiftTypeRef::IsReferenceType(opaque_compiler_type_t type,
                       (ReconstructType(type), pointee_type, is_rvalue));
 }
 
+bool TypeSystemSwiftTypeRef::ContainsUnresolvedGenericType(
+    lldb::opaque_compiler_type_t type) {
+  std::function<bool(NodePointer node)> impl = [&](NodePointer node) -> bool {
+    if (node->getKind() == Node::Kind::DependentGenericParamType)
+      return true;
+    for (size_t i = 0; i < node->getNumChildren(); ++i) 
+      if (impl(node->getChild(i)))
+        return true;
+    return false;
+  };
+  Demangler dem;
+  NodePointer node = DemangleCanonicalType(dem, type);
+  return impl(node);
+}
+
 CompilerType
 TypeSystemSwiftTypeRef::GetGenericArgumentType(opaque_compiler_type_t type,
                                                size_t idx) {

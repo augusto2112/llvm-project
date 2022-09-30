@@ -2627,18 +2627,18 @@ bool SwiftLanguageRuntimeImpl::GetDynamicTypeAndAddress(
                                                 class_type_or_name, address);
   else {
     CompilerType bound_type;
-    if (type_info.AnySet(eTypeHasUnboundGeneric | eTypeHasDynamicSelf)) {
-      // Perform generic type resolution.
-      StackFrameSP frame = in_value.GetExecutionContextRef().GetFrameSP();
-      if (!frame)
-        return false;
+    /* if (type_info.AnySet(eTypeHasUnboundGeneric | eTypeHasDynamicSelf)) { */
+    /*   // Perform generic type resolution. */
+    /*   StackFrameSP frame = in_value.GetExecutionContextRef().GetFrameSP(); */
+    /*   if (!frame) */
+    /*     return false; */
 
-      bound_type = BindGenericTypeParameters(*frame.get(), val_type);
-      if (!bound_type)
-        return false;
-    } else {
+    /*   bound_type = BindGenericTypeParameters(*frame.get(), val_type); */
+    /*   if (!bound_type) */
+    /*     return false; */
+    /* } else { */
       bound_type = val_type;
-    }
+    /* } */
 
     Flags subst_type_info(bound_type.GetTypeInfo());
     if (subst_type_info.AnySet(eTypeIsClass)) {

@@ -12,15 +12,21 @@
 
 #include "SwiftASTManipulator.h"
 
+#include <sstream>
+
 #include "Plugins/LanguageRuntime/Swift/SwiftLanguageRuntime.h"
 #include "Plugins/TypeSystem/Swift/SwiftASTContext.h"
 #include "lldb/Expression/ExpressionParser.h"
 #include "lldb/Expression/ExpressionSourceCode.h"
+#include "lldb/Symbol/CompileUnit.h"
+#include "lldb/Symbol/Variable.h"
+#include "lldb/Symbol/VariableList.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Status.h"
+#include "lldb/Utility/Timer.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
 #include "swift/AST/Decl.h"
@@ -43,7 +49,6 @@
 #include "SwiftUserExpression.h"
 
 using namespace lldb_private;
-
 swift::VarDecl::Introducer
 SwiftASTManipulator::VariableInfo::GetVarIntroducer() const {
   if (m_decl)
@@ -58,17 +63,76 @@ bool SwiftASTManipulator::VariableInfo::GetIsCaptureList() const {
   else
     return m_is_capture_list;
 }
+struct InnerSignatureAndCallInfo {
+  std::string signature;
+  std::string call;
+};
 
+static InnerSignatureAndCallInfo MakeParameterListAndCall(
+    llvm::MutableArrayRef<SwiftASTManipulator::VariableInfo> variables, int n, bool self_context) {
+  std::stringstream signature;
+  std::stringstream call;
+  signature << "(_ $__lldb_arg : UnsafeMutablePointer<(T)>";
+/* extension %s$__lldb_context { */
+/*   @LLDBDebuggerFunction %s */
+/*   %s func $__lldb_wrapped_expr_%u(_ $__lldb_arg : UnsafeMutablePointer<Any>%s) { */
+/*     %s */
+/*   } */
+/* } */
+/* @LLDBDebuggerFunction %s */
+/* func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) { */
+/*   do { */
+/*     $__lldb_injected_self.$__lldb_wrapped_expr_%u( */
+/*       $__lldb_arg%s */
+/*     ) */
+/*   } */
+/* } */
+  if (self_context) 
+    call << "$__lldb_injected_self.$__lldb_wrapped_expr_" << n << "($__lldb_arg";
+  else 
+    call << "$__lldb_wrapped_expr_" << n << "($__lldb_arg";
+  
+  int i = 0;
+  for (auto &variable : variables) {
+    // Don't pass self as a parameter as it's already implicitly passed in
+    if (variable.IsSelf())
+      continue;
+
+    // Skip the artificial metadata parameters as well.
+    if (variable.GetType().GetMangledTypeName() == "$sBpD")
+      continue;
+
+    auto name = variable.GetName().str().str();
+    signature << ", _ " << name << ": ";
+    // If the variable is mutable we add an inout because the expression might 
+    // mutate it.
+    if (variable.GetVarIntroducer() == swift::VarDecl::Introducer::Var) {
+      signature << "inout ";
+    }
+    variable.fake_name = std::string("$__lldb_param_") + std::to_string(i++);
+    signature << variable.fake_name;
+
+
+    call << ", ";
+    if (variable.GetVarIntroducer() == swift::VarDecl::Introducer::Var) {
+      call << "&";
+    }
+    call << name;
+  }
+
+  signature << ")";
+  call << ")";
+
+  return {signature.str(), call.str()};
+}
 void SwiftASTManipulator::WrapExpression(
     lldb_private::Stream &wrapped_stream, const char *orig_text,
-    bool needs_object_ptr,
-    bool static_method,
-    bool is_class,
-    bool weak_self,
-    const EvaluateExpressionOptions &options,
-    llvm::StringRef os_version,
-    uint32_t &first_body_line) {
-    first_body_line = 0; // set to invalid
+    bool needs_object_ptr, bool static_method, bool is_class, bool weak_self,
+    const EvaluateExpressionOptions &options, llvm::StringRef os_version,
+    uint32_t &first_body_line,
+    llvm::MutableArrayRef<SwiftASTManipulator::VariableInfo> variables) {
+
+  first_body_line = 0; // set to invalid
   // TODO make the extension private so we're not polluting the class
   static unsigned int counter = 0;
   unsigned int current_counter = counter++;
@@ -180,6 +244,7 @@ do {
                            GetUserCodeStartMarker(), text,
                            GetUserCodeEndMarker(), GetErrorName());
 
+
   if (needs_object_ptr || static_method) {
     const char *func_decorator = "";
     if (static_method) {
@@ -196,36 +261,41 @@ do {
     const char *optional_extension =
         weak_self ? "Swift.Optional where Wrapped == " : "";
 
+    auto pair = MakeParameterListAndCall(variables, current_counter, true);;
     // The expression text is inserted into the body of $__lldb_wrapped_expr_%u.
     wrapped_stream.Printf(R"(
 extension %s$__lldb_context {
   @LLDBDebuggerFunction %s
-  %s func $__lldb_wrapped_expr_%u(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+  %s func $__lldb_wrapped_expr_%u<T>%s {
     %s
   }
 }
 @LLDBDebuggerFunction %s
-func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+func $__lldb_expr<T>(_ $__lldb_arg : UnsafeMutablePointer<(T)>) {
   do {
-    $__lldb_injected_self.$__lldb_wrapped_expr_%u(
-      $__lldb_arg
-    )
   }
 }
 )",
                           optional_extension, availability.c_str(),
-                          func_decorator, current_counter,
-                          wrapped_expr_text.GetData(), availability.c_str(),
-                          current_counter);
+                          func_decorator, current_counter, pair.signature.c_str(),
+                          wrapped_expr_text.GetData(), availability.c_str());
+                          
 
     first_body_line = 5;
   } else {
-    wrapped_stream.Printf(
-        "@LLDBDebuggerFunction %s\n"
-        "func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {\n"
-        "%s" // This is the expression text (with newlines).
-        "}\n",
-        availability.c_str(), wrapped_expr_text.GetData());
+    auto pair = MakeParameterListAndCall(variables, current_counter, false);
+    wrapped_stream.Printf(R"(
+@LLDBDebuggerFunction %s
+func $__lldb_wrapped_expr_%u%s {
+    %s
+}
+@LLDBDebuggerFunction %s
+func $__lldb_expr%u(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+  %s
+}
+)",
+  availability.c_str(), current_counter, pair.signature.c_str(), wrapped_expr_text.GetData(),
+  availability.c_str(), current_counter, pair.call.c_str());
     first_body_line = 4;
   }
 }
@@ -263,7 +333,7 @@ void SwiftASTManipulatorBase::DoInitialization() {
     /// call into \c ext_method_decl or hold the entire expression.
     swift::FuncDecl *toplevel_decl = nullptr;
     /// This is optional.
-    swift::FuncDecl *ext_method_decl = nullptr;
+    swift::FuncDecl *called_decl = nullptr;
     /// This is an optional extension holding the above function.
     swift::ExtensionDecl *extension_decl = nullptr;
 
@@ -280,12 +350,15 @@ void SwiftASTManipulatorBase::DoInitialization() {
       for (auto *DC = FD->getDeclContext(); DC; DC = DC->getParent()) {
         if (auto *extension = llvm::dyn_cast<swift::ExtensionDecl>(DC)) {
           extension_decl = extension;
-          ext_method_decl = FD;
+          called_decl = FD;
           return Action::SkipChildren();
         }
       }
       // Not in an extenstion,
-      toplevel_decl = FD;
+      if (FD->getNameStr().startswith("$__lldb_wrapped_expr"))
+        called_decl = FD;
+      else if (FD->getNameStr().startswith("$__lldb_expr"))
+        toplevel_decl = FD;
       return Action::SkipChildren();
     }
   };
@@ -294,13 +367,8 @@ void SwiftASTManipulatorBase::DoInitialization() {
   m_source_file.walk(func_finder);
 
   m_extension_decl = func_finder.extension_decl;
-  if (m_extension_decl) {
-    m_function_decl = func_finder.ext_method_decl;
-    m_wrapper_decl = func_finder.toplevel_decl;
-  } else {
-    m_function_decl = func_finder.toplevel_decl;
-    m_wrapper_decl = nullptr;
-  }
+  m_function_decl = func_finder.called_decl;
+  m_wrapper_decl = func_finder.toplevel_decl;
 
   assert(m_function_decl);
 
@@ -1013,7 +1081,11 @@ swift::FuncDecl *SwiftASTManipulator::GetFunctionToInjectVariableInto(
     const SwiftASTManipulator::VariableInfo &variable, bool is_self) const {
   // The only variable that we inject in the wrapper is self, so we can
   // call the function declared in the type extension.
-  return is_self ? m_wrapper_decl : m_function_decl;
+  auto name = variable.GetName().str();
+  if (name == "$__lldb_result" ||
+      name == "$__lldb_error_result")
+    return m_function_decl;
+  return m_wrapper_decl;
 }
 
 llvm::Optional<swift::Type> SwiftASTManipulator::GetSwiftTypeForVariable(
@@ -1118,6 +1190,7 @@ static void AddNodesToBeginningFunction(
       body->getRBraceLoc());
 
   function->setBody(new_function_body, function->getBodyKind());
+  function->setHasSingleExpressionBody(new_nodes.size() <= 1);
 }
 
 bool SwiftASTManipulator::AddExternalVariables(
@@ -1197,6 +1270,7 @@ bool SwiftASTManipulator::AddExternalVariables(
     m_variables.push_back(variable);
   } else {
     // The new nodes that should be added to each function.
+      m_source_file.dump();
     std::unordered_map<swift::FuncDecl *, llvm::SmallVector<swift::ASTNode, 3>>
         injected_nodes;
 
@@ -1225,7 +1299,7 @@ bool SwiftASTManipulator::AddExternalVariables(
       if (log) {
         std::string s;
         llvm::raw_string_ostream ss(s);
-        variable.m_decl->dump(ss);
+        /* variable.m_decl->dump(ss); */
         ss.flush();
 
         log->Printf("[SwiftASTManipulator::AddExternalVariables] Injected "
@@ -1243,6 +1317,7 @@ bool SwiftASTManipulator::AddExternalVariables(
     }
   }
 
+  m_source_file.dump();
   return true;
 }
 

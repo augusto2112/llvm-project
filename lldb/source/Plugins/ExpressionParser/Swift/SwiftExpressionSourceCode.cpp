@@ -36,18 +36,12 @@ uint32_t SwiftExpressionSourceCode::GetNumBodyLines() {
 }
 
 bool SwiftExpressionSourceCode::GetText(
-               std::string &text, 
-               lldb::LanguageType wrapping_language,
-               bool needs_object_ptr,
-               bool static_method,
-               bool is_class,
-               bool weak_self,
-               const EvaluateExpressionOptions &options,
-               ExecutionContext &exe_ctx,
-               uint32_t &first_body_line) const
-  {
+    std::string &text, lldb::LanguageType wrapping_language,
+    bool needs_object_ptr, bool static_method, bool is_class, bool weak_self,
+    const EvaluateExpressionOptions &options, ExecutionContext &exe_ctx,
+    uint32_t &first_body_line,
+    llvm::MutableArrayRef<SwiftASTManipulator::VariableInfo> variables) {
   Target *target = exe_ctx.GetTargetPtr();
-
 
   if (m_wrap) {
     const char *body = m_body.c_str();
@@ -112,13 +106,9 @@ bool SwiftExpressionSourceCode::GetText(
 
     localOptions.SetPreparePlaygroundStubFunctions(need_to_declare_log_functions);
 
-    SwiftASTManipulator::WrapExpression(wrap_stream, m_body.c_str(),
-                                        needs_object_ptr, static_method,
-                                        is_class, weak_self,
-                                        localOptions,
-                                        os_vers.str(),
-                                        first_body_line);
-
+    SwiftASTManipulator::WrapExpression(
+        wrap_stream, m_body.c_str(), needs_object_ptr, static_method, is_class,
+        weak_self, localOptions, os_vers.str(), first_body_line, variables);
     text = wrap_stream.GetString().str();
   } else {
     text.append(m_body);

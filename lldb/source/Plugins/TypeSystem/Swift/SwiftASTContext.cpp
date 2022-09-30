@@ -3997,9 +3997,15 @@ swift::TypeBase *SwiftASTContext::ReconstructType(ConstString mangled_typename,
              mangled_cstr);
 
   LLDB_SCOPED_TIMERF("%s (not cached)", LLVM_PRETTY_FUNCTION);
-  found_type = swift::Demangle::getTypeForMangling(
-                   *ast_ctx, mangled_typename.GetStringRef())
-                   .getPointer();
+
+  swift::Demangle::Context Dem;
+  auto node = Dem.demangleSymbolAsNode(mangled_typename.GetStringRef());
+  if (!node)
+    return {};
+
+
+  ASTBuilder builder(*ast_ctx);
+  found_type = builder.decodeMangledType(node, false).getPointer();;
   assert(!found_type || &found_type->getASTContext() == ast_ctx);
 
   // Objective-C classes sometimes have private subclasses that are invisible to
@@ -4033,7 +4039,7 @@ swift::TypeBase *SwiftASTContext::ReconstructType(ConstString mangled_typename,
 
   if (found_type) {
     swift::TypeBase *ast_type =
-        ConvertSILFunctionTypesToASTFunctionTypes(found_type).getPointer();
+        ConvertSILFunctionTypesToASTFunctionTypes(found_type).getPointer();;
     assert(ast_type);
     assert(&ast_type->getASTContext() == ast_ctx);
     // This transformation is lossy: all SILFunction types are mapped
@@ -5040,6 +5046,7 @@ CompilerType SwiftASTContext::GetReferentType(opaque_compiler_type_t type) {
 }
 
 bool SwiftASTContext::IsFullyRealized(const CompilerType &compiler_type) {
+  return true;
   if (swift::CanType swift_can_type = ::GetCanonicalSwiftType(compiler_type)) {
     if (swift::isa<swift::MetatypeType>(swift_can_type))
       return true;
@@ -5705,11 +5712,10 @@ SwiftASTContext::GetBitSize(opaque_compiler_type_t type,
     if (swift_bound_type && swift_bound_type->hasTypeParameter()) {
       LOG_PRINTF(GetLog(LLDBLog::Types), "Can't bind type: %s",
                  bound_type.GetTypeName().AsCString());
-      return {};
-    }
+    } else
 
     // Note thay the bound type may be in a different AST context.
-    return bound_type.GetBitSize(exe_scope);
+      return bound_type.GetBitSize(exe_scope);
   }
 
   // LLDB's ValueObject subsystem expects functions to be a single
@@ -5720,10 +5726,10 @@ SwiftASTContext::GetBitSize(opaque_compiler_type_t type,
     return GetPointerByteSize() * 8;
 
   // Ask the static type type system.
-  const swift::irgen::FixedTypeInfo *fixed_type_info =
-      GetSwiftFixedTypeInfo(type);
-  if (fixed_type_info)
-    return fixed_type_info->getFixedSize().getValue() * 8;
+  /* const swift::irgen::FixedTypeInfo *fixed_type_info = */
+  /*     GetSwiftFixedTypeInfo(type); */
+  /* if (fixed_type_info) */
+  /*   return fixed_type_info->getFixedSize().getValue() * 8; */
 
   // Ask the dynamic type system.
   if (!exe_scope)
@@ -5798,17 +5804,16 @@ SwiftASTContext::GetTypeBitAlign(opaque_compiler_type_t type,
     if (swift_bound_type && swift_bound_type->hasTypeParameter()) {
       LOG_PRINTF(GetLog(LLDBLog::Types), "Can't bind type: %s",
                  bound_type.GetTypeName().AsCString());
-      return {};
-
     }
+    else
     // Note thay the bound type may be in a different AST context.
     return bound_type.GetTypeBitAlign(exe_scope);
   }
 
-  const swift::irgen::FixedTypeInfo *fixed_type_info =
-      GetSwiftFixedTypeInfo(type);
-  if (fixed_type_info)
-    return fixed_type_info->getFixedAlignment().getValue() * 8;
+  /* const swift::irgen::FixedTypeInfo *fixed_type_info = */
+  /*     GetSwiftFixedTypeInfo(type); */
+  /* if (fixed_type_info) */
+  /*   return fixed_type_info->getFixedAlignment().getValue() * 8; */
 
   // Ask the dynamic type system.
   if (!exe_scope)

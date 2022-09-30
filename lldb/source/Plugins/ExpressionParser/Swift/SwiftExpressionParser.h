@@ -13,6 +13,8 @@
 #ifndef liblldb_SwiftExpressionParser_h_
 #define liblldb_SwiftExpressionParser_h_
 
+#include "SwiftASTManipulator.h"
+
 #include "Plugins/ExpressionParser/Clang/IRForTarget.h"
 #include "lldb/Utility/ArchSpec.h"
 #include "lldb/Utility/Status.h"
@@ -83,8 +85,9 @@ public:
   ///     The number of errors encountered during parsing.  0 means
   ///     success.
   //------------------------------------------------------------------
-  unsigned Parse(DiagnosticManager &diagnostic_manager, uint32_t first_line = 0,
-                 uint32_t last_line = UINT32_MAX);
+  unsigned Parse(DiagnosticManager &diagnostic_manager,
+                 llvm::SmallVectorImpl<SwiftASTManipulator::VariableInfo> &variables,
+                 uint32_t first_line = 0, uint32_t last_line = UINT32_MAX);
 
   //------------------------------------------------------------------
   /// Ready an already-parsed expression for execution, possibly

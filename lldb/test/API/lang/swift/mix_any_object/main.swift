@@ -20,11 +20,8 @@ class MyClass : NSObject {
 }
 
 func main() {
-  var cls: MyClass = MyClass("Instance of MyClass")
-  var any: AnyObject = cls
-  var opt: AnyObject? = cls
-  var dict: [String: AnyObject] = ["One" : MyClass("Instance One"), "Two" : MyClass("Instance Two"), "Three" : cls]
-  print(cls) // break here
+  var dict: [String: AnyObject] = ["One" : MyClass("Instance One"), "Two" : MyClass("Instance Two")]
+  print(1) // break here
 }
 
 main()
