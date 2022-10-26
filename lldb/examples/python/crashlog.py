@@ -865,7 +865,7 @@ def save_crashlog(debugger, command, exe_ctx, result, dict):
         result.PutCString(
             "error: invalid arguments, a single output file is the only valid argument")
         return
-    out_file = open(args[0], 'w')
+    out_file = open(args[0], 'w', encoding='utf-8')
     if not out_file:
         result.PutCString(
             "error: failed to open file '%s' for writing...",
