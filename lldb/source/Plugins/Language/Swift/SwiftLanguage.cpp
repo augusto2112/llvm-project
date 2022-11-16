@@ -1310,6 +1310,8 @@ bool SwiftLanguage::IsUninitializedReference(ValueObject &valobj) {
 bool SwiftLanguage::GetFunctionDisplayName(
     const SymbolContext *sc, const ExecutionContext *exe_ctx,
     FunctionNameRepresentation representation, Stream &s) {
+  // s << "Function name";
+  // return true;
   SwiftScratchContextLock scratch_ctx_lock(exe_ctx);
   switch (representation) {
   case Language::FunctionNameRepresentation::eName:

@@ -126,6 +126,8 @@ protected:
   swift::FuncDecl *m_function_decl = nullptr;
   /// The wrapper that invokes the right generic function.
   swift::FuncDecl *m_wrapper_decl = nullptr;
+
+  swift::FuncDecl *m_generic_decl = nullptr;
   /// The extension m_function_decl lives in, if it's a method.
   swift::ExtensionDecl *m_extension_decl = nullptr;
   /// The do{}catch(){} statement whose body is the main body.

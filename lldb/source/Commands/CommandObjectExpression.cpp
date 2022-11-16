@@ -144,6 +144,17 @@ Status CommandObjectExpression::CommandOptions::SetOptionValue(
     ignore_breakpoints = false;
     break;
 
+  case 'G': {
+    bool success;
+    bool tmp_value = OptionArgParser::ToBoolean(option_arg, false, &success);
+    if (success)
+      evaluate_as_generic = tmp_value ? eLazyBoolYes : eLazyBoolNo;
+    else
+      error.SetErrorStringWithFormat(
+          "could not convert \"%s\" to a boolean value.",
+          option_arg.str().c_str());
+    break;
+  }
   case 'p':
     top_level = true;
     break;

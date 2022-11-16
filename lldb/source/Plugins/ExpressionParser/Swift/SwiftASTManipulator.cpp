@@ -200,31 +200,43 @@ do {
     wrapped_stream.Printf(R"(
 extension %s$__lldb_context {
   @LLDBDebuggerFunction %s
-  %s func $__lldb_wrapped_expr_%u(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+  %s func $__lldb_wrapped_expr_%u<T>(_ $__lldb_arg : UnsafeMutablePointer<(T)>) {
     %s
   }
 }
+
 @LLDBDebuggerFunction %s
-func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+func $__lldb_generic_expr<T>(_ $__lldb_arg: UnsafeMutablePointer<(T)>, _ variable: inout $__lldb_context) {
   do {
-    $__lldb_injected_self.$__lldb_wrapped_expr_%u(
+    variable.$__lldb_wrapped_expr_%u(
       $__lldb_arg
     )
   }
 }
+
+@LLDBDebuggerFunction %s
+func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+}
 )",
                           optional_extension, availability.c_str(),
-                          func_decorator, current_counter,
-                          wrapped_expr_text.GetData(), availability.c_str(),
-                          current_counter);
+                          func_decorator, current_counter, 
+                          wrapped_expr_text.GetData(), availability.c_str(), current_counter, availability.c_str());
 
-    first_body_line = 5;
+    first_body_line = 5;;
   } else {
-    wrapped_stream.Printf(
-        "@LLDBDebuggerFunction %s\n"
-        "func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {\n"
-        "%s" // This is the expression text (with newlines).
-        "}\n",
+    wrapped_stream.Printf(R"(
+@LLDBDebuggerFunction %s\n
+func $__lldb_expr(_ $__lldb_arg : UnsafeMutablePointer<Any>) {
+$lldb_dummy($__lldb_arg, t)
+}
+
+@LLDBDebuggerFunction
+func $__lldb_wrapped_expr<T>(_ $__lldb_arg: UnsafeMutablePointer<Any>, _ t: T) {
+%s 
+}
+
+func $__lldb_dummy(_: UnsafeMutablePointer<Any>, _: UnsafeMutablePointer<Any>, _: UnsafeMutablePointer<Any>) {}
+)",
         availability.c_str(), wrapped_expr_text.GetData());
     first_body_line = 4;
   }
@@ -264,6 +276,9 @@ void SwiftASTManipulatorBase::DoInitialization() {
     swift::FuncDecl *toplevel_decl = nullptr;
     /// This is optional.
     swift::FuncDecl *ext_method_decl = nullptr;
+
+    swift::FuncDecl *generic_decl = nullptr;
+
     /// This is an optional extension holding the above function.
     swift::ExtensionDecl *extension_decl = nullptr;
 
@@ -285,7 +300,10 @@ void SwiftASTManipulatorBase::DoInitialization() {
         }
       }
       // Not in an extenstion,
-      toplevel_decl = FD;
+      if (!generic_decl)
+        generic_decl = FD;
+      else 
+        toplevel_decl = FD;
       return Action::SkipChildren();
     }
   };
@@ -297,6 +315,7 @@ void SwiftASTManipulatorBase::DoInitialization() {
   if (m_extension_decl) {
     m_function_decl = func_finder.ext_method_decl;
     m_wrapper_decl = func_finder.toplevel_decl;
+    m_generic_decl = func_finder.generic_decl;
   } else {
     m_function_decl = func_finder.toplevel_decl;
     m_wrapper_decl = nullptr;
@@ -1013,7 +1032,11 @@ swift::FuncDecl *SwiftASTManipulator::GetFunctionToInjectVariableInto(
     const SwiftASTManipulator::VariableInfo &variable, bool is_self) const {
   // The only variable that we inject in the wrapper is self, so we can
   // call the function declared in the type extension.
-  return is_self ? m_wrapper_decl : m_function_decl;
+  if (is_self)
+    return m_wrapper_decl;
+  if(variable.GetType().IsPointerType())
+    return m_wrapper_decl;
+  return m_function_decl;
 }
 
 llvm::Optional<swift::Type> SwiftASTManipulator::GetSwiftTypeForVariable(
@@ -1127,7 +1150,7 @@ bool SwiftASTManipulator::AddExternalVariables(
 
   Log *log = GetLog(LLDBLog::Expressions);
 
-  swift::ASTContext &ast_context = m_source_file.getASTContext();
+  swift::ASTContext &ast_context = m_source_file.getASTContext();;
 
   if (m_repl) {
     // In the REPL, we're only adding the result variable.

@@ -378,6 +378,12 @@ let Command = "expression" in {
     Desc<"Interpret the expression as a complete translation unit, without "
     "injecting it into the local context.  Allows declaration of persistent, "
     "top-level entities without a $ prefix.">;
+  // BEGIN SWIFT
+  def evaluate-self-as-generic : Option<"evaluate-self-as-generic", "G">, Groups<[1,2]>,
+    Arg<"Boolean">,
+    Desc<"Controls whether the expression can fall back to being JITted if it's "
+    "not supported by the interpreter (defaults to false).">;
+  // END SWIFT
   def expression_options_allow_jit : Option<"allow-jit", "j">, Groups<[1,2]>,
     Arg<"Boolean">,
     Desc<"Controls whether the expression can fall back to being JITted if it's "
