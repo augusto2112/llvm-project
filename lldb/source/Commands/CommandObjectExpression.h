@@ -42,7 +42,7 @@ public:
     bool show_types;
     bool show_summary;
     bool debug;
-    bool evaluate_as_generic;
+    bool evaluate_self_as_generic;
     uint32_t timeout;
     bool try_all_threads;
     lldb::LanguageType language;

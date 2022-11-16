@@ -379,8 +379,7 @@ let Command = "expression" in {
     "injecting it into the local context.  Allows declaration of persistent, "
     "top-level entities without a $ prefix.">;
   // BEGIN SWIFT
-  def evaluate-self-as-generic : Option<"evaluate-self-as-generic", "G">, Groups<[1,2]>,
-    Arg<"Boolean">,
+  def evaluate_self_as_generic : Option<"evaluate-self-as-generic", "G">, Groups<[1,2]>,
     Desc<"Controls whether the expression can fall back to being JITted if it's "
     "not supported by the interpreter (defaults to false).">;
   // END SWIFT

@@ -144,17 +144,9 @@ Status CommandObjectExpression::CommandOptions::SetOptionValue(
     ignore_breakpoints = false;
     break;
 
-  case 'G': {
-    bool success;
-    bool tmp_value = OptionArgParser::ToBoolean(option_arg, false, &success);
-    if (success)
-      evaluate_as_generic = tmp_value ? eLazyBoolYes : eLazyBoolNo;
-    else
-      error.SetErrorStringWithFormat(
-          "could not convert \"%s\" to a boolean value.",
-          option_arg.str().c_str());
+  case 'G': 
+    evaluate_self_as_generic = true;
     break;
-  }
   case 'p':
     top_level = true;
     break;
@@ -382,6 +374,7 @@ CommandObjectExpression::GetEvalOptions(const Target &target) {
   options.SetDebug(m_command_options.debug);
 
   // BEGIN SWIFT
+  options.SetEvaluateSelfAsGeneric(m_command_options.evaluate_self_as_generic);
   // If the language was not specified in the expression command,
   // set it to the language in the target's properties if
   // specified, else default to the language for the frame.

@@ -437,6 +437,10 @@ public:
       m_language = lldb::eLanguageTypeSwift;
   }
 
+  bool GetEvaluateSelfAsGeneric() const { return m_evalute_self_as_generic; }
+
+  void SetEvaluateSelfAsGeneric(bool b) { m_evalute_self_as_generic = b; }
+
   bool GetPlaygroundTransformHighPerformance() const {
     return m_playground_transforms_hp;
   }
@@ -521,6 +525,8 @@ private:
   /// True if the executed code should be treated as utility code that is only
   /// used by LLDB internally.
   bool m_running_utility_expression = false;
+
+  bool m_evalute_self_as_generic = false;
 
   lldb::DynamicValueType m_use_dynamic = lldb::eNoDynamicValues;
   Timeout<std::micro> m_timeout = default_timeout;
