@@ -30,5 +30,3 @@ libPublic.dylib: Public.swift
 clean::
 	$(MAKE) BASENAME=Private VPATH=$(SRCDIR) -I $(SRCDIR) -f $(SRCDIR)/dylib.mk clean
 	$(MAKE) BASENAME=Public VPATH=$(SRCDIR) -I $(SRCDIR) -f $(SRCDIR)/dylib.mk clean
-
-
