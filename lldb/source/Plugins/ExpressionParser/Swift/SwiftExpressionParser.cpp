@@ -449,7 +449,7 @@ public:
 /// An invalid CompilerType is returned on error.
 static CompilerType GetSwiftTypeForVariableValueObject(
     lldb::ValueObjectSP valobj_sp, lldb::StackFrameSP &stack_frame_sp,
-    SwiftLanguageRuntime *runtime, bool bind_generic_types) {
+    SwiftLanguageRuntime *runtime, lldb::BindGenericTypes bind_generic_types) {
   LLDB_SCOPED_TIMER();
   // Check that the passed ValueObject is valid.
   if (!valobj_sp || valobj_sp->GetError().Fail())
@@ -457,7 +457,7 @@ static CompilerType GetSwiftTypeForVariableValueObject(
   CompilerType result = valobj_sp->GetCompilerType();
   if (!result)
     return {};
-  if (bind_generic_types)
+  if (bind_generic_types != lldb::eDontBind)
     result = runtime->BindGenericTypeParameters(*stack_frame_sp, result);
   if (!result)
     return {};
@@ -476,7 +476,7 @@ static CompilerType ResolveVariable(lldb::VariableSP variable_sp,
                                     lldb::StackFrameSP &stack_frame_sp,
                                     SwiftLanguageRuntime *runtime,
                                     lldb::DynamicValueType use_dynamic,
-                                    bool bind_generic_types) {
+                                    lldb::BindGenericTypes bind_generic_types) {
   LLDB_SCOPED_TIMER();
   lldb::ValueObjectSP valobj_sp =
       stack_frame_sp->GetValueObjectForFrameVariable(variable_sp,
@@ -490,10 +490,10 @@ static CompilerType ResolveVariable(lldb::VariableSP variable_sp,
     return {};
 
   // If the type can't be realized and dynamic types are allowed, fall back to
-  // the dynamic type. We can only do this when not evaluating self as generic
+  // the dynamic type. We can only do this when not binding generic types
   // though, as we don't bind the generic parameters in that case.
   if (!SwiftASTContext::IsFullyRealized(var_type) &&
-      bind_generic_types && use_dynamic_value) {
+      bind_generic_types != lldb::eDontBind && use_dynamic_value) {
     var_type = GetSwiftTypeForVariableValueObject(
         valobj_sp->GetDynamicValue(use_dynamic), stack_frame_sp, runtime,
         bind_generic_types);
@@ -524,11 +524,29 @@ static lldb::VariableSP FindSelfVariable(Block *block) {
   return variable_list_sp->FindVariable(ConstString("self"));
 }
 
+struct BindGenericSelfParamsError : public llvm::ErrorInfo<BindGenericSelfParamsError> {
+  static char ID;
+  std::string msg;
+  bool is_new_dylib;
+
+  BindGenericSelfParamsError() = default;
+
+  void log(llvm::raw_ostream &OS) const override {
+    OS << "Couldn't realize Swift AST type of self. Hint: using `v` to "
+          "directly inspect variables and fields may still work.";
+  }
+  std::error_code convertToErrorCode() const override {
+    return inconvertibleErrorCode();
+  }
+};
+
+char BindGenericSelfParamsError::ID = 0;
+
 static void AddRequiredAliases(Block *block, lldb::StackFrameSP &stack_frame_sp,
                                SwiftASTContextForExpressions &swift_ast_context,
                                SwiftASTManipulator &manipulator,
                                lldb::DynamicValueType use_dynamic,
-                               bool bind_generic_types) {
+                               lldb::BindGenericTypes bind_generic_types) {
   LLDB_SCOPED_TIMER();
 
   // First emit the typealias for "$__lldb_context".
@@ -562,7 +580,7 @@ static void AddRequiredAliases(Block *block, lldb::StackFrameSP &stack_frame_sp,
     return;
 
   auto *stack_frame = stack_frame_sp.get();
-  if (bind_generic_types) {
+  if (bind_generic_types != lldb::eDontBind) {
     imported_self_type = swift_runtime->BindGenericTypeParameters(
         *stack_frame, imported_self_type);
     if (!imported_self_type)
@@ -673,7 +691,7 @@ static llvm::Optional<llvm::Error> AddVariableInfo(
     SwiftLanguageRuntime *runtime,
     llvm::SmallDenseSet<const char *, 8> &processed_variables,
     llvm::SmallVectorImpl<SwiftASTManipulator::VariableInfo> &local_variables,
-    lldb::DynamicValueType use_dynamic, bool bind_generic_types) {
+    lldb::DynamicValueType use_dynamic, lldb::BindGenericTypes bind_generic_types) {
   LLDB_SCOPED_TIMER();
 
   StringRef name = variable_sp->GetUnqualifiedName().GetStringRef();
@@ -698,11 +716,11 @@ static llvm::Optional<llvm::Error> AddVariableInfo(
 
   CompilerType target_type;
 
-  // If we're evaluating self as generic, we need to set the self type as an
+  // If we're not binding the generic types, we need to set the self type as an
   // opaque pointer type. This is necessary because we don't bind the generic
   // parameters, and we can't have a type with unbound generics in a non-generic
   // function.
-  if (is_self && !bind_generic_types) {
+  if (is_self && bind_generic_types == lldb::eDontBind) {
     target_type = ast_context.GetBuiltinRawPointerType();
   } else {
     CompilerType var_type =
@@ -728,10 +746,7 @@ static llvm::Optional<llvm::Error> AddVariableInfo(
     // Not realizing self is a fatal error for an expression and the
     // Swift compiler error alone is not particularly useful.
     if (is_self)
-      return make_error<StringError>(
-          inconvertibleErrorCode(),
-          "Couldn't realize Swift AST type of self. Hint: using `v` to "
-          "directly inspect variables and fields may still work.");
+      return make_error<BindGenericSelfParamsError>();
     return {};
   }
 
@@ -782,7 +797,7 @@ static llvm::Optional<llvm::Error> RegisterAllVariables(
     SymbolContext &sc, lldb::StackFrameSP &stack_frame_sp,
     SwiftASTContextForExpressions &ast_context,
     llvm::SmallVectorImpl<SwiftASTManipulator::VariableInfo> &local_variables,
-    lldb::DynamicValueType use_dynamic, bool bind_generic_types) {
+    lldb::DynamicValueType use_dynamic, lldb::BindGenericTypes bind_generic_types) {
   LLDB_SCOPED_TIMER();
   if (!sc.block && !sc.function)
     return {};
@@ -1546,7 +1561,7 @@ static llvm::Expected<ParsedExpression> ParseAndImport(
     ResolveSpecialNames(sc, exe_scope, swift_ast_context, special_names,
                         local_variables);
 
-    if (!options.GetBindGenericTypes() &&
+    if (options.GetBindGenericTypes() == lldb::eDontBind &&
         !CanEvaluateExpressionAsGeneric(local_variables, sc.block,
                                         *stack_frame_sp.get()))
       return make_error<StringError>(
@@ -1742,8 +1757,10 @@ static bool RedirectCallFromSinkToGenericFunction(llvm::Module &module,
   return true;
 }
 
-unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
-                                      uint32_t first_line, uint32_t last_line) {
+SwiftExpressionParser::ParseResult
+SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
+                             uint32_t first_line, uint32_t last_line) {
+  using ParseResult = SwiftExpressionParser::ParseResult;
   Log *log = GetLog(LLDBLog::Expressions);
   LLDB_SCOPED_TIMER();
 
@@ -1762,7 +1779,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
   const bool playground = m_options.GetPlaygroundTransformEnabled();
 
   if (!m_exe_scope)
-    return false;
+    return ParseResult::unrecoverable_error;
 
   // Parse the expression and import all nececssary swift modules.
   auto parsed_expr = ParseAndImport(
@@ -1771,6 +1788,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
 
   if (!parsed_expr) {
     bool retry = false;
+    bool bind_gen_params_error = false;
     handleAllErrors(
         parsed_expr.takeError(),
         [&](const ModuleImportError &MIE) {
@@ -1796,17 +1814,23 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
           diagnostic_manager.PutString(eDiagnosticSeverityError,
                                        SE.getMessage());
         },
+        [&](const BindGenericSelfParamsError &E) {
+          diagnostic_manager.PutString(eDiagnosticSeverityError, E.message());
+          bind_gen_params_error = true;
+        },
         [](const PropagatedError &P) {});
 
+    if (bind_gen_params_error) 
+      return ParseResult::retry_no_bind_generic_params;
     // Signal that we want to retry the expression exactly once with a
     // fresh SwiftASTContext initialized with the flags from the
     // current lldb::Module / Swift dylib to avoid header search
     // mismatches.
     if (retry)
-      return 2;
+      return ParseResult::retry_fresh_context;
 
     // Unrecoverable error.
-    return 1;
+    return ParseResult::unrecoverable_error;
   }
 
   if (log) {
@@ -1824,7 +1848,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
 
   if (m_swift_ast_ctx.HasErrors()) {
     DiagnoseSwiftASTContextError();
-    return 1;
+    return ParseResult::unrecoverable_error;
   }
   if (log) {
     std::string s;
@@ -1846,7 +1870,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
 
     if (!error.Success()) {
       diagnostic_manager.PutString(eDiagnosticSeverityError, error.AsCString());
-      return 1;
+      return ParseResult::unrecoverable_error;
     }
   } else {
     swift::performPlaygroundTransform(
@@ -1974,7 +1998,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
             variable, swift_expr, *materializer, *parsed_expr->code_manipulator,
             m_stack_frame_wp, diagnostic_manager, log, repl);
         if (!var_info)
-          return 1;
+          return ParseResult::unrecoverable_error;
 
         const char *name = ConstString(variable.GetName().get()).GetCString();
         variable_map[name] = *var_info;
@@ -2010,7 +2034,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
 
   if (m_swift_ast_ctx.HasErrors()) {
     DiagnoseSwiftASTContextError();
-    return 1;
+    return ParseResult::unrecoverable_error;
   }
 
   if (log) {
@@ -2038,7 +2062,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
 
   if (m_swift_ast_ctx.HasErrors()) {
     DiagnoseSwiftASTContextError();
-    return 1;
+    return ParseResult::unrecoverable_error;
   }
 
   {
@@ -2064,7 +2088,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
 
   if (m_swift_ast_ctx.HasErrors()) {
     DiagnoseSwiftASTContextError();
-    return 1;
+    return ParseResult::unrecoverable_error;
   }
 
   if (!m_module) {
@@ -2086,7 +2110,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
               "expr\", then run the failing expression again, and file a "
               "bugreport with the log output."
             : "Please check the above error messages for possible root causes.");
-    return 1;
+    return ParseResult::unrecoverable_error;
   }
 
   if (log) {
@@ -2099,7 +2123,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
     log->PutCString(s.c_str());
   }
 
-  if (!m_options.GetBindGenericTypes() &&
+  if (m_options.GetBindGenericTypes() == lldb::eDontBind &&
       !RedirectCallFromSinkToGenericFunction(
           *m_module.get(), *parsed_expr->code_manipulator.get())) {
     diagnostic_manager.Printf(
@@ -2108,7 +2132,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
         "expression log by running \"log enable lldb "
         "expr\", then run the failing expression again, and file a "
         "bugreport with the log output.");
-    return 1;
+    return ParseResult::unrecoverable_error;
   }
 
   if (log) {
@@ -2130,7 +2154,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
   }
 
   if (m_swift_ast_ctx.HasErrors())
-    return 1;
+    return ParseResult::unrecoverable_error;
 
   // The Parse succeeded!  Now put this module into the context's list
   // of loaded modules, and copy the Decls that were globalized as
@@ -2145,7 +2169,7 @@ unsigned SwiftExpressionParser::Parse(DiagnosticManager &diagnostic_manager,
     persistent_state->CopyInSwiftPersistentDecls(
         parsed_expr->external_lookup.GetStagedDecls());
   }
-  return 0;
+  return ParseResult::success;
 }
 
 static bool FindFunctionInModule(ConstString &mangled_name,

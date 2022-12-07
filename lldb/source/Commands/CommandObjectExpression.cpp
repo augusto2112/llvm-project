@@ -148,17 +148,6 @@ Status CommandObjectExpression::CommandOptions::SetOptionValue(
     top_level = true;
     break;
 
-  case 'b': {
-    bool success;
-    bool tmp_value = OptionArgParser::ToBoolean(option_arg, true, &success);
-    if (success)
-      bind_generic_types = tmp_value ? eLazyBoolYes : eLazyBoolNo;
-    else
-      error.SetErrorStringWithFormat(
-          "could not convert \"%s\" to a boolean value.",
-          option_arg.str().c_str());
-    break;
-  }
   case 'X': {
     bool success;
     bool tmp_value = OptionArgParser::ToBoolean(option_arg, true, &success);
@@ -199,7 +188,6 @@ void CommandObjectExpression::CommandOptions::OptionParsingStarting(
   auto_apply_fixits = eLazyBoolCalculate;
   top_level = false;
   allow_jit = true;
-  bind_generic_types = true;
 }
 
 llvm::ArrayRef<OptionDefinition>

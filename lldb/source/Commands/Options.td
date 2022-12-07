@@ -378,12 +378,6 @@ let Command = "expression" in {
     Desc<"Interpret the expression as a complete translation unit, without "
     "injecting it into the local context.  Allows declaration of persistent, "
     "top-level entities without a $ prefix.">;
-  // BEGIN SWIFT
-  def bind_generic_types : Option<"bind-generic-types", "b">, Groups<[1,2]>,
-    Arg<"Boolean">,
-    Desc<"Controls whether to bind the generic type parameters before evaluating"
-    " an expression. Defaults to true.">;
-  // END SWIFT
   def expression_options_allow_jit : Option<"allow-jit", "j">, Groups<[1,2]>,
     Arg<"Boolean">,
     Desc<"Controls whether the expression can fall back to being JITted if it's "
