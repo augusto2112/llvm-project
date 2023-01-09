@@ -56,7 +56,6 @@ class SymbolFileDWARFDebugMap;
 class SymbolFileDWARFDwo;
 class SymbolFileDWARFDwp;
 
-#define DIE_IS_BEING_PARSED ((lldb_private::Type *)1)
 
 class SymbolFileDWARF : public lldb_private::SymbolFileCommon,
                         public lldb_private::UserID {
@@ -233,6 +232,10 @@ public:
 
   static bool SupportedVersion(uint16_t version);
 
+  /// Returns a sentinel pointer that indicates that a DIE is being
+  /// parsed into a type.
+  static std::shared_ptr<lldb_private::Type> GetSentinelDieBeingParsed();
+
   DWARFDIE
   GetDeclContextDIEContainingDIE(const DWARFDIE &die);
 
@@ -348,7 +351,8 @@ public:
   lldb_private::ConstString ConstructFunctionDemangledName(const DWARFDIE &die);
 
 protected:
-  typedef llvm::DenseMap<const DWARFDebugInfoEntry *, lldb_private::Type *>
+  typedef llvm::DenseMap<const DWARFDebugInfoEntry *,
+                         std::shared_ptr<lldb_private::Type>>
       DIEToTypePtr;
   typedef llvm::DenseMap<const DWARFDebugInfoEntry *, lldb::VariableSP>
       DIEToVariableSP;

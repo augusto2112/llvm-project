@@ -517,6 +517,13 @@ bool SymbolFileDWARF::SupportedVersion(uint16_t version) {
   return version >= 2 && version <= 5;
 }
 
+std::shared_ptr<lldb_private::Type>
+SymbolFileDWARF::GetSentinelDieBeingParsed() {
+  static std::shared_ptr<lldb_private::Type> sentinel =
+      std::make_shared<lldb_private::Type>();
+  return sentinel;
+}
+
 uint32_t SymbolFileDWARF::CalculateAbilities() {
   uint32_t abilities = 0;
   if (m_objfile_sp != nullptr) {
@@ -1602,17 +1609,18 @@ bool SymbolFileDWARF::CompleteType(CompilerType &compiler_type) {
     // to SymbolFileDWARF::ResolveClangOpaqueTypeDefinition are done.
     GetForwardDeclClangTypeToDie().erase(die_it);
 
-    Type *type = GetDIEToType().lookup(dwarf_die.GetDIE());
+    auto type_sp = GetDIEToType().lookup(dwarf_die.GetDIE());
 
     Log *log = GetLog(DWARFLog::DebugInfo | DWARFLog::TypeCompletion);
     if (log)
       GetObjectFile()->GetModule()->LogMessageVerboseBacktrace(
           log, "0x%8.8" PRIx64 ": %s '%s' resolving forward declaration...",
           dwarf_die.GetID(), dwarf_die.GetTagAsCString(),
-          type->GetName().AsCString());
+          type_sp->GetName().AsCString());
     assert(compiler_type);
     if (DWARFASTParser *dwarf_ast = GetDWARFParser(*dwarf_die.GetCU()))
-      return dwarf_ast->CompleteTypeFromDWARF(dwarf_die, type, compiler_type);
+      return dwarf_ast->CompleteTypeFromDWARF(dwarf_die, type_sp.get(),
+                                              compiler_type);
   }
   return false;
 }
@@ -1624,7 +1632,7 @@ Type *SymbolFileDWARF::ResolveType(const DWARFDIE &die,
     Type *type = GetTypeForDIE(die, resolve_function_context).get();
 
     if (assert_not_being_parsed) {
-      if (type != DIE_IS_BEING_PARSED)
+      if (type != SymbolFileDWARF::GetSentinelDieBeingParsed().get())
         return type;
 
       GetObjectFile()->GetModule()->ReportError(
@@ -2686,10 +2694,13 @@ SymbolFileDWARF::FindNamespace(ConstString name,
 
 TypeSP SymbolFileDWARF::GetTypeForDIE(const DWARFDIE &die,
                                       bool resolve_function_context) {
-  TypeSP type_sp;
   if (die) {
-    Type *type_ptr = GetDIEToType().lookup(die.GetDIE());
-    if (type_ptr == nullptr) {
+    if (auto type_sp = GetDIEToType().lookup(die.GetDIE())) {
+      if (type_sp.get() !=
+          SymbolFileDWARF::GetSentinelDieBeingParsed().get()) {
+        return type_sp;
+      }
+    } else {
       SymbolContextScope *scope;
       if (auto *dwarf_cu = llvm::dyn_cast<DWARFCompileUnit>(die.GetCU()))
         scope = GetCompUnitForDWARFCompUnit(*dwarf_cu);
@@ -2708,13 +2719,10 @@ TypeSP SymbolFileDWARF::GetTypeForDIE(const DWARFDIE &die,
           !GetFunction(DWARFDIE(die.GetCU(), parent_die), sc))
         sc = sc_backup;
 
-      type_sp = ParseType(sc, die, nullptr);
-    } else if (type_ptr != DIE_IS_BEING_PARSED) {
-      // Get the original shared pointer for this type
-      type_sp = type_ptr->shared_from_this();
+      return ParseType(sc, die, nullptr);
     }
   }
-  return type_sp;
+  return nullptr;
 }
 
 DWARFDIE
@@ -2850,7 +2858,9 @@ TypeSP SymbolFileDWARF::FindCompleteObjCDefinitionTypeForDIE(
           return true;
 
         Type *resolved_type = ResolveType(type_die, false, true);
-        if (!resolved_type || resolved_type == DIE_IS_BEING_PARSED)
+        if (!resolved_type ||
+            resolved_type ==
+                SymbolFileDWARF::GetSentinelDieBeingParsed().get())
           return true;
 
         DEBUG_PRINTF(
@@ -2861,7 +2871,8 @@ TypeSP SymbolFileDWARF::FindCompleteObjCDefinitionTypeForDIE(
             type_die.GetID(), type_cu->GetID());
 
         if (die)
-          GetDIEToType()[die.GetDIE()] = resolved_type;
+          GetDIEToType()[die.GetDIE()] =
+              std::make_shared<lldb_private::Type>(*resolved_type);
         type_sp = resolved_type->shared_from_this();
         return false;
       });
@@ -3066,8 +3077,10 @@ SymbolFileDWARF::FindDefinitionTypeForDWARFDeclContext(const DWARFDIE &die) {
         return true;
 
       Type *resolved_type = ResolveType(type_die, false);
-      if (!resolved_type || resolved_type == DIE_IS_BEING_PARSED)
-        return true;
+        if (!resolved_type ||
+            resolved_type ==
+                SymbolFileDWARF::GetSentinelDieBeingParsed().get())
+          return true;
 
       // With -gsimple-template-names, the DIE name may not contain the template
       // parameters. If the declaration has template parameters but doesn't
