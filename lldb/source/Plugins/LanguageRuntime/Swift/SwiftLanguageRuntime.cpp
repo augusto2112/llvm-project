@@ -24,6 +24,7 @@
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Core/Progress.h"
 #include "lldb/Core/Section.h"
+#include "lldb/Core/ValueObjectCast.h"
 #include "lldb/Core/ValueObjectConstResult.h"
 #include "lldb/DataFormatters/StringPrinter.h"
 #include "lldb/Host/OptionParser.h"
@@ -375,6 +376,13 @@ public:
 
   lldb::SyntheticChildrenSP
   GetBridgedSyntheticChildProvider(ValueObject &valobj) {
+    STUB_LOG();
+    return {};
+  }
+
+  lldb::SyntheticChildrenSP
+  GetCxxBridgedSyntheticChildProvider(ValueObjectSP valobj,
+                                      CompilerType swift_type) {
     STUB_LOG();
     return {};
   }
@@ -1616,7 +1624,7 @@ public:
     int32_t byte_offset;
 
     FieldProjection(CompilerType parent_type, ExecutionContext *exe_ctx,
-                    size_t idx) {
+                    size_t idx, ValueObject *valobj) {
       const bool transparent_pointers = false;
       const bool omit_empty_base_classes = true;
       const bool ignore_array_bounds = false;
@@ -1633,7 +1641,7 @@ public:
           exe_ctx, idx, transparent_pointers, omit_empty_base_classes,
           ignore_array_bounds, child_name, child_byte_size, byte_offset,
           child_bitfield_bit_size, child_bitfield_bit_offset,
-          child_is_base_class, child_is_deref_of_parent, nullptr,
+          child_is_base_class, child_is_deref_of_parent, valobj,
           language_flags);
 
       if (child_is_base_class)
@@ -1766,7 +1774,7 @@ SwiftLanguageRuntimeImpl::GetBridgedSyntheticChildProvider(
         // if a projection fails, keep going - we have offsets here, so it
         // should be OK to skip some members
         if (auto projection = ProjectionSyntheticChildren::FieldProjection(
-                swift_type, &exe_ctx, idx)) {
+                swift_type, &exe_ctx, idx, &valobj)) {
           any_projected = true;
           type_projection->field_projections.push_back(projection);
         }
@@ -1783,6 +1791,145 @@ SwiftLanguageRuntimeImpl::GetBridgedSyntheticChildProvider(
     }
   }
 
+  return nullptr;
+}
+
+lldb::ValueObjectSP SwiftLanguageRuntime::ExtractSwiftValueObjectFromCxxWrapper(
+    ValueObject &valobj) {
+  ValueObjectSP swift_valobj;
+
+  // There are two flavors of c++ wrapper classes:
+  // - Reference types wrappers, which have no ivars, and have one super class
+  // which contains an opaque pointer to the swift instance.
+  // - Value type wrappers, which has one ivar, a single char array with the
+  // swift value embedded directly in it.
+  // In both cases the valobj should have exactly one child.
+  if (valobj.GetNumChildren() != 1)
+    return swift_valobj;
+
+  auto child_valobj = valobj.GetChildAtIndex(0, true);
+  auto child_type = child_valobj->GetCompilerType();
+  // If this is a reference wrapper, the first child is actually the super
+  // class.
+  if (child_type.GetMangledTypeName() == "swift::_impl::RefCountedClass") {
+    // The super class should have exactly one ivar, the opaque pointer that
+    // points to the Swift instance.
+    if (child_valobj->GetNumChildren() != 1)
+      return swift_valobj;
+
+    auto opaque_ptr_valobj = child_valobj->GetChildAtIndex(0, true);
+    swift_valobj = opaque_ptr_valobj;
+  } else {
+    CompilerType element_type;
+    if (child_type.IsArrayType(&element_type)) {
+      if (element_type.IsCharType()) {
+        swift_valobj = valobj.GetSP();
+      }
+    }
+  }
+  return swift_valobj;
+}
+
+class CxxProjectionSyntheticChildren : public ProjectionSyntheticChildren {
+  class CxxProjectionFrontEndProvider : public SyntheticChildrenFrontEnd {
+  public:
+    CxxProjectionFrontEndProvider(ValueObject &backend,
+                                  TypeProjection &projection)
+        : SyntheticChildrenFrontEnd(backend), m_projection(projection) {}
+
+    size_t CalculateNumChildren() override {
+      return m_projection.field_projections.size();
+    }
+
+    lldb::ValueObjectSP GetChildAtIndex(size_t idx) override {
+      if (m_projection.field_projections.size() <= idx)
+        return nullptr;
+      auto &projection = m_projection.field_projections[idx];
+      auto child = m_backend.GetSyntheticChildAtOffset(
+          projection.byte_offset, projection.type, true, projection.name);
+      return child;
+    }
+
+    size_t GetIndexOfChildWithName(ConstString name) override {
+      for (size_t idx = 0; idx < m_projection.field_projections.size(); idx++) {
+        if (m_projection.field_projections[idx].name == name)
+          return idx;
+      }
+      return UINT32_MAX;
+    }
+
+    bool Update() override { return false; }
+
+    bool MightHaveChildren() override { return true; }
+
+    ConstString GetSyntheticTypeName() override {
+      return m_projection.type_name;
+    }
+
+  private:
+    TypeProjection &m_projection;
+  };
+
+public:
+  CxxProjectionSyntheticChildren(ValueObjectSP valobj, const Flags &flags,
+                                 TypeProjectionUP &&projection)
+      : ProjectionSyntheticChildren(flags, std::move(projection)), m_valobj(valobj) {}
+
+  SyntheticChildrenFrontEnd::AutoPointer
+  GetFrontEnd(ValueObject &backend) override {
+    // We ignore the backend parameter here, as we have a more specific one
+    // available.
+    return std::make_unique<CxxProjectionFrontEndProvider>(*m_valobj,
+                                                           *m_projection.get());
+  }
+
+private:
+  ValueObjectSP m_valobj;
+};
+
+lldb::SyntheticChildrenSP
+SwiftLanguageRuntimeImpl::GetCxxBridgedSyntheticChildProvider(
+    ValueObjectSP valobj, CompilerType swift_type) {
+  if (!swift_type)
+    return nullptr;
+  ConstString type_name = swift_type.GetDisplayTypeName();
+
+  if (!type_name.IsEmpty()) {
+    auto iter = m_bridged_synthetics_map.find(type_name.AsCString()),
+         end = m_bridged_synthetics_map.end();
+    if (iter != end)
+      return iter->second;
+  }
+
+  auto type_projection =
+      std::make_unique<ProjectionSyntheticChildren::TypeProjection>();
+  ExecutionContext exe_ctx(m_process);
+  std::function<void(CompilerType)> collect_projections =
+      [&](CompilerType swift_type) {
+        uint32_t num_base_classes = swift_type.GetNumDirectBaseClasses();
+        for (uint32_t i = 0; i < num_base_classes; ++i) {
+          auto base_class = swift_type.GetDirectBaseClassAtIndex(i, nullptr);
+          collect_projections(base_class);
+        }
+
+        auto num_children = swift_type.GetNumChildren(true, &exe_ctx);
+        for (size_t idx = 0; idx < num_children; ++idx) {
+          if (auto projection = ProjectionSyntheticChildren::FieldProjection(
+                  swift_type, &exe_ctx, idx, valobj.get())) {
+            type_projection->field_projections.push_back(projection);
+          }
+        }
+      };
+
+  collect_projections(swift_type);
+  if (!type_projection->field_projections.empty()) {
+    type_projection->type_name = swift_type.GetDisplayTypeName();
+    SyntheticChildrenSP synth_sp =
+        SyntheticChildrenSP(new CxxProjectionSyntheticChildren(
+            valobj, SyntheticChildren::Flags(), std::move(type_projection)));
+    m_bridged_synthetics_map.insert({type_name.AsCString(), synth_sp});
+    return synth_sp;
+  }
   return nullptr;
 }
 
@@ -2405,6 +2552,12 @@ bool SwiftLanguageRuntime::IsValidErrorValue(ValueObject &in_value) {
 lldb::SyntheticChildrenSP
 SwiftLanguageRuntime::GetBridgedSyntheticChildProvider(ValueObject &valobj) {
   FORWARD(GetBridgedSyntheticChildProvider, valobj);
+}
+
+lldb::SyntheticChildrenSP
+SwiftLanguageRuntime::GetCxxBridgedSyntheticChildProvider(
+    ValueObjectSP valobj, CompilerType swift_type) {
+  FORWARD(GetCxxBridgedSyntheticChildProvider, valobj, swift_type);
 }
 
 void SwiftLanguageRuntime::WillStartExecutingUserExpression(

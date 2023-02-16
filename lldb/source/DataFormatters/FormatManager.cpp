@@ -589,11 +589,12 @@ FormatManager::GetCandidateLanguages(lldb::LanguageType lang_type) {
   case lldb::eLanguageTypeC89:
   case lldb::eLanguageTypeC99:
   case lldb::eLanguageTypeC11:
+    return {lldb::eLanguageTypeC_plus_plus, lldb::eLanguageTypeObjC};
   case lldb::eLanguageTypeC_plus_plus:
   case lldb::eLanguageTypeC_plus_plus_03:
   case lldb::eLanguageTypeC_plus_plus_11:
   case lldb::eLanguageTypeC_plus_plus_14:
-    return {lldb::eLanguageTypeC_plus_plus, lldb::eLanguageTypeObjC};
+    return {lldb::eLanguageTypeC_plus_plus, lldb::eLanguageTypeObjC, lldb::eLanguageTypeSwift};
   default:
     return {lang_type};
   }

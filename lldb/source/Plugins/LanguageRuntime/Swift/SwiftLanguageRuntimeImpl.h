@@ -179,6 +179,11 @@ public:
   lldb::SyntheticChildrenSP
   GetBridgedSyntheticChildProvider(ValueObject &valobj);
 
+  /// Get the synthethic child provider that displays Swift in C++ frames.
+  lldb::SyntheticChildrenSP
+  GetCxxBridgedSyntheticChildProvider(lldb::ValueObjectSP valobj,
+                                      CompilerType swift_type);
+
   bool IsABIStable();
 
   void DumpTyperef(CompilerType type, TypeSystemSwiftTypeRef *module_holder,

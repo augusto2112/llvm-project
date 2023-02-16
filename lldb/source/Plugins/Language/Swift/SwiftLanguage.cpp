@@ -856,6 +856,87 @@ SwiftLanguage::GetHardcodedSynthetics() {
           }
           return nullptr;
         });
+    g_formatters.push_back([](lldb_private::ValueObject &valobj,
+                              lldb::DynamicValueType dyn_type,
+                              FormatManager &format_manager)
+                               -> lldb::SyntheticChildrenSP {
+      // Try to recognize a Swift type imported in C++. These types have a
+      // static constexpr char field whose name is the type's Swift mangled
+      // name.
+      ProcessSP process_sp(valobj.GetProcessSP());
+      auto *swift_runtime = SwiftLanguageRuntime::Get(process_sp);
+      if (!swift_runtime)
+        return nullptr;
+
+      auto module = valobj.GetModule();
+      if (!module)
+        return nullptr;
+
+      auto gts = module->GetTypeSystemForLanguage(
+          lldb::LanguageType::eLanguageTypeSwift);
+      if (!gts)
+        return nullptr;
+
+      auto *ts = llvm::cast<TypeSystemSwift>(gts->get());
+
+      // This only makes sense for Clang types.
+      auto type = valobj.GetCompilerType();
+      auto tsc = type.GetTypeSystem().dyn_cast_or_null<TypeSystemClang>();
+      if (!tsc)
+        return nullptr;
+
+      // We operate directly on the qualifier type because the TypeSystem
+      // interface doesn't allow us to check for static constexpr members.
+      auto qual_type = TypeSystemClang::GetQualType(type.GetOpaqueQualType());
+      const clang::Type::TypeClass type_class = qual_type->getTypeClass();
+      // If this a C++ wrapper class, it's definitely a record.
+      if (type_class != clang::Type::Record)
+        return nullptr;
+
+      auto *record_type = llvm::cast<clang::RecordType>(qual_type.getTypePtr());
+      const clang::RecordDecl *record_decl = record_type->getDecl();
+      CompilerType swift_type;
+      for (auto *child_decl : record_decl->decls()) {
+        if (auto *var_decl = llvm::dyn_cast<clang::VarDecl>(child_decl)) {
+          auto name = var_decl->getName();
+          // If the name of the var decl is a valid swift mangled name, then
+          // this is the Swift type.
+          if (swift::Demangle::isMangledName(name)) {
+            swift_type = ts->GetTypeFromMangledTypename(ConstString(name));
+            break;
+          }
+        }
+      }
+
+      if (!swift_type)
+        return nullptr;
+
+      auto swift_valobj =
+          SwiftLanguageRuntime::ExtractSwiftValueObjectFromCxxWrapper(valobj);
+      if (!swift_valobj)
+        return nullptr;
+      // Cast it to a Swift type since thhe swift runtime expects a Swift value object.
+      auto casted = swift_valobj->Cast(swift_type);
+      if (casted) {
+        TypeAndOrName type_or_name;
+        Address address;
+        Value::ValueType value_type;
+        // Try to find the dynamic type of the Swift type.
+        if (swift_runtime->GetDynamicTypeAndAddress(
+                *casted.get(), lldb::DynamicValueType::eDynamicCanRunTarget,
+                type_or_name, address, value_type)) {
+          swift_type = type_or_name.GetCompilerType();
+          // Cast it to the more specific type.
+          casted = casted->Cast(swift_type);
+        }
+        swift_valobj = casted;
+      }
+      if (swift_valobj) {
+        return swift_runtime->GetCxxBridgedSyntheticChildProvider(swift_valobj,
+                                                                  swift_type);
+      }
+      return nullptr;
+    });
   });
 
   return g_formatters;
