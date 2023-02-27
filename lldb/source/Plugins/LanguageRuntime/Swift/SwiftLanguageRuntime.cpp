@@ -24,7 +24,6 @@
 #include "lldb/Core/PluginManager.h"
 #include "lldb/Core/Progress.h"
 #include "lldb/Core/Section.h"
-#include "lldb/Core/ValueObjectCast.h"
 #include "lldb/Core/ValueObjectConstResult.h"
 #include "lldb/DataFormatters/StringPrinter.h"
 #include "lldb/Host/OptionParser.h"
@@ -383,12 +382,6 @@ public:
 
   lldb::SyntheticChildrenSP
   GetBridgedSyntheticChildProvider(ValueObject &valobj) {
-    STUB_LOG();
-    return {};
-  }
-
-  lldb::SyntheticChildrenSP
-  GetCxxBridgedSyntheticChildProvider(ValueObjectSP valobj) {
     STUB_LOG();
     return {};
   }
@@ -1630,7 +1623,7 @@ public:
     int32_t byte_offset;
 
     FieldProjection(CompilerType parent_type, ExecutionContext *exe_ctx,
-                    size_t idx, ValueObject *valobj) {
+                    size_t idx) {
       const bool transparent_pointers = false;
       const bool omit_empty_base_classes = true;
       const bool ignore_array_bounds = false;
@@ -1647,7 +1640,7 @@ public:
           exe_ctx, idx, transparent_pointers, omit_empty_base_classes,
           ignore_array_bounds, child_name, child_byte_size, byte_offset,
           child_bitfield_bit_size, child_bitfield_bit_offset,
-          child_is_base_class, child_is_deref_of_parent, valobj,
+          child_is_base_class, child_is_deref_of_parent, nullptr,
           language_flags);
 
       if (child_is_base_class)
@@ -1780,7 +1773,7 @@ SwiftLanguageRuntimeImpl::GetBridgedSyntheticChildProvider(
         // if a projection fails, keep going - we have offsets here, so it
         // should be OK to skip some members
         if (auto projection = ProjectionSyntheticChildren::FieldProjection(
-                swift_type, &exe_ctx, idx, &valobj)) {
+                swift_type, &exe_ctx, idx)) {
           any_projected = true;
           type_projection->field_projections.push_back(projection);
         }
@@ -2475,12 +2468,6 @@ bool SwiftLanguageRuntime::IsValidErrorValue(ValueObject &in_value) {
 lldb::SyntheticChildrenSP
 SwiftLanguageRuntime::GetBridgedSyntheticChildProvider(ValueObject &valobj) {
   FORWARD(GetBridgedSyntheticChildProvider, valobj);
-}
-
-lldb::SyntheticChildrenSP
-SwiftLanguageRuntime::GetCxxBridgedSyntheticChildProvider(
-    ValueObjectSP valobj) {
-  FORWARD(GetCxxBridgedSyntheticChildProvider, valobj);
 }
 
 void SwiftLanguageRuntime::WillStartExecutingUserExpression(

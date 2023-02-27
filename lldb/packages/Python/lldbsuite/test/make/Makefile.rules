@@ -280,12 +280,6 @@ ifndef NO_TEST_COMMON_H
   CFLAGS += -include $(THIS_FILE_DIR)/test_common.h
 endif
 
-# If C++ interop is enabled, the generated header file will try to include 
-# SWIFT_LIBS_DIR/swiftToCxx/_SwiftCxxInteroperability.h
-ifneq "$(SWIFT_CXX_INTEROP)" ""
-  CFLAGS += -I$(SWIFT_LIBS_DIR)
-endif
-
 CFLAGS += $(NO_LIMIT_DEBUG_INFO_FLAGS) $(ARCH_CFLAGS)
 SWIFTFLAGS += $(SWIFTFLAGS_EXTRAS)
 SWIFTFLAGS += $(FRAMEWORK_INCLUDES)
@@ -579,11 +573,6 @@ endif
 
 ifneq "$(strip $(DYLIB_SWIFT_SOURCES))" ""
 	DYLIB_OBJECTS +=$(strip $(DYLIB_SWIFT_SOURCES:.swift=.o))
-	USESWIFTDRIVER = 1
-endif
-
-ifneq "$(strip $(SWIFT_SOURCES_FOR_CXX_HEADER))" ""
-	SWIFT_CXX_HEADER =$(strip $(SWIFT_SOURCES:.swift=.o))
 	USESWIFTDRIVER = 1
 endif
 
@@ -883,7 +872,7 @@ endif
 %.o: %.c %.d
 	$(CC) $(CFLAGS) -MT $@ -MD -MP -MF $*.d -c -o $@ $<
 
-%.o: %.cpp %.d $(PCH_OUTPUT) $(SWIFT_CXX_HEADER)
+%.o: %.cpp %.d $(PCH_OUTPUT)
 	$(CXX) $(PCHFLAGS) $(CXXFLAGS) -MT $@ -MD -MP -MF $*.d -c -o $@ $<
 
 %.o: %.m %.d
