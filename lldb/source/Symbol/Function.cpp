@@ -233,10 +233,12 @@ Function *IndirectCallEdge::GetCallee(ModuleList &images,
 //
 Function::Function(CompileUnit *comp_unit, lldb::user_id_t func_uid,
                    lldb::user_id_t type_uid, const Mangled &mangled, Type *type,
-                   const AddressRange &range, bool canThrow)
+                   const AddressRange &range, bool canThrow,
+                   llvm::StringRef trampoline_target)
     : UserID(func_uid), m_comp_unit(comp_unit), m_type_uid(type_uid),
-      m_type(type), m_mangled(mangled), m_block(func_uid), m_range(range),
-      m_frame_base(), m_flags(), m_prologue_byte_size(0) {
+      m_type(type), m_mangled(mangled), m_trampoline_target(trampoline_target),
+      m_block(func_uid), m_range(range), m_frame_base(), m_flags(),
+      m_prologue_byte_size(0) {
   m_block.SetParentScope(this);
   if (canThrow)
     m_flags.Set(flagsFunctionCanThrow);

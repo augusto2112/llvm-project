@@ -203,6 +203,14 @@ const char *DWARFDIE::GetMangledName() const {
     return nullptr;
 }
 
+
+const char *DWARFDIE::GetTrampolineTargetName() const {
+  if (IsValid())
+    return m_die->GetTrampolineTargetName(m_cu);
+  else
+    return nullptr;
+}
+
 const char *DWARFDIE::GetPubname() const {
   if (IsValid())
     return m_die->GetPubname(m_cu);

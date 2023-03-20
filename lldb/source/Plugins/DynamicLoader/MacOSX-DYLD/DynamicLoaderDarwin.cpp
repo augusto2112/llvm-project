@@ -870,14 +870,108 @@ DynamicLoaderDarwin::GetStepThroughTrampolinePlan(Thread &thread,
   ThreadPlanSP thread_plan_sp;
   StackFrame *current_frame = thread.GetStackFrameAtIndex(0).get();
   const SymbolContext &current_context =
-      current_frame->GetSymbolContext(eSymbolContextSymbol);
+      current_frame->GetSymbolContext(lldb::eSymbolContextEverything);
   Symbol *current_symbol = current_context.symbol;
+  Function *current_function = current_context.function;
   Log *log = GetLog(LLDBLog::Step);
   TargetSP target_sp(thread.CalculateTarget());
+
+  ConstString trampoline_name;
 
   if (current_symbol != nullptr) {
     std::vector<Address> addresses;
 
+    if (current_function) {
+      if (!current_function->GetTrampolineTargetName().empty()) {
+        trampoline_name =
+            ConstString(current_function->GetTrampolineTargetName());
+        llvm::errs() << "Have a function! "
+                     << current_function->GetTrampolineTargetName() << "\n";
+        {
+          const ModuleList &images = target_sp->GetImages();
+
+          SymbolContextList code_symbols;
+          images.FindSymbolsWithNameAndType(trampoline_name, eSymbolTypeCode,
+                                            code_symbols);
+          size_t num_code_symbols = code_symbols.GetSize();
+
+          if (num_code_symbols > 0) {
+            for (uint32_t i = 0; i < num_code_symbols; i++) {
+              SymbolContext context;
+              AddressRange addr_range;
+              if (code_symbols.GetContextAtIndex(i, context)) {
+                context.GetAddressRange(eSymbolContextEverything, 0, false,
+                                        addr_range);
+                addresses.push_back(addr_range.GetBaseAddress());
+                if (log) {
+                  addr_t load_addr = addr_range.GetBaseAddress().GetLoadAddress(
+                      target_sp.get());
+
+                  LLDB_LOGF(
+                      log, "Found a trampoline target symbol at 0x%" PRIx64 ".",
+                      load_addr);
+                }
+              }
+            }
+          }
+
+          SymbolContextList reexported_symbols;
+          images.FindSymbolsWithNameAndType(
+              trampoline_name, eSymbolTypeReExported, reexported_symbols);
+          size_t num_reexported_symbols = reexported_symbols.GetSize();
+          if (num_reexported_symbols > 0) {
+            for (uint32_t i = 0; i < num_reexported_symbols; i++) {
+              SymbolContext context;
+              if (reexported_symbols.GetContextAtIndex(i, context)) {
+                if (context.symbol) {
+                  Symbol *actual_symbol =
+                      context.symbol->ResolveReExportedSymbol(*target_sp.get());
+                  if (actual_symbol) {
+                    const Address actual_symbol_addr =
+                        actual_symbol->GetAddress();
+                    if (actual_symbol_addr.IsValid()) {
+                      addresses.push_back(actual_symbol_addr);
+                      if (log) {
+                        lldb::addr_t load_addr =
+                            actual_symbol_addr.GetLoadAddress(target_sp.get());
+                        LLDB_LOGF(
+                            log,
+                            "Found a re-exported symbol: %s at 0x%" PRIx64 ".",
+                            actual_symbol->GetName().GetCString(), load_addr);
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+
+          SymbolContextList indirect_symbols;
+          images.FindSymbolsWithNameAndType(
+              trampoline_name, eSymbolTypeResolver, indirect_symbols);
+          size_t num_indirect_symbols = indirect_symbols.GetSize();
+          if (num_indirect_symbols > 0) {
+            for (uint32_t i = 0; i < num_indirect_symbols; i++) {
+              SymbolContext context;
+              AddressRange addr_range;
+              if (indirect_symbols.GetContextAtIndex(i, context)) {
+                context.GetAddressRange(eSymbolContextEverything, 0, false,
+                                        addr_range);
+                addresses.push_back(addr_range.GetBaseAddress());
+                if (log) {
+                  addr_t load_addr = addr_range.GetBaseAddress().GetLoadAddress(
+                      target_sp.get());
+
+                  LLDB_LOGF(log,
+                            "Found an indirect target symbol at 0x%" PRIx64 ".",
+                            load_addr);
+                }
+              }
+            }
+          }
+        }
+      }
+    }
     if (current_symbol->IsTrampoline()) {
       ConstString trampoline_name =
           current_symbol->GetMangled().GetName(Mangled::ePreferMangled);

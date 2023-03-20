@@ -731,7 +731,8 @@ MachineFunction *MachineOutliner::createOutlinedFunction(
         0, /* Line 0 is reserved for compiler-generated code. */
         DINode::DIFlags::FlagArtificial /* Compiler-generated code. */,
         /* Outlined code is optimized code by definition. */
-        DISubprogram::SPFlagDefinition | DISubprogram::SPFlagOptimized);
+        DISubprogram::SPFlagDefinition | DISubprogram::SPFlagOptimized, nullptr,
+        nullptr, nullptr, nullptr, SP->getTargetFuncName());
 
     // Don't add any new variables to the subprogram.
     DB.finalizeSubprogram(OutlinedSP);

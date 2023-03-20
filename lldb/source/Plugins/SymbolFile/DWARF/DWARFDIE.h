@@ -28,6 +28,8 @@ public:
   // Accessing information about a DIE
   const char *GetMangledName() const;
 
+  const char *GetTrampolineTargetName() const;
+
   const char *GetPubname() const;
 
   const char *GetQualifiedName(std::string &storage) const;

@@ -6675,6 +6675,15 @@ static void handleSwiftName(Sema &S, Decl *D, const ParsedAttr &AL) {
   D->addAttr(::new (S.Context) SwiftNameAttr(S.Context, AL, Name));
 }
 
+static void handleTrampoline(Sema &S, Decl *D, const ParsedAttr &AL) {
+  StringRef Name;
+  SourceLocation Loc;
+  if (!S.checkStringLiteralArgumentAttr(AL, 0, Name, &Loc))
+    return;
+
+  D->addAttr(::new (S.Context) TrampolineAttr(S.Context, AL, Name));
+}
+
 static void handleSwiftAsyncName(Sema &S, Decl *D, const ParsedAttr &AL) {
   StringRef Name;
   SourceLocation Loc;
@@ -9156,6 +9165,10 @@ ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_SwiftAsyncError:
     handleSwiftAsyncError(S, D, AL);
+    break;
+
+  case ParsedAttr::AT_Trampoline:
+    handleTrampoline(S, D, AL);
     break;
 
   // XRay attributes.

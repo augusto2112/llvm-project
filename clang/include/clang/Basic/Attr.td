@@ -2512,6 +2512,12 @@ def SwiftName : InheritableAttr {
   let Documentation = [SwiftNameDocs];
 }
 
+def Trampoline : InheritableAttr {
+  let Spellings = [GNU<"trampoline">];
+  let Args = [StringArgument<"Name">];
+  let Documentation = [Undocumented];
+}
+
 def SwiftNewType : InheritableAttr {
   let Spellings = [GNU<"swift_newtype">, GNU<"swift_wrapper">];
   let Args = [EnumArgument<"NewtypeKind", "NewtypeKind",
