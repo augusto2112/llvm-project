@@ -2427,6 +2427,7 @@ DWARFASTParserClang::ParseFunctionFromDWARF(CompileUnit &comp_unit,
     } else
       func_name.SetValue(ConstString(name), false);
 
+    auto trampoline_target = die.GetTrampolineTargetName();
     FunctionSP func_sp;
     std::unique_ptr<Declaration> decl_up;
     if (decl_file || decl_line || decl_column)
@@ -2445,7 +2446,7 @@ DWARFASTParserClang::ParseFunctionFromDWARF(CompileUnit &comp_unit,
         std::make_shared<Function>(&comp_unit,
                                    func_user_id, // UserID is the DIE offset
                                    func_user_id, func_name, func_type,
-                                   func_range); // first address range
+                                   func_range, trampoline_target); // first address range
 
     if (func_sp.get() != nullptr) {
       if (frame_base.IsValid())

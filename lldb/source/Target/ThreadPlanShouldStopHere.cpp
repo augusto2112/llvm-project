@@ -87,6 +87,10 @@ bool ThreadPlanShouldStopHere::DefaultShouldStopHereCallback(
     if (sc.line_entry.line == 0)
       should_stop_here = false;
   }
+  
+
+  if (frame->IsTrampoline())
+    return false;
 
   return should_stop_here;
 }

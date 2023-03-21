@@ -665,8 +665,7 @@ const char *DWARFDebugInfoEntry::GetName(const DWARFUnit *cu) const {
 //
 // Get value of the DW_AT_MIPS_linkage_name attribute and return it if one
 // exists, else return the value of the DW_AT_name attribute
-const char *
-DWARFDebugInfoEntry::GetMangledName(const DWARFUnit *cu,
+const char * DWARFDebugInfoEntry::GetMangledName(const DWARFUnit *cu,
                                     bool substitute_name_allowed) const {
   const char *name = nullptr;
 
@@ -685,6 +684,10 @@ DWARFDebugInfoEntry::GetMangledName(const DWARFUnit *cu,
   return name;
 }
 
+const char *
+DWARFDebugInfoEntry::GetTrampolineTargetName(const DWARFUnit *cu) const {
+  return GetAttributeValueAsString(cu, DW_AT_trampoline, nullptr, true);
+}
 // GetPubname
 //
 // Get value the name for a DIE as it should appear for a .debug_pubnames or

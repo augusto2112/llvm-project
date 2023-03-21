@@ -44,7 +44,9 @@ Symbol::Symbol(uint32_t symID, llvm::StringRef name, SymbolType type,
       m_demangled_is_synthesized(false),
       m_contains_linker_annotations(contains_linker_annotations),
       m_is_weak(false), m_type(type), m_mangled(name),
-      m_addr_range(section_sp, offset, size), m_flags(flags) {}
+      m_addr_range(section_sp, offset, size), m_flags(flags) {
+        llvm::errs() << "Making symbol\n";
+      }
 
 Symbol::Symbol(uint32_t symID, const Mangled &mangled, SymbolType type,
                bool external, bool is_debug, bool is_trampoline,
@@ -59,7 +61,10 @@ Symbol::Symbol(uint32_t symID, const Mangled &mangled, SymbolType type,
       m_demangled_is_synthesized(false),
       m_contains_linker_annotations(contains_linker_annotations),
       m_is_weak(false), m_type(type), m_mangled(mangled), m_addr_range(range),
-      m_flags(flags) {}
+      m_flags(flags) {
+
+        llvm::errs() << "Making symbol2\n";
+      }
 
 Symbol::Symbol(const Symbol &rhs)
     : SymbolContextScope(rhs), m_uid(rhs.m_uid), m_type_data(rhs.m_type_data),

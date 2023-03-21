@@ -389,6 +389,8 @@ public:
   /// inferring missing tail call frames from a backtrace). Artificial frames
   /// may have limited support for inspecting variables.
   bool IsArtificial() const;
+  
+  bool IsTrampoline();
 
   /// Query this frame to find what frame it is in this Thread's
   /// StackFrameList.

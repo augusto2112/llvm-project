@@ -6,13 +6,15 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "lldb/Target/ThreadPlanStepThrough.h"
+#include "lldb/Symbol/Function.h"
 #include "lldb/Breakpoint/Breakpoint.h"
 #include "lldb/Target/DynamicLoader.h"
 #include "lldb/Target/LanguageRuntime.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/Target.h"
+#include "lldb/Target/ThreadPlanStepThrough.h"
+#include "lldb/Target/ThreadPlanRunToAddress.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Stream.h"
@@ -95,6 +97,9 @@ void ThreadPlanStepThrough::LookForPlanToStepThroughFromCurrentPC() {
     }
   }
 
+  if (!m_sub_plan_sp)
+    m_sub_plan_sp = LookForFunctionWithTrampolineTarget();
+
   Log *log = GetLog(LLDBLog::Step);
   if (log) {
     lldb::addr_t current_address = GetThread().GetRegisterContext()->GetPC(0);
@@ -109,6 +114,25 @@ void ThreadPlanStepThrough::LookForPlanToStepThroughFromCurrentPC() {
                 current_address);
     }
   }
+}
+
+ThreadPlanSP ThreadPlanStepThrough::LookForFunctionWithTrampolineTarget() {
+  Thread &thread = GetThread();
+  TargetSP target_sp(thread.CalculateTarget());
+  StackFrame *current_frame = thread.GetStackFrameAtIndex(0).get();
+  const SymbolContext &current_context =
+      current_frame->GetSymbolContext(lldb::eSymbolContextFunction);
+  Function *current_function = current_context.function;
+  if (!current_function)
+    return {};
+
+  ConstString trampoline_name =
+      ConstString(current_function->GetTrampolineTargetName());
+  if (trampoline_name.IsEmpty())
+    return {};
+
+  return ThreadPlanRunToAddress::MakeThreadPlanRunToAddressFromSymbol(
+      thread, trampoline_name, m_stop_others);
 }
 
 void ThreadPlanStepThrough::GetDescription(Stream *s,

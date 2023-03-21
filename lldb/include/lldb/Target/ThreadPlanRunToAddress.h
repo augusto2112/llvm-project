@@ -45,6 +45,9 @@ public:
 
   bool MischiefManaged() override;
 
+  static lldb::ThreadPlanSP MakeThreadPlanRunToAddressFromSymbol(
+    Thread &thread, ConstString symbol_name, bool stop_others);
+
 protected:
   bool DoPlanExplainsStop(Event *event_ptr) override;
 

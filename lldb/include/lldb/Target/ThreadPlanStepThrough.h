@@ -44,6 +44,7 @@ private:
                                         bool abort_other_plans,
                                         bool stop_others, Status &status);
 
+  lldb::ThreadPlanSP LookForFunctionWithTrampolineTarget();
   void ClearBackstopBreakpoint();
 
   lldb::ThreadPlanSP m_sub_plan_sp;

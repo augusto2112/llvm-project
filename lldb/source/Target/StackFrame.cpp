@@ -1204,6 +1204,13 @@ bool StackFrame::IsArtificial() const {
   return m_stack_frame_kind == StackFrame::Kind::Artificial;
 }
 
+bool StackFrame::IsTrampoline() {
+  const SymbolContext &sc = GetSymbolContext(eSymbolContextFunction);
+  if (sc.function)
+    return !sc.function->GetTrampolineTargetName().empty();
+  return false;
+}
+
 lldb::LanguageType StackFrame::GetLanguage() {
   CompileUnit *cu = GetSymbolContext(eSymbolContextCompUnit).comp_unit;
   if (cu)

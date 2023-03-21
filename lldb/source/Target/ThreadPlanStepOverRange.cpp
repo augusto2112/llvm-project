@@ -151,13 +151,20 @@ bool ThreadPlanStepOverRange::ShouldStop(Event *event_ptr) {
     // trampoline.  So if we are in a trampoline we think the frame is older
     // because the trampoline confused the backtracer. As below, we step
     // through first, and then try to figure out how to get back out again.
+    /* auto current_frame = thread.GetStackFrameAtIndex(0); */
+    /* if (current_frame->IsTrampoline()) { */
+    /*   new_plan_sp = thread.QueueThreadPlanForStepOutNoShouldStop( */
+    /*       false, nullptr, true, stop_others, eVoteNo, eVoteNoOpinion, 0, */
+    /*       m_status, true); */
+    /*   LLDB_LOGF(log, */
+    /*             "Stepping out of trampoline."); */
+    /* } else { */
+      /* new_plan_sp = thread.QueueThreadPlanForStepThrough(m_stack_id, false, */
+      /*                                                    stop_others, m_status); */
+    /* if (new_plan_sp && log) */
+      /* LLDB_LOGF(log, */
+      /*           "Thought I stepped out, but in fact arrived at a trampoline."); */
 
-    new_plan_sp = thread.QueueThreadPlanForStepThrough(m_stack_id, false,
-                                                       stop_others, m_status);
-
-    if (new_plan_sp && log)
-      LLDB_LOGF(log,
-                "Thought I stepped out, but in fact arrived at a trampoline.");
   } else if (frame_order == eFrameCompareYounger) {
     // Make sure we really are in a new frame.  Do that by unwinding and seeing
     // if the start function really is our start function...
