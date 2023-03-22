@@ -3668,6 +3668,8 @@ public:
   MinSizeAttr *mergeMinSizeAttr(Decl *D, const AttributeCommonInfo &CI);
   SwiftNameAttr *mergeSwiftNameAttr(Decl *D, const SwiftNameAttr &SNA,
                                     StringRef Name);
+  TrampolineMangledTargetAttr *mergeTrampolineMangledTargetAttr(
+      Decl *D, const TrampolineMangledTargetAttr &TA, StringRef Target);
   OptimizeNoneAttr *mergeOptimizeNoneAttr(Decl *D,
                                           const AttributeCommonInfo &CI);
   InternalLinkageAttr *mergeInternalLinkageAttr(Decl *D, const ParsedAttr &AL);

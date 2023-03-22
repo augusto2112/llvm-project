@@ -68,6 +68,14 @@ static uint32_t getDeclAlignIfRequired(const Decl *D, const ASTContext &Ctx) {
   return D->hasAttr<AlignedAttr>() ? D->getMaxAlignment() : 0;
 }
 
+static StringRef getTargetFuncName(const Decl *D) {
+  if (!D)
+    return {};
+  if (auto *Trampoline = D->getAttr<TrampolineMangledTargetAttr>())
+    return Trampoline->getTarget();  
+  return {};
+}
+
 CGDebugInfo::CGDebugInfo(CodeGenModule &CGM)
     : CGM(CGM), DebugKind(CGM.getCodeGenOpts().getDebugInfo()),
       DebugTypeExtRefs(CGM.getCodeGenOpts().DebugTypeExtRefs),
@@ -1918,10 +1926,11 @@ llvm::DISubprogram *CGDebugInfo::CreateCXXMemberFunction(
       completeUnusedClass(*CD->getParent());
 
   llvm::DINodeArray TParamsArray = CollectFunctionTemplateParams(Method, Unit);
+  auto TargetFuncName = getTargetFuncName(Method);
   llvm::DISubprogram *SP = DBuilder.createMethod(
       RecordTy, MethodName, MethodLinkageName, MethodDefUnit, MethodLine,
       MethodTy, VIndex, ThisAdjustment, ContainingType, Flags, SPFlags,
-      TParamsArray.get());
+      TParamsArray.get(), nullptr, TargetFuncName);
 
   SPCache[Method->getCanonicalDecl()].reset(SP);
 
@@ -3849,10 +3858,12 @@ llvm::DISubprogram *CGDebugInfo::getFunctionFwdDeclOrStub(GlobalDecl GD,
   if (Stub) {
     Flags |= getCallSiteRelatedAttrs();
     SPFlags |= llvm::DISubprogram::SPFlagDefinition;
+    StringRef TargetFuncName = getTargetFuncName(FD);
     return DBuilder.createFunction(
         DContext, Name, LinkageName, Unit, Line,
         getOrCreateFunctionType(GD.getDecl(), FnType, Unit), 0, Flags, SPFlags,
-        TParamsArray.get(), getFunctionDeclaration(FD));
+        TParamsArray.get(), getFunctionDeclaration(FD), nullptr, nullptr,
+        TargetFuncName);
   }
 
   llvm::DISubprogram *SP = DBuilder.createTempFunctionFwdDecl(
@@ -3998,9 +4009,11 @@ llvm::DISubprogram *CGDebugInfo::getObjCMethodDeclaration(
   if (It == TypeCache.end())
     return nullptr;
   auto *InterfaceType = cast<llvm::DICompositeType>(It->second);
+  StringRef TargetFuncName = getTargetFuncName(D);
   llvm::DISubprogram *FD = DBuilder.createFunction(
       InterfaceType, getObjCMethodName(OMD), StringRef(),
-      InterfaceType->getFile(), LineNo, FnType, LineNo, Flags, SPFlags);
+      InterfaceType->getFile(), LineNo, FnType, LineNo, Flags, SPFlags, nullptr,
+      nullptr, nullptr, nullptr, TargetFuncName);
   DBuilder.finalizeSubprogram(FD);
   ObjCMethodCache[ID].push_back({FD, OMD->isDirectMethod()});
   return FD;
@@ -4182,6 +4195,8 @@ void CGDebugInfo::emitFunctionStart(GlobalDecl GD, SourceLocation Loc,
     Annotations = CollectBTFDeclTagAnnotations(D);
   }
 
+  StringRef TargetFuncName = getTargetFuncName(D);
+
   // FIXME: The function declaration we're constructing here is mostly reusing
   // declarations from CXXMethodDecl and not constructing new ones for arbitrary
   // FunctionDecls. When/if we fix this we can have FDContext be TheCU/null for
@@ -4190,7 +4205,7 @@ void CGDebugInfo::emitFunctionStart(GlobalDecl GD, SourceLocation Loc,
   llvm::DISubprogram *SP = DBuilder.createFunction(
       FDContext, Name, LinkageName, Unit, LineNo, DIFnType, ScopeLine,
       FlagsForDef, SPFlagsForDef, TParamsArray.get(), Decl, nullptr,
-      Annotations);
+      Annotations, TargetFuncName);
   Fn->setSubprogram(SP);
   // We might get here with a VarDecl in the case we're generating
   // code for the initialization of globals. Do not record these decls
@@ -4251,9 +4266,11 @@ void CGDebugInfo::EmitFunctionDecl(GlobalDecl GD, SourceLocation Loc,
 
   llvm::DINodeArray Annotations = CollectBTFDeclTagAnnotations(D);
   llvm::DISubroutineType *STy = getOrCreateFunctionType(D, FnType, Unit);
-  llvm::DISubprogram *SP = DBuilder.createFunction(
-      FDContext, Name, LinkageName, Unit, LineNo, STy, ScopeLine, Flags,
-      SPFlags, TParamsArray.get(), nullptr, nullptr, Annotations);
+  StringRef TargetFuncName = getTargetFuncName(D);
+  llvm::DISubprogram *SP =
+      DBuilder.createFunction(FDContext, Name, LinkageName, Unit, LineNo, STy,
+                              ScopeLine, Flags, SPFlags, TParamsArray.get(),
+                              nullptr, nullptr, Annotations, TargetFuncName);
 
   // Preserve btf_decl_tag attributes for parameters of extern functions
   // for BPF target. The parameters created in this loop are attached as

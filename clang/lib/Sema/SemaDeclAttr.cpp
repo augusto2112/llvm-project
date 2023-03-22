@@ -4879,6 +4879,20 @@ SwiftNameAttr *Sema::mergeSwiftNameAttr(Decl *D, const SwiftNameAttr &SNA,
   return ::new (Context) SwiftNameAttr(Context, SNA, Name);
 }
 
+TrampolineMangledTargetAttr *Sema::mergeTrampolineMangledTargetAttr(
+    Decl *D, const TrampolineMangledTargetAttr &TA, StringRef Target) {
+  if (const auto *PrevSNA = D->getAttr<TrampolineMangledTargetAttr>()) {
+    if (PrevSNA->getTarget() != Target) {
+      Diag(PrevSNA->getLocation(), diag::err_attributes_are_not_compatible)
+          << PrevSNA << &TA;
+      Diag(TA.getLoc(), diag::note_conflicting_attribute);
+    }
+
+    D->dropAttr<TrampolineMangledTargetAttr>();
+  }
+  return ::new (Context) TrampolineMangledTargetAttr(Context, TA, Target);
+}
+
 OptimizeNoneAttr *Sema::mergeOptimizeNoneAttr(Decl *D,
                                               const AttributeCommonInfo &CI) {
   if (AlwaysInlineAttr *Inline = D->getAttr<AlwaysInlineAttr>()) {
@@ -6756,6 +6770,17 @@ static void handleSwiftName(Sema &S, Decl *D, const ParsedAttr &AL) {
     return;
 
   D->addAttr(::new (S.Context) SwiftNameAttr(S.Context, AL, Name));
+}
+
+static void handleTrampolineMangledTarget(Sema &S, Decl *D,
+                                          const ParsedAttr &AL) {
+  StringRef Target;
+  SourceLocation Loc;
+  if (!S.checkStringLiteralArgumentAttr(AL, 0, Target, &Loc))
+    return;
+
+  D->addAttr(::new (S.Context)
+                 TrampolineMangledTargetAttr(S.Context, AL, Target));
 }
 
 static void handleSwiftAsyncName(Sema &S, Decl *D, const ParsedAttr &AL) {
@@ -9292,6 +9317,10 @@ ProcessDeclAttribute(Sema &S, Scope *scope, Decl *D, const ParsedAttr &AL,
     break;
   case ParsedAttr::AT_SwiftAsyncError:
     handleSwiftAsyncError(S, D, AL);
+    break;
+
+  case ParsedAttr::AT_TrampolineMangledTarget:
+    handleTrampolineMangledTarget(S, D, AL);
     break;
 
   // XRay attributes.

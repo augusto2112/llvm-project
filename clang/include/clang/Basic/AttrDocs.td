@@ -6900,6 +6900,30 @@ As such, this function attribute is currently only supported on X86 targets.
   }];
 }
 
+def TrampolineDocs : Documentation {
+  let Category = DocCatFunction;
+  let Content = [{
+The ``trampoline`` attribute indicates that the current function is a trampoline. 
+The argument is the mangled name of the symbol that debuggers should jump to instead 
+when entering the trampoline function. 
+
+For example:
+
+.. code-block:: c
+
+  int bar(void) {
+    return 42;
+  }
+
+  __attribute__((trampoline("bar")))
+  int foo(void) {
+    return bar();
+  }
+
+Indicates to debuggers that stepping into ``foo`` should jump directly to ``bar`` instead.
+  }];
+}
+
 def ReadOnlyPlacementDocs : Documentation {
   let Category = DocCatType;
   let Content = [{This attribute is attached to a structure, class or union declaration.

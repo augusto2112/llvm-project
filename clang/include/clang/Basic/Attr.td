@@ -770,6 +770,13 @@ def Artificial : InheritableAttr {
   let SimpleHandler = 1;
 }
 
+def TrampolineMangledTarget : InheritableAttr {
+  let Spellings = [Clang<"trampoline_mangled_target">];
+  let Subjects = SubjectList<[Function]>;
+  let Args = [StringArgument<"Target">];
+  let Documentation = [TrampolineDocs];
+}
+
 def XRayInstrument : InheritableAttr {
   let Spellings = [Clang<"xray_always_instrument">,
                    Clang<"xray_never_instrument">];
