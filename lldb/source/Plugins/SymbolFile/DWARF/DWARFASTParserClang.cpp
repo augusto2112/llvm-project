@@ -2440,12 +2440,15 @@ DWARFASTParserClang::ParseFunctionFromDWARF(CompileUnit &comp_unit,
 
     assert(func_type == nullptr || func_type != DIE_IS_BEING_PARSED);
 
+    const char *trampoline_target = die.GetTrampolineTargetName();
+
     const user_id_t func_user_id = die.GetID();
     func_sp =
         std::make_shared<Function>(&comp_unit,
                                    func_user_id, // UserID is the DIE offset
                                    func_user_id, func_name, func_type,
-                                   func_range); // first address range
+                                   func_range, // first address range
+                                   trampoline_target);
 
     if (func_sp.get() != nullptr) {
       if (frame_base.IsValid())

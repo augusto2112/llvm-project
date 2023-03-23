@@ -45,6 +45,12 @@ public:
 
   bool MischiefManaged() override;
 
+  /// Finds all the addresses the symbol name resolves to, and make a thread
+  /// plan that runs to them.
+  static lldb::ThreadPlanSP
+  MakeThreadPlanRunToAddressFromSymbol(Thread &thread, ConstString symbol_name,
+                                       bool stop_others);
+
 protected:
   bool DoPlanExplainsStop(Event *event_ptr) override;
 

@@ -8,11 +8,13 @@
 
 #include "lldb/Target/ThreadPlanStepThrough.h"
 #include "lldb/Breakpoint/Breakpoint.h"
+#include "lldb/Symbol/Function.h"
 #include "lldb/Target/DynamicLoader.h"
 #include "lldb/Target/LanguageRuntime.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/Target.h"
+#include "lldb/Target/ThreadPlanRunToAddress.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/Stream.h"
@@ -33,6 +35,10 @@ ThreadPlanStepThrough::ThreadPlanStepThrough(Thread &thread,
       m_start_address(0), m_backstop_bkpt_id(LLDB_INVALID_BREAK_ID),
       m_backstop_addr(LLDB_INVALID_ADDRESS), m_return_stack_id(m_stack_id),
       m_stop_others(stop_others) {
+  // If trampoline support is disabled, there's nothing for us to do.
+  if (!Target::GetGlobalProperties().GetEnableTrampolineSupport())
+    return;
+
   LookForPlanToStepThroughFromCurrentPC();
 
   // If we don't get a valid step through plan, don't bother to set up a
@@ -95,6 +101,9 @@ void ThreadPlanStepThrough::LookForPlanToStepThroughFromCurrentPC() {
     }
   }
 
+  if (!m_sub_plan_sp)
+    m_sub_plan_sp = LookForFunctionWithTrampolineTarget();
+
   Log *log = GetLog(LLDBLog::Step);
   if (log) {
     lldb::addr_t current_address = GetThread().GetRegisterContext()->GetPC(0);
@@ -109,6 +118,32 @@ void ThreadPlanStepThrough::LookForPlanToStepThroughFromCurrentPC() {
                 current_address);
     }
   }
+}
+
+ThreadPlanSP ThreadPlanStepThrough::LookForFunctionWithTrampolineTarget() {
+  Thread &thread = GetThread();
+  TargetSP target_sp(thread.CalculateTarget());
+  if (!target_sp)
+    return {};
+
+  StackFrameSP current_frame = thread.GetStackFrameAtIndex(0);
+  if (!current_frame)
+    return {};
+
+  const SymbolContext &current_context =
+      current_frame->GetSymbolContext(lldb::eSymbolContextFunction);
+  Function *current_function = current_context.function;
+  if (!current_function)
+    return {};
+
+  ConstString trampoline_name =
+      ConstString(current_function->GetTrampolineTargetName());
+  if (trampoline_name.IsEmpty())
+    return {};
+
+  return ThreadPlanRunToAddress::MakeThreadPlanRunToAddressFromSymbol(
+      thread, trampoline_name, m_stop_others);
+  ;
 }
 
 void ThreadPlanStepThrough::GetDescription(Stream *s,

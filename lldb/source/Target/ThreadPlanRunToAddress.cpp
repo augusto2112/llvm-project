@@ -201,3 +201,100 @@ bool ThreadPlanRunToAddress::AtOurAddress() {
   }
   return found_it;
 }
+
+ThreadPlanSP ThreadPlanRunToAddress::MakeThreadPlanRunToAddressFromSymbol(
+    Thread &thread, ConstString symbol_name, bool stop_others) {
+  TargetSP target_sp(thread.CalculateTarget());
+  if (!target_sp)
+    return {};
+
+  Log *log = GetLog(LLDBLog::Step);
+  std::vector<Address> addresses;
+  const ModuleList &images = target_sp->GetImages();
+
+  SymbolContextList code_symbols;
+  images.FindSymbolsWithNameAndType(symbol_name, eSymbolTypeCode, code_symbols);
+  const size_t num_code_symbols = code_symbols.GetSize();
+
+  if (num_code_symbols > 0) {
+    SymbolContext context;
+    AddressRange addr_range;
+    for (uint32_t i = 0; i < num_code_symbols; i++) {
+      context.Clear(true);
+      if (code_symbols.GetContextAtIndex(i, context)) {
+        addr_range.Clear();
+        context.GetAddressRange(eSymbolContextEverything, 0, false, addr_range);
+        addresses.push_back(addr_range.GetBaseAddress());
+        LLDB_LOG(log, "Found a trampoline target symbol at {0:x}.",
+                 addr_range.GetBaseAddress().GetLoadAddress(target_sp.get()));
+      }
+    }
+  }
+
+  SymbolContextList reexported_symbols;
+  images.FindSymbolsWithNameAndType(symbol_name, eSymbolTypeReExported,
+                                    reexported_symbols);
+  size_t num_reexported_symbols = reexported_symbols.GetSize();
+  if (num_reexported_symbols > 0) {
+    for (uint32_t i = 0; i < num_reexported_symbols; i++) {
+      SymbolContext context;
+      if (reexported_symbols.GetContextAtIndex(i, context)) {
+        if (context.symbol) {
+          Symbol *actual_symbol =
+              context.symbol->ResolveReExportedSymbol(*target_sp.get());
+          if (actual_symbol) {
+            const Address actual_symbol_addr = actual_symbol->GetAddress();
+            if (actual_symbol_addr.IsValid()) {
+              addresses.push_back(actual_symbol_addr);
+              actual_symbol_addr.GetLoadAddress(target_sp.get());
+              LLDB_LOGF(log, "Found a re-exported symbol: %s at 0x%" PRIx64 ".",
+                        actual_symbol->GetName().GetCString(),
+                        actual_symbol_addr.GetLoadAddress(target_sp.get()));
+            }
+          }
+        }
+      }
+    }
+  }
+
+  SymbolContextList indirect_symbols;
+  images.FindSymbolsWithNameAndType(symbol_name, eSymbolTypeResolver,
+                                    indirect_symbols);
+  size_t num_indirect_symbols = indirect_symbols.GetSize();
+  if (num_indirect_symbols > 0) {
+    for (uint32_t i = 0; i < num_indirect_symbols; i++) {
+      SymbolContext context;
+      AddressRange addr_range;
+      if (indirect_symbols.GetContextAtIndex(i, context)) {
+        context.GetAddressRange(eSymbolContextEverything, 0, false, addr_range);
+        addresses.push_back(addr_range.GetBaseAddress());
+        LLDB_LOGF(log, "Found an indirect target symbol at 0x%" PRIx64 ".",
+                  addr_range.GetBaseAddress().GetLoadAddress(target_sp.get()));
+      }
+    }
+  }
+
+  if (addresses.empty())
+    return {};
+
+  // First check whether any of the addresses point to Indirect symbols,
+  // and if they do, resolve them:
+  std::vector<lldb::addr_t> load_addrs;
+  for (Address address : addresses) {
+    Symbol *symbol = address.CalculateSymbolContextSymbol();
+    if (symbol && symbol->IsIndirect()) {
+      Status error;
+      Address symbol_address = symbol->GetAddress();
+      addr_t resolved_addr =
+          thread.GetProcess()->ResolveIndirectFunction(&symbol_address, error);
+      if (error.Success()) {
+        load_addrs.push_back(resolved_addr);
+      }
+    } else {
+      load_addrs.push_back(address.GetLoadAddress(target_sp.get()));
+    }
+  }
+
+  return std::make_shared<ThreadPlanRunToAddress>(thread, load_addrs,
+                                                  stop_others);
+}

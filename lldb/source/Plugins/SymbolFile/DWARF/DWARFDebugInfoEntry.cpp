@@ -685,6 +685,10 @@ DWARFDebugInfoEntry::GetMangledName(const DWARFUnit *cu,
   return name;
 }
 
+const char *
+DWARFDebugInfoEntry::GetTrampolineTargetName(const DWARFUnit *cu) const {
+  return GetAttributeValueAsString(cu, DW_AT_trampoline, nullptr, true);
+}
 // GetPubname
 //
 // Get value the name for a DIE as it should appear for a .debug_pubnames or
