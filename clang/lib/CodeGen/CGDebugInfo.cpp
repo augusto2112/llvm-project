@@ -21,6 +21,7 @@
 #include "TargetInfo.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Attr.h"
+#include "clang/AST/Attrs.inc"
 #include "clang/AST/DeclCXX.h"
 #include "clang/AST/DeclFriend.h"
 #include "clang/AST/DeclObjC.h"
@@ -107,6 +108,21 @@ static bool IsArtificial(VarDecl const *VD) {
 
   return VD->isImplicit() || (isa<Decl>(VD->getDeclContext()) &&
                               cast<Decl>(VD->getDeclContext())->isImplicit());
+}
+
+static bool usesDebugTransparent(const Decl *D, const CodeGenModule &CGM) {
+  if (!D)
+    return false;
+
+  if (auto *attr = D->getAttr<DebugTransparentAttr>()) {
+    auto opts = CGM.getCodeGenOpts();
+    if (opts.DwarfVersion == 0) {
+      auto &diags = CGM.getDiags();
+      diags.Report(attr->getLocation(), diag::warn_debug_transparent_ignored);
+    }
+    return true;
+  }
+  return false;
 }
 
 CGDebugInfo::CGDebugInfo(CodeGenModule &CGM)
@@ -2163,6 +2179,8 @@ llvm::DISubprogram *CGDebugInfo::CreateCXXMemberFunction(
     SPFlags |= llvm::DISubprogram::SPFlagLocalToUnit;
   if (CGM.getLangOpts().Optimize)
     SPFlags |= llvm::DISubprogram::SPFlagOptimized;
+  if (usesDebugTransparent(Method, CGM))
+    SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
 
   // In this debug mode, emit type info for a class when its constructor type
   // info is emitted.
@@ -4164,6 +4182,8 @@ llvm::DISubprogram *CGDebugInfo::getFunctionFwdDeclOrStub(GlobalDecl GD,
   if (Stub) {
     Flags |= getCallSiteRelatedAttrs();
     SPFlags |= llvm::DISubprogram::SPFlagDefinition;
+    if (usesDebugTransparent(FD, CGM))
+      SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
     return DBuilder.createFunction(
         DContext, Name, LinkageName, Unit, Line,
         getOrCreateFunctionType(GD.getDecl(), FnType, Unit), 0, Flags, SPFlags,
@@ -4313,6 +4333,8 @@ llvm::DISubprogram *CGDebugInfo::getObjCMethodDeclaration(
   if (It == TypeCache.end())
     return nullptr;
   auto *InterfaceType = cast<llvm::DICompositeType>(It->second);
+  if (usesDebugTransparent(D, CGM))
+    SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
   llvm::DISubprogram *FD = DBuilder.createFunction(
       InterfaceType, getObjCMethodName(OMD), StringRef(),
       InterfaceType->getFile(), LineNo, FnType, LineNo, Flags, SPFlags);
@@ -4480,6 +4502,8 @@ void CGDebugInfo::emitFunctionStart(GlobalDecl GD, SourceLocation Loc,
     SPFlags |= llvm::DISubprogram::SPFlagLocalToUnit;
   if (CGM.getLangOpts().Optimize)
     SPFlags |= llvm::DISubprogram::SPFlagOptimized;
+  if (usesDebugTransparent(D, CGM))
+    SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
 
   llvm::DINode::DIFlags FlagsForDef = Flags | getCallSiteRelatedAttrs();
   llvm::DISubprogram::DISPFlags SPFlagsForDef =
@@ -4566,6 +4590,9 @@ void CGDebugInfo::EmitFunctionDecl(GlobalDecl GD, SourceLocation Loc,
 
   llvm::DINodeArray Annotations = CollectBTFDeclTagAnnotations(D);
   llvm::DISubroutineType *STy = getOrCreateFunctionType(D, FnType, Unit);
+  if (usesDebugTransparent(D, CGM))
+    SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
+
   llvm::DISubprogram *SP = DBuilder.createFunction(
       FDContext, Name, LinkageName, Unit, LineNo, STy, ScopeLine, Flags,
       SPFlags, TParamsArray.get(), nullptr, nullptr, Annotations);
