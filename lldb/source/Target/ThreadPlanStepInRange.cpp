@@ -218,6 +218,17 @@ bool ThreadPlanStepInRange::ShouldStop(Event *event_ptr) {
     // We may have set the plan up above in the FrameIsOlder section:
 
     if (!m_sub_plan_sp)
+      m_sub_plan_sp = thread.QueueThreadPlanForStepThroughGenericTrampoline(
+          false, m_stop_others, m_status);
+    if (log) {
+      if (m_sub_plan_sp)
+        LLDB_LOGF(log, "Found a generic step through plan: %s",
+                  m_sub_plan_sp->GetName());
+      else
+        LLDB_LOGF(log, "No generic step through plan found.");
+    }
+
+    if (!m_sub_plan_sp)
       m_sub_plan_sp = thread.QueueThreadPlanForStepThrough(
           m_stack_id, false, stop_others, m_status);
 
@@ -428,33 +439,7 @@ bool ThreadPlanStepInRange::DoPlanExplainsStop(Event *event_ptr) {
   // branch" in which case if we hit our branch breakpoint we don't set the
   // plan to complete.
 
-  bool return_value = false;
-
-  if (m_virtual_step) {
-    return_value = true;
-  } else {
-    StopInfoSP stop_info_sp = GetPrivateStopInfo();
-    if (stop_info_sp) {
-      StopReason reason = stop_info_sp->GetStopReason();
-
-      if (reason == eStopReasonBreakpoint) {
-        if (NextRangeBreakpointExplainsStop(stop_info_sp)) {
-          return_value = true;
-        }
-      } else if (IsUsuallyUnexplainedStopReason(reason)) {
-        Log *log = GetLog(LLDBLog::Step);
-        if (log)
-          log->PutCString("ThreadPlanStepInRange got asked if it explains the "
-                          "stop for some reason other than step.");
-        return_value = false;
-      } else {
-        return_value = true;
-      }
-    } else
-      return_value = true;
-  }
-
-  return return_value;
+  return m_virtual_step || ThreadPlanStepRange::DoPlanExplainsStop(event_ptr);
 }
 
 bool ThreadPlanStepInRange::DoWillResume(lldb::StateType resume_state,
