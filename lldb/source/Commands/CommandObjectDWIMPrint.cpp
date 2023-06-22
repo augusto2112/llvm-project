@@ -62,8 +62,8 @@ void CommandObjectDWIMPrint::HandleArgumentCompletion(
 }
 
 void CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
-    ValueObject &valobj, const DumpValueObjectOptions &dump_options, bool is_po,
-    Stream &output_stream) {
+    ValueObject &valobj, const DumpValueObjectOptions &dump_options,
+    lldb::LanguageType language, bool is_po, Stream &output_stream) {
   // Identify the default output of po "<Name: 0x...>.
   // The regex is:
   // - Start with "<".
@@ -77,7 +77,9 @@ void CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
   StreamString temp_result_stream;
   valobj.Dump(temp_result_stream, dump_options);
   const char *temp_result = temp_result_stream.GetData();
-  if (is_po && std::regex_match(temp_result, swift_class_regex))
+  if ((language == lldb::eLanguageTypeSwift ||
+       language == lldb::eLanguageTypeObjC) &&
+      is_po && std::regex_match(temp_result, swift_class_regex))
     output_stream
         << "note: object description requested, but type doesn't implement "
            "a custom object description. Consider using \"p\" instead of "
@@ -129,6 +131,11 @@ bool CommandObjectDWIMPrint::DoExecute(StringRef command,
 
   StackFrame *frame = m_exe_ctx.GetFramePtr();
 
+  // Either Swift was explicitly specified, or the frame is Swift.
+  lldb::LanguageType language = m_expr_options.language;
+  if (language == lldb::eLanguageTypeUnknown && frame)
+    language = frame->GuessLanguage();
+
   // First, try `expr` as the name of a frame variable.
   if (frame) {
     auto valobj_sp = frame->FindVariable(ConstString(expr));
@@ -146,7 +153,7 @@ bool CommandObjectDWIMPrint::DoExecute(StringRef command,
                                         flags, expr);
       }
 
-      MaybeAddPoHintAndDump(*valobj_sp.get(), dump_options, is_po,
+      MaybeAddPoHintAndDump(*valobj_sp.get(), dump_options, language, is_po,
                      result.GetOutputStream());
 
       result.SetStatus(eReturnStatusSuccessFinishResult);
@@ -173,12 +180,7 @@ bool CommandObjectDWIMPrint::DoExecute(StringRef command,
   //   2. Verify the isa pointer is a known class
   //   3. Require addresses to be on the heap
   std::string modified_expr_storage;
-  // Either Swift was explicitly specified, or the frame is Swift.
-  bool is_swift = false;
-  if (m_expr_options.language == lldb::eLanguageTypeSwift)
-    is_swift = true;
-  else if (m_expr_options.language == lldb::eLanguageTypeUnknown)
-    is_swift = frame && frame->GuessLanguage() == lldb::eLanguageTypeSwift;
+  bool is_swift = language == lldb::eLanguageTypeSwift;
   if (is_swift && is_po) {
     lldb::addr_t addr;
     bool is_integer = !expr.getAsInteger(0, addr);
@@ -210,8 +212,8 @@ bool CommandObjectDWIMPrint::DoExecute(StringRef command,
       }
 
       if (valobj_sp->GetError().GetError() != UserExpression::kNoResult)
-        MaybeAddPoHintAndDump(*valobj_sp.get(), dump_options, is_po,
-                       result.GetOutputStream());
+        MaybeAddPoHintAndDump(*valobj_sp.get(), dump_options, language, is_po,
+                              result.GetOutputStream());
 
       if (suppress_result)
         if (auto result_var_sp =

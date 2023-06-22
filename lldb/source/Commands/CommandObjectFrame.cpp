@@ -516,6 +516,8 @@ protected:
       m_option_variable.show_globals = true;
 
     bool is_po = m_varobj_options.use_objc;
+    auto language = frame->GuessLanguage();
+
     if (variable_list) {
       const Format format = m_option_format.GetFormat();
       options.SetFormat(format);
@@ -561,7 +563,7 @@ protected:
                       }
 
                       CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
-                          *valobj_sp.get(), options, is_po,
+                          *valobj_sp.get(), options, language, is_po,
                           result.GetOutputStream());
                     }
                   }
@@ -611,7 +613,7 @@ protected:
               options.SetRootValueObjectName(
                   valobj_sp->GetParent() ? entry.c_str() : nullptr);
               CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
-                  *valobj_sp.get(), options, is_po, output_stream);
+                  *valobj_sp.get(), options, language, is_po, output_stream);
             } else {
               if (auto error_cstr = error.AsCString(nullptr))
                 result.AppendError(error_cstr);
@@ -682,7 +684,8 @@ protected:
                 options.SetRootValueObjectName(
                     var_sp ? var_sp->GetName().AsCString() : nullptr);
                 CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
-                    *valobj_sp.get(), options, is_po, result.GetOutputStream());
+                    *valobj_sp.get(), options, language, is_po,
+                    result.GetOutputStream());
               }
             }
           }
@@ -702,9 +705,11 @@ protected:
             options.SetFormat(m_option_format.GetFormat());
             options.SetVariableFormatDisplayLanguage(
                 rec_value_sp->GetPreferredDisplayLanguage());
+            rec_value_sp->GetPreferredDisplayLanguage();
             options.SetRootValueObjectName(rec_value_sp->GetName().AsCString());
             CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
-                *rec_value_sp.get(), options, is_po, result.GetOutputStream());
+                *rec_value_sp.get(), options, language, is_po,
+                result.GetOutputStream());
           }
         }
       }

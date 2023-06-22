@@ -507,8 +507,12 @@ bool CommandObjectExpression::EvaluateExpression(llvm::StringRef expr,
             result_valobj_sp->GetPreferredDisplayLanguage());
 
         bool is_po = m_varobj_options.use_objc;
-        CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
-            *result_valobj_sp.get(), options, is_po, result.GetOutputStream());
+        lldb::LanguageType language = m_command_options.language;
+        if (language == lldb::eLanguageTypeUnknown && frame)
+          language = frame->GuessLanguage();
+        CommandObjectDWIMPrint::MaybeAddPoHintAndDump(*result_valobj_sp.get(),
+                                                      options, language, is_po,
+                                                      result.GetOutputStream());
 
         if (suppress_result)
           if (auto result_var_sp =
