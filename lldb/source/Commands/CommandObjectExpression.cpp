@@ -8,6 +8,7 @@
 
 #include "llvm/ADT/StringRef.h"
 
+#include "CommandObjectDWIMPrint.h"
 #include "CommandObjectExpression.h"
 #include "lldb/Core/Debugger.h"
 #include "lldb/Expression/ExpressionVariable.h"
@@ -505,7 +506,9 @@ bool CommandObjectExpression::EvaluateExpression(llvm::StringRef expr,
         options.SetVariableFormatDisplayLanguage(
             result_valobj_sp->GetPreferredDisplayLanguage());
 
-        result_valobj_sp->Dump(output_stream, options);
+        bool is_po = m_varobj_options.use_objc;
+        CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
+            *result_valobj_sp.get(), options, is_po, result.GetOutputStream());
 
         if (suppress_result)
           if (auto result_var_sp =

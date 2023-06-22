@@ -27,6 +27,8 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FormatVariadic.h"
 
+#include <regex>
+
 using namespace llvm;
 using namespace lldb;
 using namespace lldb_private;
@@ -57,6 +59,31 @@ void CommandObjectDWIMPrint::HandleArgumentCompletion(
   CommandCompletions::InvokeCommonCompletionCallbacks(
       GetCommandInterpreter(), CommandCompletions::eVariablePathCompletion,
       request, nullptr);
+}
+
+void CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
+    ValueObject &valobj, const DumpValueObjectOptions &dump_options, bool is_po,
+    Stream &output_stream) {
+  // Identify the default output of po "<Name: 0x...>.
+  // The regex is:
+  // - Start with "<".
+  // - Followed by 1 or more non-whitespace characters.
+  // - Followed by ": 0x".
+  // - Followed by 5 or more hex digits.
+  // - Followed by ">".
+  // - End with zero or more whitespace characters.
+  static const std::regex swift_class_regex("^<\\S+: 0x[[:xdigit:]]{5,}>\\s*$");
+
+  StreamString temp_result_stream;
+  valobj.Dump(temp_result_stream, dump_options);
+  const char *temp_result = temp_result_stream.GetData();
+  if (is_po && std::regex_match(temp_result, swift_class_regex))
+    output_stream
+        << "note: object description requested, but type doesn't implement "
+           "a custom object description. Consider using \"p\" instead of "
+           "\"po\"\n";
+
+  output_stream << temp_result;
 }
 
 bool CommandObjectDWIMPrint::DoExecute(StringRef command,
@@ -98,6 +125,8 @@ bool CommandObjectDWIMPrint::DoExecute(StringRef command,
       m_expr_options.m_verbosity, m_format_options.GetFormat());
   dump_options.SetHideRootName(suppress_result);
 
+  bool is_po = m_varobj_options.use_objc;
+
   StackFrame *frame = m_exe_ctx.GetFramePtr();
 
   // First, try `expr` as the name of a frame variable.
@@ -117,7 +146,9 @@ bool CommandObjectDWIMPrint::DoExecute(StringRef command,
                                         flags, expr);
       }
 
-      valobj_sp->Dump(result.GetOutputStream(), dump_options);
+      MaybeAddPoHintAndDump(*valobj_sp.get(), dump_options, is_po,
+                     result.GetOutputStream());
+
       result.SetStatus(eReturnStatusSuccessFinishResult);
       return true;
     }
@@ -148,7 +179,6 @@ bool CommandObjectDWIMPrint::DoExecute(StringRef command,
     is_swift = true;
   else if (m_expr_options.language == lldb::eLanguageTypeUnknown)
     is_swift = frame && frame->GuessLanguage() == lldb::eLanguageTypeSwift;
-  bool is_po = m_varobj_options.use_objc;
   if (is_swift && is_po) {
     lldb::addr_t addr;
     bool is_integer = !expr.getAsInteger(0, addr);
@@ -180,7 +210,8 @@ bool CommandObjectDWIMPrint::DoExecute(StringRef command,
       }
 
       if (valobj_sp->GetError().GetError() != UserExpression::kNoResult)
-        valobj_sp->Dump(result.GetOutputStream(), dump_options);
+        MaybeAddPoHintAndDump(*valobj_sp.get(), dump_options, is_po,
+                       result.GetOutputStream());
 
       if (suppress_result)
         if (auto result_var_sp =

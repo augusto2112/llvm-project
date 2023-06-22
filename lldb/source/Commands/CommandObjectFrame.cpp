@@ -5,6 +5,8 @@
 // SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
 //
 //===----------------------------------------------------------------------===//
+
+#include "CommandObjectDWIMPrint.h"
 #include "CommandObjectFrame.h"
 #include "lldb/Core/Debugger.h"
 #include "lldb/Core/ValueObject.h"
@@ -513,6 +515,7 @@ protected:
     if (sym_ctx.function && sym_ctx.function->IsTopLevelFunction())
       m_option_variable.show_globals = true;
 
+    bool is_po = m_varobj_options.use_objc;
     if (variable_list) {
       const Format format = m_option_format.GetFormat();
       options.SetFormat(format);
@@ -556,7 +559,10 @@ protected:
                                                     show_module))
                           s.PutCString(": ");
                       }
-                      valobj_sp->Dump(result.GetOutputStream(), options);
+
+                      CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
+                          *valobj_sp.get(), options, is_po,
+                          result.GetOutputStream());
                     }
                   }
                 }
@@ -604,7 +610,8 @@ protected:
               Stream &output_stream = result.GetOutputStream();
               options.SetRootValueObjectName(
                   valobj_sp->GetParent() ? entry.c_str() : nullptr);
-              valobj_sp->Dump(output_stream, options);
+              CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
+                  *valobj_sp.get(), options, is_po, output_stream);
             } else {
               if (auto error_cstr = error.AsCString(nullptr))
                 result.AppendError(error_cstr);
@@ -674,7 +681,8 @@ protected:
                     valobj_sp->GetPreferredDisplayLanguage());
                 options.SetRootValueObjectName(
                     var_sp ? var_sp->GetName().AsCString() : nullptr);
-                valobj_sp->Dump(result.GetOutputStream(), options);
+                CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
+                    *valobj_sp.get(), options, is_po, result.GetOutputStream());
               }
             }
           }
@@ -695,7 +703,8 @@ protected:
             options.SetVariableFormatDisplayLanguage(
                 rec_value_sp->GetPreferredDisplayLanguage());
             options.SetRootValueObjectName(rec_value_sp->GetName().AsCString());
-            rec_value_sp->Dump(result.GetOutputStream(), options);
+            CommandObjectDWIMPrint::MaybeAddPoHintAndDump(
+                *rec_value_sp.get(), options, is_po, result.GetOutputStream());
           }
         }
       }

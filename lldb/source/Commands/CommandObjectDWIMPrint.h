@@ -43,6 +43,11 @@ public:
   HandleArgumentCompletion(CompletionRequest &request,
                            OptionElementVector &opt_element_vector) override;
 
+  static void
+  MaybeAddPoHintAndDump(ValueObject &valobj,
+                 const DumpValueObjectOptions &dump_options, bool is_po,
+                 Stream &output_stream);
+
 private:
   bool DoExecute(llvm::StringRef command, CommandReturnObject &result) override;
 
