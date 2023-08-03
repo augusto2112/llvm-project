@@ -18,6 +18,7 @@
 #include "lldb/lldb-private-enumerations.h"
 #include "lldb/lldb-private-interfaces.h"
 #include "llvm/Support/JSON.h"
+#include <mutex>
 
 namespace lldb_private {
 
@@ -64,6 +65,10 @@ public:
   OptionValue() = default;
 
   virtual ~OptionValue() = default;
+
+  OptionValue(const OptionValue &other);
+  
+  OptionValue& operator=(const OptionValue &other);
 
   // Subclasses should override these functions
   virtual Type GetType() const = 0;
@@ -345,6 +350,7 @@ protected:
                                 // set from the command line or as a setting,
                                 // versus if we just have the default value that
                                 // was already populated in the option value.
+  mutable std::recursive_mutex m_mutex;
 };
 
 } // namespace lldb_private
