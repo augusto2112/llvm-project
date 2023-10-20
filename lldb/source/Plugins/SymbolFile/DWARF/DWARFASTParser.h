@@ -66,6 +66,9 @@ public:
 
   lldb_private::Type *GetTypeForDIE(const DWARFDIE &die);
 
+  lldb_private::Type *
+  GetTypeForDIE(const lldb_private::plugin::dwarf::DWARFDIE &die);
+
   static lldb::AccessType GetAccessTypeFromDWARF(uint32_t dwarf_accessibility);
 
   Kind GetKind() const { return m_kind; }
