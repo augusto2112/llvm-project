@@ -89,6 +89,12 @@ public:
   std::unique_ptr<swift::reflection::BuiltinTypeDescriptorBase>
   getBuiltinTypeDescriptor(const swift::reflection::TypeRef *TR) override;
 
+  /// Returns a builtin descriptor constructed from DWARF info.
+  std::unique_ptr<swift::reflection::MultiPayloadEnumDescriptorBase>
+  getMultiPayloadEnumDescriptor(const swift::reflection::TypeRef *TR) override {
+    return {};
+  }
+
 protected:
   lldb_private::TypeSystemSwiftTypeRef &m_swift_typesystem;
 };
