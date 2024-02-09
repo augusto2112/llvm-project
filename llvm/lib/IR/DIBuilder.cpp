@@ -509,13 +509,13 @@ DICompositeType *DIBuilder::createStructType(
     uint64_t SizeInBits, uint32_t AlignInBits, DINode::DIFlags Flags,
     DIType *DerivedFrom, DINodeArray Elements, unsigned RunTimeLang,
     DIType *VTableHolder, StringRef UniqueIdentifier,
-    uint32_t NumExtraInhabitants) {
+    uint32_t NumExtraInhabitants, APInt SpareBitsMask) {
   auto *R = DICompositeType::get(
       VMContext, dwarf::DW_TAG_structure_type, Name, File, LineNumber,
       getNonCompileUnitScope(Context), DerivedFrom, SizeInBits, AlignInBits, 0,
       Flags, Elements, RunTimeLang, VTableHolder, nullptr, UniqueIdentifier,
       nullptr, nullptr, nullptr, nullptr, nullptr, nullptr,
-      NumExtraInhabitants);
+      NumExtraInhabitants, SpareBitsMask);
   trackIfUnresolved(R);
   return R;
 }

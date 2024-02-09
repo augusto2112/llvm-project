@@ -1,8 +1,8 @@
 ; RUN: llvm-as < %s | llvm-dis | llvm-as | llvm-dis | FileCheck %s
 ; RUN: verify-uselistorder %s
 
-; CHECK: !named = !{!0, !0, !1, !2, !3, !4, !5, !6, !7, !8, !8, !9, !10, !11, !12, !13, !14, !15, !16, !17, !18, !19, !20, !21, !22, !23, !24, !25, !26, !27, !27, !28, !29, !30, !31, !32, !33, !34, !35, !36, !37, !38, !39, !40, !41, !42}
-!named = !{!0, !1, !2, !3, !4, !5, !6, !7, !8, !9, !10, !11, !12, !13, !14, !15, !16, !17, !18, !19, !20, !21, !22, !23, !24, !25, !26, !27, !28, !29, !30, !31, !32, !33, !34, !35, !36, !37, !38, !39, !40, !41, !42, !43, !44, !45}
+; CHECK: !named = !{!0, !0, !1, !2, !3, !4, !5, !6, !7, !8, !8, !9, !10, !11, !12, !13, !14, !15, !16, !17, !18, !19, !20, !21, !22, !23, !24, !25, !26, !27, !27, !28, !29, !30, !31, !32, !33, !34, !35, !36, !37, !38, !39, !40, !41, !42, !43, !44}
+!named = !{!0, !1, !2, !3, !4, !5, !6, !7, !8, !9, !10, !11, !12, !13, !14, !15, !16, !17, !18, !19, !20, !21, !22, !23, !24, !25, !26, !27, !28, !29, !30, !31, !32, !33, !34, !35, !36, !37, !38, !39, !40, !41, !42, !43, !44, !45, !46, !47}
 
 ; CHECK:      !0 = !DISubrange(count: 3, lowerBound: 0)
 ; CHECK-NEXT: !1 = !DISubrange(count: 3, lowerBound: 4)
@@ -108,3 +108,10 @@
 
 ;CHECK: !DICompositeType(tag: DW_TAG_structure_type, name: "ExtraInhabitantCompositeType", file: !10, size: 64, num_extra_inhabitants: 66, identifier: "MangledExtraInhabitantCompositeType")
 !45 = !DICompositeType(tag: DW_TAG_structure_type, name: "ExtraInhabitantCompositeType", file: !12, size: 64, num_extra_inhabitants: 66, identifier: "MangledExtraInhabitantCompositeType")
+
+;CHECK: !DICompositeType(tag: DW_TAG_structure_type, name: "SmallSpareBitsMaskType", file: !10, size: 64, num_extra_inhabitants: 66, spare_bits_mask: 1152921504606846982, identifier: "SmallSpareBitsMaskType")
+!46 = !DICompositeType(tag: DW_TAG_structure_type, name: "SmallSpareBitsMaskType", file: !12, size: 64, num_extra_inhabitants: 66, spare_bits_mask: 1152921504606846982, identifier: "SmallSpareBitsMaskType")
+
+;CHECK: !DICompositeType(tag: DW_TAG_structure_type, name: "BigSpareBitsMaskType", file: !10, size: 64, num_extra_inhabitants: 66, spare_bits_mask: 108555083659983933259422293470276692178088180458183830018690888325426562727942, identifier: "BigSpareBitsMaskType")
+!47 = !DICompositeType(tag: DW_TAG_structure_type, name: "BigSpareBitsMaskType", file: !12, size: 64, num_extra_inhabitants: 66, spare_bits_mask: 108555083659983933259422293470276692178088180458183830018690888325426562727942, identifier: "BigSpareBitsMaskType")
+

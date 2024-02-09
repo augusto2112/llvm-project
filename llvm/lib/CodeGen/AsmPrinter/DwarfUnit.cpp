@@ -1065,6 +1065,13 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DICompositeType *CTy) {
     if (uint32_t NumExtraInhabitants = CTy->getNumExtraInhabitants())
       addUInt(Buffer, dwarf::DW_AT_APPLE_num_extra_inhabitants,
             std::nullopt, NumExtraInhabitants);
+
+    auto SpareBitsMask = CTy->getSpareBitsMask();
+    if (!SpareBitsMask.isZero()) {
+      DIE &SpareBitMaskDie =
+          createAndAddDIE(dwarf::DW_TAG_APPLE_spare_bits_mask, Buffer);
+      addConstantValue(SpareBitMaskDie, SpareBitsMask, false);
+    }
   }
 }
 

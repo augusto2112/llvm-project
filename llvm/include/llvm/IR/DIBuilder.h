@@ -466,7 +466,7 @@ namespace llvm {
         uint64_t SizeInBits, uint32_t AlignInBits, DINode::DIFlags Flags,
         DIType *DerivedFrom, DINodeArray Elements, unsigned RunTimeLang = 0,
         DIType *VTableHolder = nullptr, StringRef UniqueIdentifier = "", 
-        uint32_t NumExtraInhabitants = 0);
+        uint32_t NumExtraInhabitants = 0, APInt SpareBitsMask = APInt());
 
     /// Create debugging information entry for an union.
     /// \param Scope        Scope in which this union is defined.
