@@ -216,21 +216,24 @@ bool DebugHandlerBase::isUnsignedDIType(const DIType *Ty) {
   }
 
   if (auto *BTy = dyn_cast<DIBasicType>(Ty)) {
-    unsigned Encoding = BTy->getEncoding();
-    assert((Encoding == dwarf::DW_ATE_unsigned ||
-            Encoding == dwarf::DW_ATE_unsigned_char ||
-            Encoding == dwarf::DW_ATE_signed ||
-            Encoding == dwarf::DW_ATE_signed_char ||
-            Encoding == dwarf::DW_ATE_float || Encoding == dwarf::DW_ATE_UTF ||
-            Encoding == dwarf::DW_ATE_boolean ||
-            Encoding == dwarf::DW_ATE_complex_float ||
-            (Ty->getTag() == dwarf::DW_TAG_unspecified_type &&
-             Ty->getName() == "decltype(nullptr)")) &&
-           "Unsupported encoding");
-    return Encoding == dwarf::DW_ATE_unsigned ||
-           Encoding == dwarf::DW_ATE_unsigned_char ||
-           Encoding == dwarf::DW_ATE_UTF || Encoding == dwarf::DW_ATE_boolean ||
-           Ty->getTag() == dwarf::DW_TAG_unspecified_type;
+  unsigned Encoding = BTy->getEncoding();
+  assert((Encoding == dwarf::DW_ATE_unsigned ||
+          Encoding == dwarf::DW_ATE_unsigned_char ||
+          Encoding == dwarf::DW_ATE_signed ||
+          Encoding == dwarf::DW_ATE_signed_char ||
+          Encoding == dwarf::DW_ATE_float || Encoding == dwarf::DW_ATE_UTF ||
+          Encoding == dwarf::DW_ATE_boolean ||
+          Encoding == dwarf::DW_ATE_complex_float ||
+          Encoding == dwarf::DW_ATE_signed_fixed ||
+          Encoding == dwarf::DW_ATE_unsigned_fixed ||
+          (Ty->getTag() == dwarf::DW_TAG_unspecified_type &&
+           Ty->getName() == "decltype(nullptr)")) &&
+         "Unsupported encoding");
+  return Encoding == dwarf::DW_ATE_unsigned ||
+         Encoding == dwarf::DW_ATE_unsigned_char ||
+         Encoding == dwarf::DW_ATE_UTF || Encoding == dwarf::DW_ATE_boolean ||
+         Encoding == llvm::dwarf::DW_ATE_unsigned_fixed ||
+         Ty->getTag() == dwarf::DW_TAG_unspecified_type; 
   }
   // FIXME: the signedness should come from the expression where the type is
   // used in, not the type itself.
