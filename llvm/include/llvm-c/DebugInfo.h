@@ -1049,6 +1049,9 @@ const char *LLVMDITypeGetName(LLVMMetadataRef DType, size_t *Length);
  * Get the size of this DIType in bits.
  * \param DType     The DIType.
  *
+ * \return Returns UINT64_MAX if there is no specified size, and the actual
+ * size otherwise.
+ *
  * @see DIType::getSizeInBits()
  */
 uint64_t LLVMDITypeGetSizeInBits(LLVMMetadataRef DType);

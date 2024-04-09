@@ -471,7 +471,7 @@ template <> struct MDNodeKeyImpl<DIBasicType> {
       : Tag(Tag), Name(Name), SizeInBits(SizeInBits), AlignInBits(AlignInBits),
         Encoding(Encoding), Flags(Flags) {}
   MDNodeKeyImpl(const DIBasicType *N)
-      : Tag(N->getTag()), Name(N->getRawName()), SizeInBits(N->getSizeInBits()),
+      : Tag(N->getTag()), Name(N->getRawName()), SizeInBits(N->getRawSizeInBits()),
         AlignInBits(N->getAlignInBits()), Encoding(N->getEncoding()),
         Flags(N->getFlags()) {}
 
@@ -508,7 +508,7 @@ template <> struct MDNodeKeyImpl<DIStringType> {
         StringLength(N->getRawStringLength()),
         StringLengthExp(N->getRawStringLengthExp()),
         StringLocationExp(N->getRawStringLocationExp()),
-        SizeInBits(N->getSizeInBits()), AlignInBits(N->getAlignInBits()),
+        SizeInBits(N->getRawSizeInBits()), AlignInBits(N->getAlignInBits()),
         Encoding(N->getEncoding()) {}
 
   bool isKeyOf(const DIStringType *RHS) const {
@@ -536,7 +536,7 @@ template <> struct MDNodeKeyImpl<DIDerivedType> {
   unsigned Line;
   Metadata *Scope;
   Metadata *BaseType;
-  uint64_t SizeInBits;
+  std::optional<uint64_t> SizeInBits;
   uint64_t OffsetInBits;
   uint32_t AlignInBits;
   std::optional<unsigned> DWARFAddressSpace;
@@ -546,8 +546,9 @@ template <> struct MDNodeKeyImpl<DIDerivedType> {
   Metadata *Annotations;
 
   MDNodeKeyImpl(unsigned Tag, MDString *Name, Metadata *File, unsigned Line,
-                Metadata *Scope, Metadata *BaseType, uint64_t SizeInBits,
-                uint32_t AlignInBits, uint64_t OffsetInBits,
+                Metadata *Scope, Metadata *BaseType,
+                std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
+                uint64_t OffsetInBits,
                 std::optional<unsigned> DWARFAddressSpace,
                 std::optional<DIDerivedType::PtrAuthData> PtrAuthData,
                 unsigned Flags, Metadata *ExtraData, Metadata *Annotations)
@@ -559,7 +560,7 @@ template <> struct MDNodeKeyImpl<DIDerivedType> {
   MDNodeKeyImpl(const DIDerivedType *N)
       : Tag(N->getTag()), Name(N->getRawName()), File(N->getRawFile()),
         Line(N->getLine()), Scope(N->getRawScope()),
-        BaseType(N->getRawBaseType()), SizeInBits(N->getSizeInBits()),
+        BaseType(N->getRawBaseType()), SizeInBits(N->getRawSizeInBits()),
         OffsetInBits(N->getOffsetInBits()), AlignInBits(N->getAlignInBits()),
         DWARFAddressSpace(N->getDWARFAddressSpace()),
         PtrAuthData(N->getPtrAuthData()), Flags(N->getFlags()),
@@ -633,7 +634,7 @@ template <> struct MDNodeKeyImpl<DICompositeType> {
   unsigned Line;
   Metadata *Scope;
   Metadata *BaseType;
-  uint64_t SizeInBits;
+  std::optional<uint64_t> SizeInBits;
   uint64_t OffsetInBits;
   uint32_t AlignInBits;
   unsigned Flags;
@@ -650,13 +651,14 @@ template <> struct MDNodeKeyImpl<DICompositeType> {
   Metadata *Annotations;
 
   MDNodeKeyImpl(unsigned Tag, MDString *Name, Metadata *File, unsigned Line,
-                Metadata *Scope, Metadata *BaseType, uint64_t SizeInBits,
-                uint32_t AlignInBits, uint64_t OffsetInBits, unsigned Flags,
-                Metadata *Elements, unsigned RuntimeLang,
-                Metadata *VTableHolder, Metadata *TemplateParams,
-                MDString *Identifier, Metadata *Discriminator,
-                Metadata *DataLocation, Metadata *Associated,
-                Metadata *Allocated, Metadata *Rank, Metadata *Annotations)
+                Metadata *Scope, Metadata *BaseType,
+                std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
+                uint64_t OffsetInBits, unsigned Flags, Metadata *Elements,
+                unsigned RuntimeLang, Metadata *VTableHolder,
+                Metadata *TemplateParams, MDString *Identifier,
+                Metadata *Discriminator, Metadata *DataLocation,
+                Metadata *Associated, Metadata *Allocated, Metadata *Rank,
+                Metadata *Annotations)
       : Tag(Tag), Name(Name), File(File), Line(Line), Scope(Scope),
         BaseType(BaseType), SizeInBits(SizeInBits), OffsetInBits(OffsetInBits),
         AlignInBits(AlignInBits), Flags(Flags), Elements(Elements),

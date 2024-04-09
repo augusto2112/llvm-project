@@ -737,9 +737,9 @@ Constant *DIDerivedType::getDiscriminantValue() const {
 
 DIDerivedType *DIDerivedType::getImpl(
     LLVMContext &Context, unsigned Tag, MDString *Name, Metadata *File,
-    unsigned Line, Metadata *Scope, Metadata *BaseType, uint64_t SizeInBits,
-    uint32_t AlignInBits, uint64_t OffsetInBits,
-    std::optional<unsigned> DWARFAddressSpace,
+    unsigned Line, Metadata *Scope, Metadata *BaseType,
+    std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
+    uint64_t OffsetInBits, std::optional<unsigned> DWARFAddressSpace,
     std::optional<PtrAuthData> PtrAuthData, DIFlags Flags, Metadata *ExtraData,
     Metadata *Annotations, StorageType Storage, bool ShouldCreate) {
   assert(isCanonical(Name) && "Expected canonical MDString");
@@ -1330,8 +1330,9 @@ std::optional<uint64_t> DIVariable::getSizeInBits() const {
   while (RawType) {
     // Try to get the size directly.
     if (auto *T = dyn_cast<DIType>(RawType))
-      if (uint64_t Size = T->getSizeInBits())
-        return Size;
+      if (std::optional<uint64_t> Size = T->getSizeInBits())
+        if (*Size)
+          return Size;
 
     if (auto *DT = dyn_cast<DIDerivedType>(RawType)) {
       // Look at the base type.

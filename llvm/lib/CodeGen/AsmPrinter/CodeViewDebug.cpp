@@ -1732,7 +1732,7 @@ TypeIndex CodeViewDebug::lowerTypeArray(const DICompositeType *Ty) {
                             ? TypeIndex(SimpleTypeKind::UInt64Quad)
                             : TypeIndex(SimpleTypeKind::UInt32Long);
 
-  uint64_t ElementSize = getBaseTypeSize(ElementType) / 8;
+  uint64_t ElementSize = getBaseTypeSize(ElementType).value_or(0) / 8;
 
   // Add subranges to array type.
   DINodeArray Elements = Ty->getElements();
@@ -1770,8 +1770,9 @@ TypeIndex CodeViewDebug::lowerTypeArray(const DICompositeType *Ty) {
 
     // If this is the outermost array, use the size from the array. It will be
     // more accurate if we had a VLA or an incomplete element type size.
-    uint64_t ArraySize =
-        (i == 0 && ElementSize == 0) ? Ty->getSizeInBits() / 8 : ElementSize;
+    uint64_t ArraySize = (i == 0 && ElementSize == 0)
+                             ? Ty->getSizeInBits().value_or(0) / 8
+                             : ElementSize;
 
     StringRef Name = (i == 0) ? Ty->getName() : "";
     ArrayRecord AR(ElementTypeIndex, IndexType, ArraySize, Name);
@@ -1788,7 +1789,7 @@ TypeIndex CodeViewDebug::lowerTypeArray(const DICompositeType *Ty) {
 // fields in DIStringType) remain TBD.
 TypeIndex CodeViewDebug::lowerTypeString(const DIStringType *Ty) {
   TypeIndex CharType = TypeIndex(SimpleTypeKind::NarrowCharacter);
-  uint64_t ArraySize = Ty->getSizeInBits() >> 3;
+  uint64_t ArraySize = Ty->getSizeInBits().value_or(0) >> 3;
   StringRef Name = Ty->getName();
   // IndexType is size_t, which depends on the bitness of the target.
   TypeIndex IndexType = getPointerSizeInBytes() == 8
@@ -1807,7 +1808,7 @@ TypeIndex CodeViewDebug::lowerTypeBasic(const DIBasicType *Ty) {
   uint32_t ByteSize;
 
   Kind = static_cast<dwarf::TypeKind>(Ty->getEncoding());
-  ByteSize = Ty->getSizeInBits() / 8;
+  ByteSize = Ty->getSizeInBits().value_or(0) / 8;
 
   SimpleTypeKind STK = SimpleTypeKind::None;
   switch (Kind) {
@@ -1936,7 +1937,7 @@ TypeIndex CodeViewDebug::lowerTypePointer(const DIDerivedType *Ty,
   if (Ty->isObjectPointer())
     PO |= PointerOptions::Const;
 
-  PointerRecord PR(PointeeTI, PK, PM, PO, Ty->getSizeInBits() / 8);
+  PointerRecord PR(PointeeTI, PK, PM, PO, Ty->getSizeInBits().value_or(0) / 8);
   return TypeTable.writeLeafType(PR);
 }
 
@@ -1985,8 +1986,8 @@ TypeIndex CodeViewDebug::lowerTypeMemberPointer(const DIDerivedType *Ty,
   PointerMode PM = IsPMF ? PointerMode::PointerToMemberFunction
                          : PointerMode::PointerToDataMember;
 
-  assert(Ty->getSizeInBits() / 8 <= 0xff && "pointer size too big");
-  uint8_t SizeInBytes = Ty->getSizeInBits() / 8;
+  assert(Ty->getSizeInBits().value_or(0) / 8 <= 0xff && "pointer size too big");
+  uint8_t SizeInBytes = Ty->getSizeInBits().value_or(0) / 8;
   MemberPointerInfo MPI(
       ClassTI, translatePtrToMemberRep(SizeInBytes, IsPMF, Ty->getFlags()));
   PointerRecord PR(PointeeTI, PK, PM, PO, SizeInBytes, MPI);
@@ -2143,7 +2144,7 @@ TypeIndex CodeViewDebug::lowerTypeMemberFunction(const DISubroutineType *Ty,
 
 TypeIndex CodeViewDebug::lowerTypeVFTableShape(const DIDerivedType *Ty) {
   unsigned VSlotCount =
-      Ty->getSizeInBits() / (8 * Asm->MAI->getCodePointerSize());
+      Ty->getSizeInBits().value_or(0) / (8 * Asm->MAI->getCodePointerSize());
   SmallVector<VFTableSlotKind, 4> Slots(VSlotCount, VFTableSlotKind::Near);
 
   VFTableShapeRecord VFTSR(Slots);
@@ -2480,7 +2481,7 @@ TypeIndex CodeViewDebug::lowerCompleteTypeClass(const DICompositeType *Ty) {
 
   std::string FullName = getFullyQualifiedName(Ty);
 
-  uint64_t SizeInBytes = Ty->getSizeInBits() / 8;
+  uint64_t SizeInBytes = Ty->getSizeInBits().value_or(0) / 8;
 
   ClassRecord CR(Kind, FieldCount, CO, FieldTI, TypeIndex(), VShapeTI,
                  SizeInBytes, FullName, Ty->getIdentifier());
@@ -2519,7 +2520,7 @@ TypeIndex CodeViewDebug::lowerCompleteTypeUnion(const DICompositeType *Ty) {
   if (ContainsNestedClass)
     CO |= ClassOptions::ContainsNestedClass;
 
-  uint64_t SizeInBytes = Ty->getSizeInBits() / 8;
+  uint64_t SizeInBytes = Ty->getSizeInBits().value_or(0) / 8;
   std::string FullName = getFullyQualifiedName(Ty);
 
   UnionRecord UR(FieldCount, CO, FieldTI, SizeInBytes, FullName,
@@ -2606,7 +2607,7 @@ CodeViewDebug::lowerRecordFieldList(const DICompositeType *Ty) {
         MemberOffsetInBits = CI->getZExtValue() + MemberInfo.BaseOffset;
       }
       StartBitOffset -= MemberOffsetInBits;
-      BitFieldRecord BFR(MemberBaseType, Member->getSizeInBits(),
+      BitFieldRecord BFR(MemberBaseType, Member->getSizeInBits().value_or(0),
                          StartBitOffset);
       MemberBaseType = TypeTable.writeLeafType(BFR);
     }
@@ -2727,7 +2728,7 @@ TypeIndex CodeViewDebug::getTypeIndexForReferenceTo(const DIType *Ty) {
                    getPointerSizeInBytes() == 8 ? PointerKind::Near64
                                                 : PointerKind::Near32,
                    PointerMode::LValueReference, PointerOptions::None,
-                   Ty->getSizeInBits() / 8);
+                   Ty->getSizeInBits().value_or(0) / 8);
   return TypeTable.writeLeafType(PR);
 }
 

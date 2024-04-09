@@ -338,8 +338,8 @@ namespace llvm {
     /// \param Annotations  Member annotations.
     DIDerivedType *createMemberType(DIScope *Scope, StringRef Name,
                                     DIFile *File, unsigned LineNo,
-                                    uint64_t SizeInBits, uint32_t AlignInBits,
-                                    uint64_t OffsetInBits,
+                                    std::optional<uint64_t> SizeInBits,
+                                    uint32_t AlignInBits, uint64_t OffsetInBits,
                                     DINode::DIFlags Flags, DIType *Ty,
                                     DINodeArray Annotations = nullptr);
 

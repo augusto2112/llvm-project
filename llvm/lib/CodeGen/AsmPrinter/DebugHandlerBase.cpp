@@ -143,7 +143,7 @@ MCSymbol *DebugHandlerBase::getLabelAfterInsn(const MachineInstr *MI) {
 }
 
 /// If this type is derived from a base type then return base type size.
-uint64_t DebugHandlerBase::getBaseTypeSize(const DIType *Ty) {
+std::optional<uint64_t> DebugHandlerBase::getBaseTypeSize(const DIType *Ty) {
   assert(Ty);
   const DIDerivedType *DDTy = dyn_cast<DIDerivedType>(Ty);
   if (!DDTy)
@@ -160,7 +160,7 @@ uint64_t DebugHandlerBase::getBaseTypeSize(const DIType *Ty) {
   DIType *BaseType = DDTy->getBaseType();
 
   if (!BaseType)
-    return 0;
+    return {};
 
   // If this is a derived type, go ahead and get the base type, unless it's a
   // reference then it's just the size of the field. Pointer types have no need

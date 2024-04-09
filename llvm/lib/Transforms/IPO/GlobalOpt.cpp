@@ -455,10 +455,12 @@ static void transferSRADebugInfo(GlobalVariable *GV, GlobalVariable *NGV,
     if (CurVarOffsetInBits >= FragmentEndInBits)
       continue;
 
-    uint64_t CurVarSize = Var->getType()->getSizeInBits();
-    uint64_t CurVarEndInBits = CurVarOffsetInBits + CurVarSize;
+    std::optional<uint64_t> CurVarSize = Var->getType()->getSizeInBits();
+    std::optional<uint64_t> CurVarEndInBits =
+        CurVarSize ? std::optional(CurVarOffsetInBits + *CurVarSize)
+                   : std::nullopt;
     // Current variable ends before start of fragment, ignore.
-    if (CurVarSize != 0 && /* CurVarSize is known */
+    if (CurVarSize && CurVarSize != 0 && /* CurVarSize is known */
         CurVarEndInBits <= FragmentOffsetInBits)
       continue;
 
@@ -487,8 +489,9 @@ static void transferSRADebugInfo(GlobalVariable *GV, GlobalVariable *NGV,
       uint64_t CurVarFragmentOffsetInBits =
           FragmentOffsetInBits - CurVarOffsetInBits;
       uint64_t CurVarFragmentSizeInBits = FragmentSizeInBits;
-      if (CurVarSize != 0 && CurVarEndInBits < FragmentEndInBits)
-        CurVarFragmentSizeInBits -= (FragmentEndInBits - CurVarEndInBits);
+      if (CurVarSize && CurVarSize != 0 && CurVarEndInBits &&
+          *CurVarEndInBits < FragmentEndInBits)
+        CurVarFragmentSizeInBits -= (FragmentEndInBits - *CurVarEndInBits);
       if (CurVarOffsetInBits)
         Expr = DIExpression::get(Expr->getContext(), {});
       if (auto E = DIExpression::createFragmentExpression(

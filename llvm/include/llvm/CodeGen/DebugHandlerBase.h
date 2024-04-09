@@ -136,7 +136,7 @@ public:
   MCSymbol *getLabelAfterInsn(const MachineInstr *MI);
 
   /// If this type is derived from a base type then return base type size.
-  static uint64_t getBaseTypeSize(const DIType *Ty);
+  static std::optional<uint64_t> getBaseTypeSize(const DIType *Ty);
 
   /// Return true if type encoding is unsigned.
   static bool isUnsignedDIType(const DIType *Ty);

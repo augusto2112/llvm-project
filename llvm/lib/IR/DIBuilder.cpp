@@ -378,7 +378,7 @@ DIDerivedType *DIBuilder::createInheritance(DIType *Ty, DIType *BaseTy,
 
 DIDerivedType *DIBuilder::createMemberType(
     DIScope *Scope, StringRef Name, DIFile *File, unsigned LineNumber,
-    uint64_t SizeInBits, uint32_t AlignInBits, uint64_t OffsetInBits,
+    std::optional<uint64_t> SizeInBits, uint32_t AlignInBits, uint64_t OffsetInBits,
     DINode::DIFlags Flags, DIType *Ty, DINodeArray Annotations) {
   return DIDerivedType::get(VMContext, dwarf::DW_TAG_member, Name, File,
                             LineNumber, getNonCompileUnitScope(Scope), Ty,

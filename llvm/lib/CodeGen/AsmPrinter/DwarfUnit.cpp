@@ -704,8 +704,10 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DIBasicType *BTy) {
     addUInt(Buffer, dwarf::DW_AT_encoding, dwarf::DW_FORM_data1,
             BTy->getEncoding());
 
-  uint64_t Size = BTy->getSizeInBits() >> 3;
-  addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt, Size);
+  if (std::optional<uint64_t> OptionalSize = BTy->getSizeInBits()) {
+    auto Size = *OptionalSize >> 3;
+    addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt, Size);
+  }
 
   if (BTy->isBigEndian())
     addUInt(Buffer, dwarf::DW_AT_endianity, std::nullopt, dwarf::DW_END_big);
@@ -732,8 +734,8 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DIStringType *STy) {
     DwarfExpr.setMemoryLocationKind();
     DwarfExpr.addExpression(Expr);
     addBlock(Buffer, dwarf::DW_AT_string_length, DwarfExpr.finalize());
-  } else {
-    uint64_t Size = STy->getSizeInBits() >> 3;
+  } else if (std::optional<uint64_t> OptionalSize = STy->getSizeInBits()) {
+    uint64_t Size = *OptionalSize >> 3;
     addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt, Size);
   }
 
@@ -757,7 +759,9 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DIStringType *STy) {
 void DwarfUnit::constructTypeDIE(DIE &Buffer, const DIDerivedType *DTy) {
   // Get core information.
   StringRef Name = DTy->getName();
-  uint64_t Size = DTy->getSizeInBits() >> 3;
+  std::optional<uint64_t> Size = DTy->getSizeInBits();
+  if (Size)
+    Size = *Size >> 3;
   uint16_t Tag = Buffer.getTag();
 
   // Map to main type, void will not have a type.
@@ -774,18 +778,18 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DIDerivedType *DTy) {
   // If alignment is specified for a typedef , create and insert DW_AT_alignment
   // attribute in DW_TAG_typedef DIE.
   if (Tag == dwarf::DW_TAG_typedef && DD->getDwarfVersion() >= 5) {
-    uint32_t AlignInBytes = DTy->getAlignInBytes();
-    if (AlignInBytes > 0)
+    std::optional<uint32_t> AlignInBytes = DTy->getAlignInBytes();
+    if (AlignInBytes && *AlignInBytes > 0)
       addUInt(Buffer, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
-              AlignInBytes);
+              *AlignInBytes);
   }
 
   // Add size if non-zero (derived types might be zero-sized.)
-  if (Size && Tag != dwarf::DW_TAG_pointer_type
+  if (Size && *Size && Tag != dwarf::DW_TAG_pointer_type
            && Tag != dwarf::DW_TAG_ptr_to_member_type
            && Tag != dwarf::DW_TAG_reference_type
            && Tag != dwarf::DW_TAG_rvalue_reference_type)
-    addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt, Size);
+    addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt, *Size);
 
   if (Tag == dwarf::DW_TAG_ptr_to_member_type)
     addDIEEntry(Buffer, dwarf::DW_AT_containing_type,
@@ -887,7 +891,10 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DICompositeType *CTy) {
   // Add name if not anonymous or intermediate type.
   StringRef Name = CTy->getName();
 
-  uint64_t Size = CTy->getSizeInBits() >> 3;
+  std::optional<uint64_t> Size = CTy->getSizeInBits();
+  if (Size) 
+    Size = *Size >> 3;
+
   uint16_t Tag = Buffer.getTag();
 
   switch (Tag) {
@@ -1029,9 +1036,9 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DICompositeType *CTy) {
     // Add size if non-zero (derived types might be zero-sized.)
     // Ignore the size if it's a non-enum forward decl.
     // TODO: Do we care about size for enum forward declarations?
-    if (Size &&
+    if (Size && *Size &&
         (!CTy->isForwardDecl() || Tag == dwarf::DW_TAG_enumeration_type))
-      addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt, Size);
+      addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt, *Size);
     else if (!CTy->isForwardDecl())
       // Add zero size if it is not a forward declaration.
       addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt, 0);
@@ -1054,9 +1061,10 @@ void DwarfUnit::constructTypeDIE(DIE &Buffer, const DICompositeType *CTy) {
               RLang);
 
     // Add align info if available.
-    if (uint32_t AlignInBytes = CTy->getAlignInBytes())
-      addUInt(Buffer, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
-              AlignInBytes);
+    if (std::optional<uint32_t> AlignInBytes = CTy->getAlignInBytes())
+      if (*AlignInBytes)
+        addUInt(Buffer, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
+                *AlignInBytes);
   }
 }
 
@@ -1462,12 +1470,15 @@ DIE *DwarfUnit::getIndexTyDie() {
 /// fit memory alignment constraints.
 static bool hasVectorBeenPadded(const DICompositeType *CTy) {
   assert(CTy && CTy->isVector() && "Composite type is not a vector");
-  const uint64_t ActualSize = CTy->getSizeInBits();
+  const std::optional<uint64_t> ActualSize = CTy->getSizeInBits();
 
   // Obtain the size of each element in the vector.
   DIType *BaseTy = CTy->getBaseType();
   assert(BaseTy && "Unknown vector element type.");
-  const uint64_t ElementSize = BaseTy->getSizeInBits();
+  const std::optional<uint64_t> ElementSize = BaseTy->getSizeInBits();
+
+  if (!ActualSize && !ElementSize)
+    return false;
 
   // Locate the number of elements in the vector.
   const DINodeArray Elements = CTy->getElements();
@@ -1482,16 +1493,17 @@ static bool hasVectorBeenPadded(const DICompositeType *CTy) {
 
   // Ensure we found the element count and that the actual size is wide
   // enough to contain the requested size.
-  assert(ActualSize >= (NumVecElements * ElementSize) && "Invalid vector size");
-  return ActualSize != (NumVecElements * ElementSize);
+  assert(ActualSize >= (NumVecElements * *ElementSize) && "Invalid vector size");
+  return ActualSize != (NumVecElements * *ElementSize);
 }
 
 void DwarfUnit::constructArrayTypeDIE(DIE &Buffer, const DICompositeType *CTy) {
   if (CTy->isVector()) {
     addFlag(Buffer, dwarf::DW_AT_GNU_vector);
-    if (hasVectorBeenPadded(CTy))
+    std::optional<uint64_t> SizeInBits = CTy->getSizeInBits();
+    if (SizeInBits && hasVectorBeenPadded(CTy))
       addUInt(Buffer, dwarf::DW_AT_byte_size, std::nullopt,
-              CTy->getSizeInBits() / CHAR_BIT);
+              *SizeInBits / CHAR_BIT);
   }
 
   if (DIVariable *Var = CTy->getDataLocation()) {
@@ -1632,43 +1644,50 @@ DIE &DwarfUnit::constructMemberDIE(DIE &Buffer, const DIDerivedType *DT) {
 
     addBlock(MemberDie, dwarf::DW_AT_data_member_location, VBaseLocationDie);
   } else {
-    uint64_t Size = DT->getSizeInBits();
-    uint64_t FieldSize = DD->getBaseTypeSize(DT);
+    std::optional<uint64_t> Size = DT->getSizeInBits();
+    std::optional<uint64_t> FieldSize = DD->getBaseTypeSize(DT);
     uint32_t AlignInBytes = DT->getAlignInBytes();
-    uint64_t OffsetInBytes;
+    std::optional<uint64_t> OffsetInBytes;
 
     bool IsBitfield = DT->isBitField();
     if (IsBitfield) {
       // Handle bitfield, assume bytes are 8 bits.
-      if (DD->useDWARF2Bitfields())
-        addUInt(MemberDie, dwarf::DW_AT_byte_size, std::nullopt, FieldSize / 8);
-      addUInt(MemberDie, dwarf::DW_AT_bit_size, std::nullopt, Size);
+      if (DD->useDWARF2Bitfields() && FieldSize)
+        addUInt(MemberDie, dwarf::DW_AT_byte_size, std::nullopt,
+                *FieldSize / 8);
+      if (Size)
+        addUInt(MemberDie, dwarf::DW_AT_bit_size, std::nullopt, *Size);
 
       uint64_t Offset = DT->getOffsetInBits();
       // We can't use DT->getAlignInBits() here: AlignInBits for member type
       // is non-zero if and only if alignment was forced (e.g. _Alignas()),
       // which can't be done with bitfields. Thus we use FieldSize here.
-      uint32_t AlignInBits = FieldSize;
-      uint32_t AlignMask = ~(AlignInBits - 1);
-      // The bits from the start of the storage unit to the start of the field.
-      uint64_t StartBitOffset = Offset - (Offset & AlignMask);
-      // The byte offset of the field's aligned storage unit inside the struct.
-      OffsetInBytes = (Offset - StartBitOffset) / 8;
+      if (FieldSize) {
+        uint64_t AlignInBits = *FieldSize;
+        uint64_t AlignMask = ~(AlignInBits - 1);
+        // The bits from the start of the storage unit to the start of the
+        // field.
+        uint64_t StartBitOffset = Offset - (Offset & AlignMask);
+        // The byte offset of the field's aligned storage unit inside the
+        // struct.
+        OffsetInBytes = (Offset - StartBitOffset) / 8;
 
-      if (DD->useDWARF2Bitfields()) {
-        uint64_t HiMark = (Offset + FieldSize) & AlignMask;
-        uint64_t FieldOffset = (HiMark - FieldSize);
-        Offset -= FieldOffset;
+        if (DD->useDWARF2Bitfields() && Size) {
+          uint64_t HiMark = (Offset + *FieldSize) & AlignMask;
+          uint64_t FieldOffset = (HiMark - *FieldSize);
+          Offset -= FieldOffset;
 
-        // Maybe we need to work from the other end.
-        if (Asm->getDataLayout().isLittleEndian())
-          Offset = FieldSize - (Offset + Size);
+          // Maybe we need to work from the other end.
+          if (Asm->getDataLayout().isLittleEndian())
+            Offset = *FieldSize - (Offset + *Size);
 
-        addUInt(MemberDie, dwarf::DW_AT_bit_offset, std::nullopt, Offset);
-        OffsetInBytes = FieldOffset >> 3;
-      } else {
+          addUInt(MemberDie, dwarf::DW_AT_bit_offset, std::nullopt, Offset);
+          OffsetInBytes = FieldOffset >> 3;
+        } 
+      } 
+
+      if (!DD->useDWARF2Bitfields()) 
         addUInt(MemberDie, dwarf::DW_AT_data_bit_offset, std::nullopt, Offset);
-      }
     } else {
       // This is not a bitfield.
       OffsetInBytes = DT->getOffsetInBits() / 8;
@@ -1680,19 +1699,22 @@ DIE &DwarfUnit::constructMemberDIE(DIE &Buffer, const DIDerivedType *DT) {
     if (DD->getDwarfVersion() <= 2) {
       DIELoc *MemLocationDie = new (DIEValueAllocator) DIELoc;
       addUInt(*MemLocationDie, dwarf::DW_FORM_data1, dwarf::DW_OP_plus_uconst);
-      addUInt(*MemLocationDie, dwarf::DW_FORM_udata, OffsetInBytes);
+      if (OffsetInBytes)
+        addUInt(*MemLocationDie, dwarf::DW_FORM_udata, *OffsetInBytes);
       addBlock(MemberDie, dwarf::DW_AT_data_member_location, MemLocationDie);
     } else if (!IsBitfield || DD->useDWARF2Bitfields()) {
       // In DWARF v3, DW_FORM_data4/8 in DW_AT_data_member_location are
       // interpreted as location-list pointers. Interpreting constants as
       // pointers is not expected, so we use DW_FORM_udata to encode the
       // constants here.
-      if (DD->getDwarfVersion() == 3)
-        addUInt(MemberDie, dwarf::DW_AT_data_member_location,
-                dwarf::DW_FORM_udata, OffsetInBytes);
-      else
-        addUInt(MemberDie, dwarf::DW_AT_data_member_location, std::nullopt,
-                OffsetInBytes);
+      if (OffsetInBytes) {
+        if (DD->getDwarfVersion() == 3)
+          addUInt(MemberDie, dwarf::DW_AT_data_member_location,
+                  dwarf::DW_FORM_udata, *OffsetInBytes);
+        else
+          addUInt(MemberDie, dwarf::DW_AT_data_member_location, std::nullopt,
+                  *OffsetInBytes);
+      }
     }
   }
 
@@ -1746,9 +1768,10 @@ DIE *DwarfUnit::getOrCreateStaticMemberDIE(const DIDerivedType *DT) {
   if (const ConstantFP *CFP = dyn_cast_or_null<ConstantFP>(DT->getConstant()))
     addConstantFPValue(StaticMemberDIE, CFP);
 
-  if (uint32_t AlignInBytes = DT->getAlignInBytes())
-    addUInt(StaticMemberDIE, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
-            AlignInBytes);
+  if (std::optional<uint32_t> AlignInBytes = DT->getAlignInBytes())
+    if (*AlignInBytes)
+      addUInt(StaticMemberDIE, dwarf::DW_AT_alignment, dwarf::DW_FORM_udata,
+              *AlignInBytes);
 
   return &StaticMemberDIE;
 }

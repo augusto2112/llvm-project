@@ -1778,7 +1778,7 @@ void ModuleBitcodeWriter::writeDIBasicType(const DIBasicType *N,
   Record.push_back(N->isDistinct());
   Record.push_back(N->getTag());
   Record.push_back(VE.getMetadataOrNullID(N->getRawName()));
-  Record.push_back(N->getSizeInBits());
+  Record.push_back(N->getRawSizeInBits());
   Record.push_back(N->getAlignInBits());
   Record.push_back(N->getEncoding());
   Record.push_back(N->getFlags());
@@ -1796,7 +1796,7 @@ void ModuleBitcodeWriter::writeDIStringType(const DIStringType *N,
   Record.push_back(VE.getMetadataOrNullID(N->getStringLength()));
   Record.push_back(VE.getMetadataOrNullID(N->getStringLengthExp()));
   Record.push_back(VE.getMetadataOrNullID(N->getStringLocationExp()));
-  Record.push_back(N->getSizeInBits());
+  Record.push_back(N->getRawSizeInBits());
   Record.push_back(N->getAlignInBits());
   Record.push_back(N->getEncoding());
 
@@ -1814,7 +1814,7 @@ void ModuleBitcodeWriter::writeDIDerivedType(const DIDerivedType *N,
   Record.push_back(N->getLine());
   Record.push_back(VE.getMetadataOrNullID(N->getScope()));
   Record.push_back(VE.getMetadataOrNullID(N->getBaseType()));
-  Record.push_back(N->getSizeInBits());
+  Record.push_back(N->getRawSizeInBits());
   Record.push_back(N->getAlignInBits());
   Record.push_back(N->getOffsetInBits());
   Record.push_back(N->getFlags());
@@ -1849,7 +1849,7 @@ void ModuleBitcodeWriter::writeDICompositeType(
   Record.push_back(N->getLine());
   Record.push_back(VE.getMetadataOrNullID(N->getScope()));
   Record.push_back(VE.getMetadataOrNullID(N->getBaseType()));
-  Record.push_back(N->getSizeInBits());
+  Record.push_back(N->getRawSizeInBits());
   Record.push_back(N->getAlignInBits());
   Record.push_back(N->getOffsetInBits());
   Record.push_back(N->getFlags());

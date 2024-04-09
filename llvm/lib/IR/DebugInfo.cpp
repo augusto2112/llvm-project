@@ -1554,7 +1554,7 @@ const char *LLVMDITypeGetName(LLVMMetadataRef DType, size_t *Length) {
 }
 
 uint64_t LLVMDITypeGetSizeInBits(LLVMMetadataRef DType) {
-  return unwrapDI<DIType>(DType)->getSizeInBits();
+  return unwrapDI<DIType>(DType)->getRawSizeInBits();
 }
 
 uint64_t LLVMDITypeGetOffsetInBits(LLVMMetadataRef DType) {

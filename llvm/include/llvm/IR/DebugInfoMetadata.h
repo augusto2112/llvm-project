@@ -714,24 +714,26 @@ class DIType : public DIScope {
 
 protected:
   DIType(LLVMContext &C, unsigned ID, StorageType Storage, unsigned Tag,
-         unsigned Line, uint64_t SizeInBits, uint32_t AlignInBits,
+         unsigned Line, std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
          uint64_t OffsetInBits, DIFlags Flags, ArrayRef<Metadata *> Ops)
       : DIScope(C, ID, Storage, Tag, Ops) {
     init(Line, SizeInBits, AlignInBits, OffsetInBits, Flags);
   }
   ~DIType() = default;
 
-  void init(unsigned Line, uint64_t SizeInBits, uint32_t AlignInBits,
+  void init(unsigned Line, std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
             uint64_t OffsetInBits, DIFlags Flags) {
     this->Line = Line;
     this->Flags = Flags;
-    this->SizeInBits = SizeInBits;
+    this->SizeInBits = SizeInBits.has_value() ? *SizeInBits : 0;
+    this->SubclassData1 = SizeInBits.has_value();
+    
     this->SubclassData32 = AlignInBits;
     this->OffsetInBits = OffsetInBits;
   }
 
   /// Change fields in place.
-  void mutate(unsigned Tag, unsigned Line, uint64_t SizeInBits,
+  void mutate(unsigned Tag, unsigned Line, std::optional<uint64_t> SizeInBits,
               uint32_t AlignInBits, uint64_t OffsetInBits, DIFlags Flags) {
     assert(isDistinct() && "Only distinct nodes can mutate");
     setTag(Tag);
@@ -744,7 +746,16 @@ public:
   }
 
   unsigned getLine() const { return Line; }
-  uint64_t getSizeInBits() const { return SizeInBits; }
+
+  uint64_t getRawSizeInBits() const {
+    return SizeInBits;
+  }
+
+  std::optional<uint64_t> getSizeInBits() const { 
+    if (SizeInBits == UINT64_MAX)
+      return {};
+    return SizeInBits; 
+  }
   uint32_t getAlignInBits() const;
   uint32_t getAlignInBytes() const { return getAlignInBits() / CHAR_BIT; }
   uint64_t getOffsetInBits() const { return OffsetInBits; }
@@ -841,7 +852,7 @@ class DIBasicType : public DIType {
                               bool ShouldCreate = true);
 
   TempDIBasicType cloneImpl() const {
-    return getTemporary(getContext(), getTag(), getName(), getSizeInBits(),
+    return getTemporary(getContext(), getTag(), getName(), getRawSizeInBits(),
                         getAlignInBits(), getEncoding(), getFlags());
   }
 
@@ -913,7 +924,7 @@ class DIStringType : public DIType {
   TempDIStringType cloneImpl() const {
     return getTemporary(getContext(), getTag(), getRawName(),
                         getRawStringLength(), getRawStringLengthExp(),
-                        getRawStringLocationExp(), getSizeInBits(),
+                        getRawStringLocationExp(), getRawSizeInBits(),
                         getAlignInBits(), getEncoding());
   }
 
@@ -1009,7 +1020,7 @@ private:
   std::optional<unsigned> DWARFAddressSpace;
 
   DIDerivedType(LLVMContext &C, StorageType Storage, unsigned Tag,
-                unsigned Line, uint64_t SizeInBits, uint32_t AlignInBits,
+                unsigned Line, std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
                 uint64_t OffsetInBits,
                 std::optional<unsigned> DWARFAddressSpace,
                 std::optional<PtrAuthData> PtrAuthData, DIFlags Flags,
@@ -1023,9 +1034,9 @@ private:
   ~DIDerivedType() = default;
   static DIDerivedType *
   getImpl(LLVMContext &Context, unsigned Tag, StringRef Name, DIFile *File,
-          unsigned Line, DIScope *Scope, DIType *BaseType, uint64_t SizeInBits,
-          uint32_t AlignInBits, uint64_t OffsetInBits,
-          std::optional<unsigned> DWARFAddressSpace,
+          unsigned Line, DIScope *Scope, DIType *BaseType,
+          std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
+          uint64_t OffsetInBits, std::optional<unsigned> DWARFAddressSpace,
           std::optional<PtrAuthData> PtrAuthData, DIFlags Flags,
           Metadata *ExtraData, DINodeArray Annotations, StorageType Storage,
           bool ShouldCreate = true) {
@@ -1037,7 +1048,7 @@ private:
   static DIDerivedType *
   getImpl(LLVMContext &Context, unsigned Tag, MDString *Name, Metadata *File,
           unsigned Line, Metadata *Scope, Metadata *BaseType,
-          uint64_t SizeInBits, uint32_t AlignInBits, uint64_t OffsetInBits,
+          std::optional<uint64_t> SizeInBits, uint32_t AlignInBits, uint64_t OffsetInBits,
           std::optional<unsigned> DWARFAddressSpace,
           std::optional<PtrAuthData> PtrAuthData, DIFlags Flags,
           Metadata *ExtraData, Metadata *Annotations, StorageType Storage,
@@ -1045,7 +1056,7 @@ private:
 
   TempDIDerivedType cloneImpl() const {
     return getTemporary(getContext(), getTag(), getName(), getFile(), getLine(),
-                        getScope(), getBaseType(), getSizeInBits(),
+                        getScope(), getBaseType(), getRawSizeInBits(),
                         getAlignInBits(), getOffsetInBits(),
                         getDWARFAddressSpace(), getPtrAuthData(), getFlags(),
                         getExtraData(), getAnnotations());
@@ -1055,7 +1066,7 @@ public:
   DEFINE_MDNODE_GET(DIDerivedType,
                     (unsigned Tag, MDString *Name, Metadata *File,
                      unsigned Line, Metadata *Scope, Metadata *BaseType,
-                     uint64_t SizeInBits, uint32_t AlignInBits,
+                     std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
                      uint64_t OffsetInBits,
                      std::optional<unsigned> DWARFAddressSpace,
                      std::optional<PtrAuthData> PtrAuthData, DIFlags Flags,
@@ -1066,8 +1077,9 @@ public:
                      Flags, ExtraData, Annotations))
   DEFINE_MDNODE_GET(DIDerivedType,
                     (unsigned Tag, StringRef Name, DIFile *File, unsigned Line,
-                     DIScope *Scope, DIType *BaseType, uint64_t SizeInBits,
-                     uint32_t AlignInBits, uint64_t OffsetInBits,
+                     DIScope *Scope, DIType *BaseType,
+                     std::optional<uint64_t> SizeInBits, uint32_t AlignInBits,
+                     uint64_t OffsetInBits,
                      std::optional<unsigned> DWARFAddressSpace,
                      std::optional<PtrAuthData> PtrAuthData, DIFlags Flags,
                      Metadata *ExtraData = nullptr,
@@ -1198,11 +1210,11 @@ class DICompositeType : public DIType {
   TempDICompositeType cloneImpl() const {
     return getTemporary(
         getContext(), getTag(), getName(), getFile(), getLine(), getScope(),
-        getBaseType(), getSizeInBits(), getAlignInBits(), getOffsetInBits(),
-        getFlags(), getElements(), getRuntimeLang(), getVTableHolder(),
-        getTemplateParams(), getIdentifier(), getDiscriminator(),
-        getRawDataLocation(), getRawAssociated(), getRawAllocated(),
-        getRawRank(), getAnnotations());
+        getBaseType(), getRawSizeInBits(), getAlignInBits(),
+        getOffsetInBits(), getFlags(), getElements(), getRuntimeLang(),
+        getVTableHolder(), getTemplateParams(), getIdentifier(),
+        getDiscriminator(), getRawDataLocation(), getRawAssociated(),
+        getRawAllocated(), getRawRank(), getAnnotations());
   }
 
 public:
