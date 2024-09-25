@@ -1,4 +1,4 @@
-// RUN: %clang_cc1 -debug-info-kind=limited -emit-llvm -o - %s | FileCheck %s
+// RUN: %clang -g -emit-llvm -S %s -o - | FileCheck %s
 
 void bar(void) {}
 
