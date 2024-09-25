@@ -115,13 +115,12 @@ static bool usesDebugTransparent(const Decl *D, const CodeGenModule &CGM) {
     return false;
 
   if (auto *attr = D->getAttr<DebugTransparentAttr>()) {
-    auto opts = CGM.getCodeGenOpts();
-    if (opts.DwarfVersion == 0) {
-      auto &diags = CGM.getDiags();
-      diags.Report(attr->getLocation(), diag::warn_debug_transparent_ignored);
+    if (CGM.getCodeGenOpts().DwarfVersion == 0) {
+      CGM.getDiags().Report(attr->getLocation(), diag::warn_debug_transparent_ignored);
     }
     return true;
   }
+
   return false;
 }
 
@@ -2179,8 +2178,6 @@ llvm::DISubprogram *CGDebugInfo::CreateCXXMemberFunction(
     SPFlags |= llvm::DISubprogram::SPFlagLocalToUnit;
   if (CGM.getLangOpts().Optimize)
     SPFlags |= llvm::DISubprogram::SPFlagOptimized;
-  if (usesDebugTransparent(Method, CGM))
-    SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
 
   // In this debug mode, emit type info for a class when its constructor type
   // info is emitted.
@@ -4182,8 +4179,6 @@ llvm::DISubprogram *CGDebugInfo::getFunctionFwdDeclOrStub(GlobalDecl GD,
   if (Stub) {
     Flags |= getCallSiteRelatedAttrs();
     SPFlags |= llvm::DISubprogram::SPFlagDefinition;
-    if (usesDebugTransparent(FD, CGM))
-      SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
     return DBuilder.createFunction(
         DContext, Name, LinkageName, Unit, Line,
         getOrCreateFunctionType(GD.getDecl(), FnType, Unit), 0, Flags, SPFlags,
@@ -4333,8 +4328,6 @@ llvm::DISubprogram *CGDebugInfo::getObjCMethodDeclaration(
   if (It == TypeCache.end())
     return nullptr;
   auto *InterfaceType = cast<llvm::DICompositeType>(It->second);
-  if (usesDebugTransparent(D, CGM))
-    SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
   llvm::DISubprogram *FD = DBuilder.createFunction(
       InterfaceType, getObjCMethodName(OMD), StringRef(),
       InterfaceType->getFile(), LineNo, FnType, LineNo, Flags, SPFlags);
@@ -4590,8 +4583,6 @@ void CGDebugInfo::EmitFunctionDecl(GlobalDecl GD, SourceLocation Loc,
 
   llvm::DINodeArray Annotations = CollectBTFDeclTagAnnotations(D);
   llvm::DISubroutineType *STy = getOrCreateFunctionType(D, FnType, Unit);
-  if (usesDebugTransparent(D, CGM))
-    SPFlags |= llvm::DISubprogram::SPFlagIsDebugTransparent;
 
   llvm::DISubprogram *SP = DBuilder.createFunction(
       FDContext, Name, LinkageName, Unit, LineNo, STy, ScopeLine, Flags,

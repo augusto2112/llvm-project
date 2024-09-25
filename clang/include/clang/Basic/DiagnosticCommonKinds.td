@@ -468,6 +468,5 @@ def warn_try_not_valid_on_target : Warning<
   " 'catch' block is ignored">,
   InGroup<OpenMPTargetException>;
 def warn_debug_transparent_ignored : Warning<
-  "'debug_transparent' attribute is ignored since it is only supported by DWARF">,
-  InGroup<OpenMPTargetException>;
+  "'debug_transparent' attribute is ignored since it is only supported by DWARF">;
 }
