@@ -107,6 +107,10 @@ inline ManglingErrorOr<std::string> mangleClass(swift::Demangle::Demangler &dem,
   return mangleNode(mangleType(dem, classNode));
 }
 
+/// Given a node pointer to a TypeMetadata node, return the type node of the
+/// type metadata.
+swift::Demangle::NodePointer
+getTypeNodeFromMetadataNode(swift::Demangle::NodePointer node);
 } // namespace swift_demangle
 } // namespace lldb_private
 

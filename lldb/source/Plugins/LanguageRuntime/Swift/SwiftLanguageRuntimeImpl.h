@@ -16,6 +16,8 @@
 #include "LLDBMemoryReader.h"
 #include "SwiftLanguageRuntime.h"
 #include "SwiftMetadataCache.h"
+#include "lldb/Symbol/CompilerType.h"
+#include "lldb/Utility/CompletionRequest.h"
 #include "llvm/Support/Memory.h"
 
 namespace swift {
@@ -247,6 +249,9 @@ protected:
                                       TypeAndOrName &class_type_or_name,
                                       Address &address,
                                       Value::ValueType &value_type);
+
+  CompilerType GetDynamicTypeOfClassFromDescriptor(CompilerType class_type,
+                                           lldb::addr_t instance_ptr);
 #ifndef NDEBUG
   ConstString GetDynamicTypeName_ClassRemoteAST(ValueObject &in_value,
                                                 lldb::addr_t instance_ptr);

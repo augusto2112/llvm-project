@@ -16,6 +16,8 @@
 #include "lldb/Utility/Log.h"
 #include "swift/Demangling/Demangle.h"
 #include "swift/RemoteInspection/DescriptorFinder.h"
+#include <cstdint>
+#include <optional>
 
 using namespace lldb;
 using namespace lldb_private;
@@ -347,6 +349,22 @@ public:
 
     return m_reflection_ctx.readTypeFromMetadata(*metadata_address,
                                                  skip_artificial_subclasses);
+  }
+
+
+  std::optional<uint64_t>
+  ReadMetadataAddressFromInstance(lldb::addr_t instance_address,
+                       swift::reflection::DescriptorFinder *descriptor_finder) override {
+    auto on_exit = PushDescriptorFinderAndPopOnExit(descriptor_finder);
+    auto metadata_address =
+        m_reflection_ctx.readMetadataFromInstance(instance_address);
+    if (!metadata_address) {
+      LLDB_LOG(GetLog(LLDBLog::Types),
+               "could not read heap metadata for object at {0:x}",
+               instance_address);
+      return {};
+    }
+    return metadata_address;
   }
 
   std::optional<bool> IsValueInlinedInExistentialContainer(

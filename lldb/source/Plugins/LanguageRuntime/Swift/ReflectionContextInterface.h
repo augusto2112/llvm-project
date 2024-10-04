@@ -137,6 +137,9 @@ public:
       lldb::addr_t instance_address,
       swift::reflection::DescriptorFinder *descriptor_finder,
       bool skip_artificial_subclasses = false) = 0;
+  virtual std::optional<uint64_t> ReadMetadataAddressFromInstance(
+      lldb::addr_t instance_address,
+      swift::reflection::DescriptorFinder *descriptor_finder) = 0;
   virtual std::optional<bool> IsValueInlinedInExistentialContainer(
       swift::remote::RemoteAddress existential_address) = 0;
   virtual const swift::reflection::TypeRef *ApplySubstitutions(
