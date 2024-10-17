@@ -11,6 +11,7 @@
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringExtras.h"
+#include "llvm/BinaryFormat/Dwarf.h"
 #include "llvm/CodeGen/NonRelocatableStringpool.h"
 #include "llvm/DWARFLinker/Classic/DWARFLinkerDeclContext.h"
 #include "llvm/DWARFLinker/Classic/DWARFStreamer.h"
@@ -28,6 +29,7 @@
 #include "llvm/DebugInfo/DWARF/DWARFSection.h"
 #include "llvm/DebugInfo/DWARF/DWARFUnit.h"
 #include "llvm/MC/MCDwarf.h"
+#include "llvm/Support/DJB.h"
 #include "llvm/Support/DataExtractor.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -1831,10 +1833,8 @@ DIE *DWARFLinker::DIECloner::cloneDIE(const DWARFDie &InputDIE,
     Unit.addNamespaceAccelerator(Die, AttrInfo.Name);
   } else if (Tag == dwarf::DW_TAG_imported_declaration && AttrInfo.Name) {
     Unit.addNamespaceAccelerator(Die, AttrInfo.Name);
-  } else if (isTypeTag(Tag) && !AttrInfo.IsDeclaration &&
-             getDIENames(InputDIE, AttrInfo, DebugStrPool) && AttrInfo.Name &&
-             AttrInfo.Name.getString()[0]) {
-    uint32_t Hash = hashFullyQualifiedName(InputDIE, Unit, File);
+  } else if (isTypeTag(Tag) && !AttrInfo.IsDeclaration) {
+    bool Success = getDIENames(InputDIE, AttrInfo, DebugStrPool);
     uint64_t RuntimeLang =
         dwarf::toUnsigned(InputDIE.find(dwarf::DW_AT_APPLE_runtime_class))
             .value_or(0);
@@ -1843,8 +1843,18 @@ DIE *DWARFLinker::DIECloner::cloneDIE(const DWARFDie &InputDIE,
          RuntimeLang == dwarf::DW_LANG_ObjC_plus_plus) &&
         dwarf::toUnsigned(InputDIE.find(dwarf::DW_AT_APPLE_objc_complete_type))
             .value_or(0);
-    Unit.addTypeAccelerator(Die, AttrInfo.Name, ObjCClassIsImplementation,
-                            Hash);
+    if (Success && AttrInfo.Name && AttrInfo.Name.getString()[0]) {
+      uint32_t Hash = hashFullyQualifiedName(InputDIE, Unit, File);
+      Unit.addTypeAccelerator(Die, AttrInfo.Name, ObjCClassIsImplementation,
+                              Hash);
+    }
+
+    if (Success && AttrInfo.MangledName &&
+        AttrInfo.MangledName != AttrInfo.Name) {
+      auto Hash = djbHash(AttrInfo.MangledName.getString().data());
+      Unit.addTypeAccelerator(Die, AttrInfo.MangledName,
+                              ObjCClassIsImplementation, Hash);
+    }
   }
 
   // Determine whether there are any children that we want to keep.
