@@ -14,6 +14,7 @@
 #include "DWARFDeclContext.h"
 #include "DWARFUnit.h"
 #include "lldb/Symbol/Type.h"
+#include "lldb/lldb-private-enumerations.h"
 
 #include "llvm/ADT/iterator.h"
 #include "llvm/BinaryFormat/Dwarf.h"
@@ -417,11 +418,18 @@ static void GetDeclContextImpl(DWARFDIE die,
   }
 }
 
-std::vector<CompilerContext> DWARFDIE::GetDeclContext() const {
+std::vector<CompilerContext>
+DWARFDIE::GetDeclContext(bool use_mangled_name) const {
   llvm::SmallSet<lldb::user_id_t, 4> seen;
   std::vector<CompilerContext> context;
-  GetDeclContextImpl(*this, seen, context);
-  std::reverse(context.begin(), context.end());
+  // Since mangled names are unique there's no need to build an entire context.
+  if (use_mangled_name) {
+    context.push_back(
+        {CompilerContextKind::AnyType, ConstString(GetMangledName())});
+  } else {
+    GetDeclContextImpl(*this, seen, context);
+    std::reverse(context.begin(), context.end());
+  }
   return context;
 }
 
@@ -453,7 +461,7 @@ static void GetTypeLookupContextImpl(DWARFDIE die,
       break;
     case DW_TAG_typedef:
       push_ctx(CompilerContextKind::Typedef, die.GetName());
-      break;
+   break;
     case DW_TAG_base_type:
       push_ctx(CompilerContextKind::Builtin, die.GetName());
       break;
@@ -477,11 +485,18 @@ static void GetTypeLookupContextImpl(DWARFDIE die,
   }
 }
 
-std::vector<CompilerContext> DWARFDIE::GetTypeLookupContext() const {
+std::vector<CompilerContext>
+DWARFDIE::GetTypeLookupContext(bool use_mangled_name) const {
   llvm::SmallSet<lldb::user_id_t, 4> seen;
   std::vector<CompilerContext> context;
-  GetTypeLookupContextImpl(*this, seen, context);
-  std::reverse(context.begin(), context.end());
+  // Since mangled names are unique there's no need to build an entire context.
+  if (use_mangled_name) {
+    context.push_back(
+        {CompilerContextKind::AnyType, ConstString(GetMangledName())});
+  } else {
+    GetTypeLookupContextImpl(*this, seen, context);
+    std::reverse(context.begin(), context.end());
+  }
   return context;
 }
 
