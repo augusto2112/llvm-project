@@ -1,57 +1,67 @@
-
 #include "Parser/Parser.h"
-#include "llvm/ADT/APInt.h"
+#include "Parser/Expr.h"
+#include "Scanner/Token.h"
 #include "llvm/Support/ErrorHandling.h"
-#include "llvm/Support/raw_ostream.h"
-#include <cstdint>
-#include <string>
+#include <initializer_list>
+#include <memory>
 
 using namespace alang;
 
-Parser::Parser(const std::string &&Input) {
-  this->Input = std::move(Input);
-  this->Current = llvm::StringRef(Input);
+std::unique_ptr<Expr> Parser::parseExpression() {
+  if (auto Literal = parseLiteral()) {
+    return Literal;;
+  } 
+  if (auto Binary = parseBinary()) {
+    return Binary;
+  }
+
+  return nullptr;
 }
 
-uint64_t Parser::parseDigit() {
-  llvm::APInt Result;
-  auto Failure = Current.consumeInteger(10, Result);
-  assert(!Failure);
-  auto Digit = Result.getLimitedValue();
-  assert(Digit != UINT64_MAX);
-  return Digit;;
+std::unique_ptr<Expr> Parser::parseLiteral() {
+  if (match({Token::Type::number_literal})) {
+    return std::make_unique<IntegerExpr>(getPrevious().getIntValue());
+  }
+  return nullptr;
 }
 
+std::unique_ptr<Expr> Parser::parseBinary() {
+  if (match({Token::Type::open_parenthesis})) {
+    if (!match({Token::Type::plus})) 
+      llvm_unreachable("Unexpected token on parseBinary");
 
-Token Parser::lexToken() {
-  assert(!Current.empty());
-  while (Current.front() == ' ' && !Current.empty())
-    Current = Current.drop_front();
-
-  assert(!Current.empty());
-  switch (Current.front()) {
-  case '(': {
-    Current = Current.drop_front();
-    return Token(Token::Type::open_parenthesis);
-  }
-  case ')': {
-    Current = Current.drop_front();
-    return Token(Token::Type::close_parenthesis);
+    auto Operator = getPrevious();
+    auto LHS = parseExpression();
+    auto RHS = parseExpression();
+    if (!match({Token::Type::close_parenthesis})) 
+      llvm_unreachable("Unexpected token on parseBinary");
+    return std::make_unique<BinaryExpr>(Operator, std::move(LHS), std::move(RHS));
   }
 
-  case '+': {
-    Current = Current.drop_front();
-    return Token(Token::Type::plus);
-  }
+  return nullptr;
+}
 
-  default: {
-    if (isdigit(Current.front())) {
-      auto Digit = parseDigit();
-      return Token(Token::Type::number_literal, {}, Digit);
+bool Parser::match(std::initializer_list<Token::Type> TokenTypes) {
+  for (auto &TokenType : TokenTypes) {
+    if (getCurrent().getType() == TokenType) {
+      advanceTokens();
+      return true;
     }
-    llvm::errs() << Current.front() << "\n";
-    llvm_unreachable("Unexpected token");
   }
-  }
+
+  return false;
+}
+void Parser::advanceTokens() {
+  Previous = Current;
+  Current = Scanner.lexToken();
 }
 
+Token &Parser::getCurrent() {
+  if (!Current)
+    advanceTokens();
+  return *Current;
+}
+
+Token &Parser::getPrevious() {
+  return *Previous;
+}
