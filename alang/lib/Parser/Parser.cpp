@@ -2,6 +2,7 @@
 #include "Parser/Parser.h"
 #include "llvm/ADT/APInt.h"
 #include "llvm/Support/ErrorHandling.h"
+#include "llvm/Support/raw_ostream.h"
 #include <cstdint>
 #include <string>
 
@@ -18,22 +19,28 @@ uint64_t Parser::parseDigit() {
   assert(!Failure);
   auto Digit = Result.getLimitedValue();
   assert(Digit != UINT64_MAX);
-  return Digit;
+  return Digit;;
 }
 
+
 Token Parser::lexToken() {
+  assert(!Current.empty());
+  while (Current.front() == ' ' && !Current.empty())
+    Current = Current.drop_front();
+
+  assert(!Current.empty());
   switch (Current.front()) {
   case '(': {
-    static_cast<void>(Current.drop_front());
+    Current = Current.drop_front();
     return Token(Token::Type::open_parenthesis);
   }
   case ')': {
-    static_cast<void>(Current.drop_front());
+    Current = Current.drop_front();
     return Token(Token::Type::close_parenthesis);
   }
 
   case '+': {
-    static_cast<void>(Current.drop_front());
+    Current = Current.drop_front();
     return Token(Token::Type::plus);
   }
 
@@ -42,8 +49,9 @@ Token Parser::lexToken() {
       auto Digit = parseDigit();
       return Token(Token::Type::number_literal, {}, Digit);
     }
+    llvm::errs() << Current.front() << "\n";
+    llvm_unreachable("Unexpected token");
   }
   }
-  llvm_unreachable("Unexpected token");
 }
 
