@@ -1,10 +1,12 @@
-#include <iostream>
-#include "llvm/ADT/StringRef.h"
+#include "Lexer/Lexer.h"
 #include "llvm/Support/raw_ostream.h"
+#include <iostream>
 
+using namespace alang;
 int main() {
-  llvm::StringRef f("SA");
   llvm::errs() << "saddsa\n";
   std::cout << "Hello world\n";
+  Lexer Lexer("433");
+  Lexer.lexToken();
   return 0;
 }
