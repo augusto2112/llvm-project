@@ -24,7 +24,7 @@ struct Token {
 
   uint64_t getIntValue() const { return *Value; }
 
-  void dump();
+  void dump() const;
 
 private:
   llvm::StringRef getTypeString() const;

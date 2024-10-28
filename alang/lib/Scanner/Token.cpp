@@ -12,6 +12,6 @@ llvm::StringRef Token::getTypeString() const {
     case Type::plus: return "plus";
   }
 }
-void Token::dump() {
+void Token::dump() const {
   llvm::errs() << "Type: " << getTypeString() << ", Lexeme: " << Lexeme << ", Value: " << Value;
 }

@@ -3,6 +3,7 @@
 #define ALANG_EXPR_H
 
 #include "../Scanner/Token.h"
+#include "llvm/IR/Value.h"
 #include <cstdint>
 #include <memory>
 
@@ -17,17 +18,29 @@ struct ExprVisitor {
   virtual ~ExprVisitor() = default;
 };
 
+struct ValueExprVisitor {
+  virtual llvm::Value *valueVisit(IntegerExpr &) = 0;
+  virtual llvm::Value *valueVisit(BinaryExpr &) = 0;
+  virtual ~ValueExprVisitor() = default;
+};
+
 struct Expr {
   Expr() = default;
 
   virtual void accept(ExprVisitor &Visitor) = 0;
+  virtual llvm::Value *accept(ValueExprVisitor &Visitor) = 0;
   virtual ~Expr() = default;
 };
 
 struct IntegerExpr : Expr {
   explicit IntegerExpr(uint64_t Value) : Value(Value) {}
   uint64_t getValue() const { return Value; }
-  void accept(ExprVisitor &Visitor) override { Visitor.visit(*this); }
+  void accept(ExprVisitor &Visitor) override { 
+    Visitor.visit(*this); 
+  }
+  llvm::Value *accept(ValueExprVisitor &Visitor) override { 
+    return Visitor.valueVisit(*this); 
+  }
 
 private:
   uint64_t Value;
@@ -40,7 +53,11 @@ struct BinaryExpr : Expr {
 
   void accept(ExprVisitor &Visitor) override { Visitor.visit(*this); }
 
-  Token getOperator() const { return Operator; }
+  llvm::Value *accept(ValueExprVisitor &Visitor) override { 
+    return Visitor.valueVisit(*this); 
+  }
+
+  const Token &getOperator() const { return Operator; }
   
   Expr &getRHS() const { return *RHS.get(); }
 
