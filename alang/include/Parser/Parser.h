@@ -1,16 +1,19 @@
 
-#ifndef ALANG_LEXER_H
-#define ALANG_LEXER_H
+#ifndef ALANG_PARSER_H
+#define ALANG_PARSER_H
 
 #include "Token.h"
 #include "llvm/ADT/StringRef.h"
 #include <string>
 
 namespace alang {
-struct Lexer {
-  explicit Lexer(const std::string &&);
+struct Parser {
+  explicit Parser(const std::string &&);
 
   Token lexToken();
+
+  bool isAtEnd() const { return Current.empty(); }
+
 private:
   void advance();
 

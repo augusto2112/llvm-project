@@ -1,1 +1,1 @@
-include_directories(Lexer)
+include_directories(Parser)
