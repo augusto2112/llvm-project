@@ -2980,6 +2980,9 @@ SwiftLanguageRuntimeImpl::GetTypeRef(CompilerType type,
 
 CompilerType SwiftLanguageRuntimeImpl::AdjustTypeForOriginallyDefinedInModule(
     CompilerType type) {
+  if (!type)
+    return type;
+
   auto ts = type.GetTypeSystem().dyn_cast_or_null<TypeSystemSwift>();
   assert(ts);
   if (!ts)
@@ -3136,6 +3139,7 @@ SwiftLanguageRuntimeImpl::GetSwiftRuntimeTypeInfo(
       lock = std::make_unique<SwiftScratchContextLock>(&exe_ctx);
       type = BindGenericTypeParameters(*frame, type);
     }
+
 
   type = AdjustTypeForOriginallyDefinedInModule(type);
   // BindGenericTypeParameters imports the type into the scratch
