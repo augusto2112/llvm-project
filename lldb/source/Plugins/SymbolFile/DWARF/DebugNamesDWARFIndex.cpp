@@ -14,7 +14,9 @@
 #include "lldb/Core/Module.h"
 #include "lldb/Utility/RegularExpression.h"
 #include "lldb/Utility/Stream.h"
+#include "lldb/Utility/StreamString.h"
 #include "llvm/ADT/Sequence.h"
+#include "llvm/Support/raw_ostream.h"
 #include <optional>
 
 using namespace lldb_private;
