@@ -6,7 +6,7 @@
 using namespace alang;
 
 int main() {
-  std::string Source("(+ (+ 344 453) (+ (+ 4332 (+ 433 833) ) 999) )");
+  std::string Source("(+ (+ (+ 344 453) (+ (+ 4332 (+ 433 833) ) 999) ) (+ 234 (+ (+ 329432 93) 923823) ) )");
   Scanner Scanner(std::move(Source));
   Parser Parser(std::move(Scanner));
   auto Expr = Parser.parseExpression();
