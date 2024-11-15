@@ -137,6 +137,13 @@ lldb::TypeSP DWARFASTParserSwift::ParseTypeFromDWARF(const SymbolContext &sc,
         return type_sp;
       }
     }
+    if (name.GetStringRef().starts_with("$ODI$")) {
+
+      type_sp = die.GetDWARF()->MakeType(
+          die.GetID(), name, 0, nullptr, LLDB_INVALID_UID, Type::eEncodingIsUID,
+          &decl, compiler_type, Type::ResolveState::Full);
+      return type_sp;
+    }
     if (SwiftLanguageRuntime::IsSwiftMangledName(name.GetStringRef())) {
       mangled_name = name;
       if (die.Tag() == DW_TAG_typedef)

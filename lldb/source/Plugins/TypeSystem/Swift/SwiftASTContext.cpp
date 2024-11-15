@@ -4732,6 +4732,20 @@ SwiftASTContext::ReconstructType(ConstString mangled_typename) {
   // to the Swift compiler because they are declared and defined in a .m file.
   // If we can't reconstruct an ObjC type, walk up the type hierarchy until we
   // find something we can import, or until we run out of types
+  if (!found_type) {
+    TypeQuery query(mangled_typename, e_find_one);
+    TypeResults results;
+    if (TargetSP target_sp = GetTargetWP().lock()) {
+      ModuleList &module_list = target_sp->GetImages();
+      module_list.FindTypes(GetTypeSystemSwiftTypeRef().GetModule(), query,
+                            results);
+      auto lldb_type = results.GetFirstType();
+      assert(lldb_type);
+      auto n = lldb_type->GetName();
+      found_type =
+          swift::Demangle::getTypeForMangling(**ast_ctx, n).getPointer();
+    }
+  }
   while (!found_type) {
     CompilerType clang_type = GetAsClangType(mangled_typename);
     if (!clang_type)
