@@ -21,6 +21,7 @@
 #include "lldb/Utility/Flags.h"
 #include "lldb/lldb-enumerations.h"
 #include "lldb/lldb-private.h"
+#include "swift/Demangling/ManglingFlavor.h"
 
 namespace clang {
 class Decl;
@@ -200,6 +201,11 @@ public:
   /// Attempts to convert a Clang type into a Swift type.
   /// For example, int is converted to Int32.
   virtual CompilerType ConvertClangTypeToSwiftType(CompilerType clang_type) = 0;
+
+
+  virtual swift::Mangle::ManglingFlavor GetManglingFlavor() {
+    return swift::Mangle::ManglingFlavor::Default;
+  }
 
   /// \see lldb_private::TypeSystem::Dump
   void Dump(llvm::raw_ostream &output) override;

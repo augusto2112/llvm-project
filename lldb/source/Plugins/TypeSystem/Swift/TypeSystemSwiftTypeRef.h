@@ -16,12 +16,15 @@
 #include "Plugins/TypeSystem/Swift/TypeSystemSwift.h"
 #include "lldb/Core/SwiftForward.h"
 #include "lldb/Utility/ThreadSafeDenseMap.h"
+#include "lldb/lldb-forward.h"
+#include "swift/Demangling/ManglingFlavor.h"
 
 // FIXME: needed only for the DenseMap.
 #include "clang/APINotes/APINotesManager.h"
 #include "clang/Basic/Module.h"
 
 #include "llvm/ADT/StringRef.h"
+#include <memory>
 
 namespace swift {
 class DWARFImporterDelegate;
@@ -133,6 +136,11 @@ public:
   }
 
   Module *GetModule() const { return m_module; }
+
+
+  swift::Mangle::ManglingFlavor GetManglingFlavor() override {
+    return m_flavor;
+  }
 
   /// Return a key for the SwiftASTContext map. If there is debug info it's the
   /// name of the owning Swift module for a function.
@@ -412,6 +420,9 @@ public:
   lldb::TypeSP FindTypeInModule(lldb::opaque_compiler_type_t type);
 
 protected:
+  TypeSystemSwiftTypeRef(Module &module, swift::Mangle::ManglingFlavor flavor);
+  TypeSystemSwiftTypeRef(Module &module, TypeSystemSwiftTypeRefSP other_flavor_ts);
+  void Initialize(Module &module);
   /// Helper that creates an AST type from \p type.
   ///
   /// FIXME: This API is dangerous, it would be better to return a
@@ -521,6 +532,9 @@ protected:
 
   /// All lldb::Type pointers produced by DWARFASTParser Swift go here.
   ThreadSafeDenseMap<const char *, lldb::TypeSP> m_swift_type_map;
+
+  const swift::Mangle::ManglingFlavor m_flavor;
+  TypeSystemSwiftTypeRefSP m_other_flavor_ts;
 };
 
 /// This one owns a SwiftASTContextForExpressions.

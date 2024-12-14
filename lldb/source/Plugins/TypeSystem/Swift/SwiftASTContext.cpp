@@ -46,6 +46,7 @@
 #include "swift/Basic/PrimarySpecificPaths.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/Demangling/Demangle.h"
+#include "swift/Demangling/ManglingFlavor.h"
 #include "swift/Demangling/ManglingMacros.h"
 #include "swift/Frontend/Frontend.h"
 #include "swift/Frontend/ModuleInterfaceLoader.h"
@@ -5107,6 +5108,12 @@ swift::IRGenDebugInfoLevel SwiftASTContext::GetGenerateDebugInfo() {
   return GetIRGenOptions().DebugInfoLevel;
 }
 
+
+swift::Mangle::ManglingFlavor SwiftASTContext::GetManglingFlavor() {
+  return GetLanguageOptions().hasFeature(swift::Feature::Embedded)
+             ? swift::Mangle::ManglingFlavor::Embedded
+             : swift::Mangle::ManglingFlavor::Default;
+}
 swift::PrintOptions SwiftASTContext::GetUserVisibleTypePrintingOptions(
     bool print_help_if_available) {
   swift::PrintOptions print_options;

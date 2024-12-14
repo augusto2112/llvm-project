@@ -24,6 +24,7 @@
 
 #include "swift/AST/Import.h"
 #include "swift/AST/Module.h"
+#include "swift/Demangling/ManglingFlavor.h"
 #include "swift/Parse/ParseVersion.h"
 #include "swift/Serialization/SerializationOptions.h"
 #include "swift/SymbolGraphGen/SymbolGraphOptions.h"
@@ -264,6 +265,8 @@ public:
   ThreadSafeASTContext GetASTContext();
 
   swift::IRGenDebugInfoLevel GetGenerateDebugInfo();
+
+  swift::Mangle::ManglingFlavor GetManglingFlavor() override;
 
   static swift::PrintOptions
   GetUserVisibleTypePrintingOptions(bool print_help_if_available);
@@ -1006,6 +1009,8 @@ protected:
   /// Apply a PathMappingList dictionary on all search paths in the
   /// ClangImporterOptions.
   void RemapClangImporterOptions(const PathMappingList &path_map);
+
+  SwiftASTContextSP m_other_flavor_ts;
 };
 
 /// Deprecated.

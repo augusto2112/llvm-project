@@ -22,6 +22,7 @@
 #include "Plugins/LanguageRuntime/Swift/SwiftLanguageRuntime.h"
 #include "Plugins/SymbolFile/DWARF/DWARFASTParserSwift.h"
 #include "Plugins/TypeSystem/Clang/TypeSystemClang.h"
+#include "TypeSystemSwift.h"
 #include "TypeSystemSwiftTypeRef.h"
 #include "lldb/Core/Debugger.h"
 #include "lldb/Core/DumpDataExtractor.h"
@@ -36,6 +37,7 @@
 
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/../../lib/ClangImporter/ClangAdapter.h"
+#include "swift/Demangling/ManglingFlavor.h"
 #include "swift/Frontend/Frontend.h"
 
 #include "clang/APINotes/APINotesManager.h"
@@ -1644,11 +1646,11 @@ TypeSystemSwift::GetInstanceType(CompilerType compiler_type,
   return {};
 }
 
-TypeSystemSwiftTypeRef::TypeSystemSwiftTypeRef() {}
+TypeSystemSwiftTypeRef::TypeSystemSwiftTypeRef(): m_flavor(swift::Mangle::ManglingFlavor::Default) {}
 
-TypeSystemSwiftTypeRef::~TypeSystemSwiftTypeRef() {}
+TypeSystemSwiftTypeRef::~TypeSystemSwiftTypeRef() = default;
 
-TypeSystemSwiftTypeRef::TypeSystemSwiftTypeRef(Module &module) {
+void TypeSystemSwiftTypeRef::Initialize(Module &module) {
   m_module = &module;
   {
     llvm::raw_string_ostream ss(m_description);
@@ -1658,6 +1660,21 @@ TypeSystemSwiftTypeRef::TypeSystemSwiftTypeRef(Module &module) {
   }
   LLDB_LOGF(GetLog(LLDBLog::Types), "%s::TypeSystemSwiftTypeRef()",
             m_description.c_str());
+}
+
+TypeSystemSwiftTypeRef::TypeSystemSwiftTypeRef(Module &module)
+    : m_flavor(swift::Mangle::ManglingFlavor::Default) {
+  Initialize(module);
+  m_other_flavor_ts = TypeSystemSwiftTypeRefSP(
+      new TypeSystemSwiftTypeRef(module, GetTypeSystemSwiftTypeRef()));
+}
+
+TypeSystemSwiftTypeRef::TypeSystemSwiftTypeRef(
+    Module &module, TypeSystemSwiftTypeRefSP other_flavor_ts)
+    : m_flavor(swift::Mangle::ManglingFlavor::Embedded),
+      m_other_flavor_ts(other_flavor_ts) {
+  Initialize(module);
+  m_other_flavor_ts = other_flavor_ts;
 }
 
 TypeSystemSwiftTypeRefForExpressions::TypeSystemSwiftTypeRefForExpressions(
