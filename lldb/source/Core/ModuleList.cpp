@@ -24,6 +24,7 @@
 #include "lldb/Utility/FileSpecList.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
+#include "lldb/Utility/StreamString.h"
 #include "lldb/Utility/UUID.h"
 #include "lldb/lldb-defines.h"
 
@@ -466,6 +467,7 @@ bool ModuleList::RemoveImpl(const ModuleSP &module_sp, bool use_notifier) {
         m_modules.erase(pos);
         if (use_notifier && m_notifier)
           m_notifier->NotifyModuleRemoved(*this, module_sp);
+        m_sorted_filename_list.clear();
         return true;
       }
     }
@@ -478,6 +480,7 @@ ModuleList::RemoveImpl(ModuleList::collection::iterator pos,
                        bool use_notifier) {
   ModuleSP module_sp(*pos);
   collection::iterator retval = m_modules.erase(pos);
+  m_sorted_filename_list.clear();
   if (use_notifier && m_notifier)
     m_notifier->NotifyModuleRemoved(*this, module_sp);
   return retval;
@@ -783,8 +786,25 @@ void ModuleList::FindSymbolsMatchingRegExAndType(
 }
 
 void ModuleList::FindModules(const ModuleSpec &module_spec,
-                             ModuleList &matching_module_list) const {
+                             ModuleList &matching_module_list) {
   std::lock_guard<std::recursive_mutex> guard(m_modules_mutex);
+  if (m_use_table) {
+    if (m_sorted_filename_list.empty()) {
+      for (size_t i = 0; i < m_modules.size(); ++i) {
+        auto name = m_modules[i]->GetFileSpec().GetFilename();
+        auto &vec = m_sorted_filename_list.getOrInsertDefault(std::move(name));
+        vec.push_back(i);
+      }
+    }
+    auto it =
+        m_sorted_filename_list.find(module_spec.GetFileSpec().GetFilename());
+    if (it != m_sorted_filename_list.end()) {
+      for (size_t index : it->getSecond()) {
+        matching_module_list.Append(m_modules[index]);
+      }
+      return;
+    }
+  }
   for (const ModuleSP &module_sp : m_modules) {
     if (module_sp->MatchesModuleSpec(module_spec))
       matching_module_list.Append(module_sp);
@@ -1000,8 +1020,9 @@ namespace {
 struct SharedModuleListInfo {
   ModuleList module_list;
   ModuleListProperties module_list_properties;
+  SharedModuleListInfo() : module_list(true), module_list_properties() {}
 };
-}
+} // namespace
 static SharedModuleListInfo &GetSharedModuleListInfo()
 {
   static SharedModuleListInfo *g_shared_module_list_info = nullptr;
@@ -1071,8 +1092,18 @@ ModuleList::GetSharedModule(const ModuleSpec &module_spec, ModuleSP &module_sp,
   // mutex list.
   if (!always_create) {
     ModuleList matching_module_list;
+    
     shared_module_list.FindModules(module_spec, matching_module_list);
     const size_t num_matching_modules = matching_module_list.GetSize();
+    if (Log *log = GetLog(LLDBLog::Modules)) {
+      StreamString s;
+      module_spec.Dump(s);
+      LLDB_LOG(log,
+               "[GetSharedModule]Looking for module spec {0} from global "
+               "module list, number of modules is {1}, matching modules is ",
+               s.GetString().data(), shared_module_list.GetSize(),
+               num_matching_modules);
+    }
 
     if (num_matching_modules > 0) {
       for (size_t module_idx = 0; module_idx < num_matching_modules;
