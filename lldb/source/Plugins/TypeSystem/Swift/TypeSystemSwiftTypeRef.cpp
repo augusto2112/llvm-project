@@ -425,25 +425,23 @@ TypeSP TypeSystemSwiftTypeRefForExpressions::LookupClangType(
   // Check the cache first. Negative results are also cached.
   TypeSP result;
   ConstString name(name_ref);
-  if (m_clang_type_cache.Lookup(name.AsCString(), result))
+  auto key = std::make_pair(name.AsCString(),
+                            llvm::SmallVector<CompilerContext>(decl_context));
+  if (m_clang_type_cache.Lookup(key, result))
     return result;
 
-  ModuleSP cur_module = sc.module_sp;
   auto lookup = [&](const ModuleSP &m) -> bool {
-    // Already visited this.
-    if (m == cur_module)
-      return true;
-
     // Don't recursively call into LookupClangTypes() to avoid filling
     // hundreds of image caches with negative results.
     result = ::LookupClangType(const_cast<Module &>(*m), decl_context);
     // Cache it in the expression context.
     if (result)
-      m_clang_type_cache.Insert(name.AsCString(), result);
+      m_clang_type_cache.Insert(key, result);
     return !result;
   };
 
   // Visit the current module first as a performance optimization heuristic.
+  ModuleSP cur_module = sc.module_sp;
   if (cur_module)
     if (!lookup(cur_module))
       return result;
@@ -451,6 +449,10 @@ TypeSP TypeSystemSwiftTypeRefForExpressions::LookupClangType(
   if (TargetSP target_sp = GetTargetWP().lock())
     target_sp->GetImages().ForEach(lookup);
 
+  /// Cache the negative result. This is safe to do because ModulesDidLoad will
+  /// clear the cache.
+  if (!result)
+    m_clang_type_cache.Insert(key, result);
   return result;
 }
 

@@ -20,6 +20,7 @@
 #include "lldb/lldb-private.h"
 
 #include "llvm/ADT/APSInt.h"
+#include "llvm/ADT/DenseMapInfo.h"
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/STLForwardCompat.h"
 #include "llvm/Support/raw_ostream.h"
@@ -890,5 +891,31 @@ private:
 };
 
 } // namespace lldb_private
+
+namespace llvm {
+template <> struct DenseMapInfo<lldb_private::CompilerContext> {
+  static lldb_private::CompilerContext getEmptyKey() {
+    return lldb_private::CompilerContext(
+        lldb_private::CompilerContextKind::Invalid,
+        DenseMapInfo<lldb_private::ConstString>::getEmptyKey());
+  }
+
+  static lldb_private::CompilerContext getTombstoneKey() {
+    return lldb_private::CompilerContext(
+        lldb_private::CompilerContextKind::Invalid,
+        DenseMapInfo<lldb_private::ConstString>::getTombstoneKey());
+  }
+
+  static unsigned getHashValue(const lldb_private::CompilerContext &context) {
+    return llvm::hash_combine(
+        static_cast<uint16_t>(context.kind),
+        DenseMapInfo<lldb_private::ConstString>::getHashValue(context.name));
+  }
+  static bool isEqual(const lldb_private::CompilerContext &lhs,
+                      const lldb_private::CompilerContext &rhs) {
+    return lhs == rhs;
+  }
+};
+} // namespace llvm
 
 #endif // LLDB_SYMBOL_TYPE_H

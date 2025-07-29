@@ -686,9 +686,49 @@ protected:
   /// Perform all the implicit imports for the current frame.
   mutable std::unique_ptr<SymbolContext> m_initial_symbol_context_up;
   std::unique_ptr<SwiftPersistentExpressionState> m_persistent_state_up;
-  /// Map ConstString Clang type identifiers to Clang types.
-  ThreadSafeDenseMap<const char *, lldb::TypeSP> m_clang_type_cache;
+  /// Map ConstString Clang type identifiers and the compiler context used to
+  /// find them to Clang types.
+  ThreadSafeDenseMap<
+      std::pair<const char *, llvm::SmallVector<CompilerContext>>, lldb::TypeSP>
+      m_clang_type_cache;
 };
 
 } // namespace lldb_private
+
+namespace llvm {
+template <> struct DenseMapInfo<SmallVector<lldb_private::CompilerContext>> {
+  static SmallVector<lldb_private::CompilerContext> getEmptyKey() {
+    auto vector = SmallVector<lldb_private::CompilerContext>();
+    vector.push_back(
+        DenseMapInfo<lldb_private::CompilerContext>::getEmptyKey());
+    return vector;
+  }
+
+  static SmallVector<lldb_private::CompilerContext> getTombstoneKey() {
+    auto vector = SmallVector<lldb_private::CompilerContext>();
+    vector.push_back(
+        DenseMapInfo<lldb_private::CompilerContext>::getTombstoneKey());
+    return vector;
+  }
+
+  static unsigned
+  getHashValue(const SmallVector<lldb_private::CompilerContext> &vector) {
+    if (vector.empty())
+      return 0;
+
+    auto hash =
+        DenseMapInfo<lldb_private::CompilerContext>::getHashValue(vector[0]);
+    for (size_t i = 1; i < vector.size(); ++i)
+      hash = llvm::hash_combine(
+          hash,
+          DenseMapInfo<lldb_private::CompilerContext>::getHashValue(vector[i]));
+    return hash;
+  }
+
+  static bool isEqual(const SmallVector<lldb_private::CompilerContext> lhs,
+                      const SmallVector<lldb_private::CompilerContext> rhs) {
+    return lhs == rhs;
+  }
+};
+} // namespace llvm
 #endif
