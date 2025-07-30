@@ -368,6 +368,7 @@ ModuleList::~ModuleList() = default;
 
 void ModuleList::AppendImpl(const ModuleSP &module_sp, bool use_notifier) {
   if (module_sp) {
+    size_t index = 0;
     std::lock_guard<std::recursive_mutex> guard(m_modules_mutex);
     // We are required to keep the first element of the Module List as the
     // executable module.  So check here and if the first module is NOT an 
@@ -390,10 +391,17 @@ void ModuleList::AppendImpl(const ModuleSP &module_sp, bool use_notifier) {
         m_modules.insert(m_modules.begin(), module_sp);
       } else {
         m_modules.push_back(module_sp);
+        index = m_modules.size() - 1;
       }
     }
     if (use_notifier && m_notifier)
       m_notifier->NotifyModuleAdded(*this, module_sp);
+
+    if (m_use_table) {
+      auto name = m_modules[index]->GetFileSpec().GetFilename();
+      auto &vec = m_sorted_filename_list.getOrInsertDefault(std::move(name));
+      vec.push_back(index);
+    }
   }
 }
 
@@ -461,13 +469,21 @@ bool ModuleList::AppendIfNeeded(const ModuleList &module_list) {
 bool ModuleList::RemoveImpl(const ModuleSP &module_sp, bool use_notifier) {
   if (module_sp) {
     std::lock_guard<std::recursive_mutex> guard(m_modules_mutex);
-    collection::iterator pos, end = m_modules.end();
-    for (pos = m_modules.begin(); pos != end; ++pos) {
-      if (pos->get() == module_sp.get()) {
-        m_modules.erase(pos);
+    for (size_t i = 0; i < m_modules.size(); ++i) {
+      if (m_modules[i].get() == module_sp.get()) {
+        m_modules.erase(m_modules.begin() + i);
+        if (m_use_table) {
+          auto &vec = m_sorted_filename_list.getOrInsertDefault(
+              module_sp->GetFileSpec().GetFilename());
+          for (size_t j = 0; j < vec.size(); ++j) {
+            if (vec[j] == i) {
+              vec.erase(vec.begin() + j);
+              break;
+            }
+          }
+        }
         if (use_notifier && m_notifier)
           m_notifier->NotifyModuleRemoved(*this, module_sp);
-        m_sorted_filename_list.clear();
         return true;
       }
     }
@@ -480,7 +496,18 @@ ModuleList::RemoveImpl(ModuleList::collection::iterator pos,
                        bool use_notifier) {
   ModuleSP module_sp(*pos);
   collection::iterator retval = m_modules.erase(pos);
-  m_sorted_filename_list.clear();
+  size_t index = std::distance(m_modules.begin(), pos);
+
+  if (m_use_table) {
+    auto &vec = m_sorted_filename_list.getOrInsertDefault(
+        module_sp->GetFileSpec().GetFilename());
+    for (size_t j = 0; j < vec.size(); ++j) {
+      if (vec[j] == index) {
+        vec.erase(vec.begin() + j);
+        break;
+      }
+    }
+  }
   if (use_notifier && m_notifier)
     m_notifier->NotifyModuleRemoved(*this, module_sp);
   return retval;
@@ -789,13 +816,6 @@ void ModuleList::FindModules(const ModuleSpec &module_spec,
                              ModuleList &matching_module_list) {
   std::lock_guard<std::recursive_mutex> guard(m_modules_mutex);
   if (m_use_table) {
-    if (m_sorted_filename_list.empty()) {
-      for (size_t i = 0; i < m_modules.size(); ++i) {
-        auto name = m_modules[i]->GetFileSpec().GetFilename();
-        auto &vec = m_sorted_filename_list.getOrInsertDefault(std::move(name));
-        vec.push_back(i);
-      }
-    }
     auto it =
         m_sorted_filename_list.find(module_spec.GetFileSpec().GetFilename());
     if (it != m_sorted_filename_list.end()) {
@@ -1100,7 +1120,7 @@ ModuleList::GetSharedModule(const ModuleSpec &module_spec, ModuleSP &module_sp,
       module_spec.Dump(s);
       LLDB_LOG(log,
                "[GetSharedModule]Looking for module spec {0} from global "
-               "module list, number of modules is {1}, matching modules is ",
+               "module list, number of modules is {1}, matching modules is {2}",
                s.GetString().data(), shared_module_list.GetSize(),
                num_matching_modules);
     }
