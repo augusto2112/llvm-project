@@ -2042,7 +2042,7 @@ SymbolFileDWARF::GetDwoSymbolFileForCompileUnit(
                                               dwarf_cu->GetID());
 }
 
-void SymbolFileDWARF::UpdateExternalModuleListIfNeeded() {
+void SymbolFileDWARF::UpdateExternalModuleListIfNeeded(TypeResults *results) {
   if (m_fetched_external_modules)
     return;
   m_fetched_external_modules = true;
@@ -2085,6 +2085,16 @@ void SymbolFileDWARF::UpdateExternalModuleListIfNeeded() {
         dwo_module_spec.GetFileSpec().AppendPathComponent(dwo_path);
       }
     }
+
+    if (results) {
+      ConstString a(dwo_module_spec.GetFileSpec().GetPath());
+      if (results->paths.contains(a))
+        return;
+
+      if (results)
+        results->paths.insert(a);
+    }
+
     dwo_module_spec.GetArchitecture() =
         m_objfile_sp->GetModule()->GetArchitecture();
 
@@ -2120,6 +2130,8 @@ void SymbolFileDWARF::UpdateExternalModuleListIfNeeded() {
           "project will regenerate the needed module files.");
       continue;
     }
+
+
 
     // Verify the DWO hash.
     // FIXME: Technically "0" is a valid hash.

@@ -508,7 +508,7 @@ protected:
 
   GlobalVariableMap &GetGlobalAranges();
 
-  void UpdateExternalModuleListIfNeeded();
+  void UpdateExternalModuleListIfNeeded(TypeResults *results = nullptr);
 
   lldb_private::ClangASTImporter &GetClangASTImporter();
 

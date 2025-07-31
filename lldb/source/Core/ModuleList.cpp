@@ -24,6 +24,7 @@
 #include "lldb/Utility/FileSpecList.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
+#include "lldb/Utility/StreamString.h"
 #include "lldb/Utility/UUID.h"
 #include "lldb/lldb-defines.h"
 
@@ -340,9 +341,9 @@ bool ModuleListProperties::GetLoadSymbolOnDemand() {
       idx, g_modulelist_properties[idx].default_uint_value != 0);
 }
 
-ModuleList::ModuleList() : m_modules(), m_modules_mutex() {}
+ModuleList::ModuleList() : m_modules(), m_modules_mutex(), m_use_table(false) {}
 
-ModuleList::ModuleList(const ModuleList &rhs) : m_modules(), m_modules_mutex() {
+ModuleList::ModuleList(const ModuleList &rhs) : m_modules(), m_modules_mutex(), m_use_table(false) {
   std::lock_guard<std::recursive_mutex> lhs_guard(m_modules_mutex);
   std::lock_guard<std::recursive_mutex> rhs_guard(rhs.m_modules_mutex);
   m_modules = rhs.m_modules;
@@ -393,6 +394,12 @@ void ModuleList::AppendImpl(const ModuleSP &module_sp, bool use_notifier) {
     }
     if (use_notifier && m_notifier)
       m_notifier->NotifyModuleAdded(*this, module_sp);
+
+    if (m_use_table) {
+      auto name = module_sp->GetFileSpec().GetFilename();
+      auto &vec = m_sorted_filename_list.getOrInsertDefault(std::move(name));
+      vec.push_back(module_sp);
+    }
   }
 }
 
@@ -460,10 +467,19 @@ bool ModuleList::AppendIfNeeded(const ModuleList &module_list) {
 bool ModuleList::RemoveImpl(const ModuleSP &module_sp, bool use_notifier) {
   if (module_sp) {
     std::lock_guard<std::recursive_mutex> guard(m_modules_mutex);
-    collection::iterator pos, end = m_modules.end();
-    for (pos = m_modules.begin(); pos != end; ++pos) {
-      if (pos->get() == module_sp.get()) {
-        m_modules.erase(pos);
+    for (size_t i = 0; i < m_modules.size(); ++i) {
+      if (m_modules[i].get() == module_sp.get()) {
+        m_modules.erase(m_modules.begin() + i);
+        if (m_use_table) {
+          auto &vec = m_sorted_filename_list.getOrInsertDefault(
+              module_sp->GetFileSpec().GetFilename());
+          for (auto *it = vec.begin(); it != vec.end(); ++it) {
+            if (it->get() == module_sp.get()) {
+              vec.erase(it);
+              break;
+            }
+          }
+        }
         if (use_notifier && m_notifier)
           m_notifier->NotifyModuleRemoved(*this, module_sp);
         return true;
@@ -478,6 +494,19 @@ ModuleList::RemoveImpl(ModuleList::collection::iterator pos,
                        bool use_notifier) {
   ModuleSP module_sp(*pos);
   collection::iterator retval = m_modules.erase(pos);
+  size_t index = std::distance(m_modules.begin(), pos);
+
+  if (m_use_table) {
+
+    auto &vec = m_sorted_filename_list.getOrInsertDefault(
+        module_sp->GetFileSpec().GetFilename());
+    for (auto *it = vec.begin(); it != vec.end(); ++it) {
+      if (it->get() == module_sp.get()) {
+        vec.erase(it);
+        break;
+      }
+    }
+  }
   if (use_notifier && m_notifier)
     m_notifier->NotifyModuleRemoved(*this, module_sp);
   return retval;
@@ -783,11 +812,31 @@ void ModuleList::FindSymbolsMatchingRegExAndType(
 }
 
 void ModuleList::FindModules(const ModuleSpec &module_spec,
-                             ModuleList &matching_module_list) const {
+                             ModuleList &matching_module_list) {
   std::lock_guard<std::recursive_mutex> guard(m_modules_mutex);
+  ModuleList comp_list;
+  if (module_spec.GetFileSpec().GetFilename() == "liboah.dylib")
+    llvm::errs() << "On liboah.dylib\n";
+  if (m_use_table) {
+    auto it =
+        m_sorted_filename_list.find(module_spec.GetFileSpec().GetFilename());
+    if (it != m_sorted_filename_list.end()) {
+      for (auto module : it->getSecond()) {
+        if (module->MatchesModuleSpec(module_spec))
+          comp_list.Append(module);
+      }
+    }
+  }
   for (const ModuleSP &module_sp : m_modules) {
     if (module_sp->MatchesModuleSpec(module_spec))
       matching_module_list.Append(module_sp);
+  }
+  if (!m_use_table || module_spec.GetUUID().IsValid())
+    return;
+  assert(comp_list.GetSize() == matching_module_list.GetSize());
+  for (size_t i = 0; i < comp_list.GetSize(); ++i) {
+    assert(comp_list.GetModuleAtIndex(i).get() ==
+           matching_module_list.GetModuleAtIndex(i).get());
   }
 }
 
@@ -1000,8 +1049,9 @@ namespace {
 struct SharedModuleListInfo {
   ModuleList module_list;
   ModuleListProperties module_list_properties;
+  SharedModuleListInfo() : module_list(true), module_list_properties() {}
 };
-}
+} // namespace
 static SharedModuleListInfo &GetSharedModuleListInfo()
 {
   static SharedModuleListInfo *g_shared_module_list_info = nullptr;
@@ -1071,8 +1121,18 @@ ModuleList::GetSharedModule(const ModuleSpec &module_spec, ModuleSP &module_sp,
   // mutex list.
   if (!always_create) {
     ModuleList matching_module_list;
+    
     shared_module_list.FindModules(module_spec, matching_module_list);
     const size_t num_matching_modules = matching_module_list.GetSize();
+    if (Log *log = GetLog(LLDBLog::Modules)) {
+      StreamString s;
+      module_spec.Dump(s);
+      LLDB_LOG(log,
+               "[GetSharedModule]Looking for module spec {0} from global "
+               "module list, number of modules is {1}, matching modules is {2}",
+               s.GetString().data(), shared_module_list.GetSize(),
+               num_matching_modules);
+    }
 
     if (num_matching_modules > 0) {
       for (size_t module_idx = 0; module_idx < num_matching_modules;

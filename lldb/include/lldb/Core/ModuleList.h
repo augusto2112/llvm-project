@@ -145,6 +145,7 @@ public:
   /// Creates an empty list of Module objects.
   ModuleList();
 
+  ModuleList(bool use_table) : m_use_table(use_table) {}
   /// Copy Constructor.
   ///
   /// Creates a new module list object with a copy of the modules from \a rhs.
@@ -362,7 +363,7 @@ public:
   ///     A module list that gets filled in with any modules that
   ///     match the search criteria.
   void FindModules(const ModuleSpec &module_spec,
-                   ModuleList &matching_module_list) const;
+                   ModuleList &matching_module_list);
 
   lldb::ModuleSP FindModule(const Module *module_ptr) const;
 
@@ -563,6 +564,8 @@ protected:
 
   Notifier *m_notifier = nullptr;
 
+  bool m_use_table = false;
+  llvm::DenseMap<ConstString, llvm::SmallVector<lldb::ModuleSP>> m_sorted_filename_list;
 public:
   typedef LockingAdaptedIterable<collection, lldb::ModuleSP, vector_adapter,
                                  std::recursive_mutex>

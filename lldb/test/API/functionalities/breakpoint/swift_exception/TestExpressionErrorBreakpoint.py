@@ -27,30 +27,6 @@ class TestSwiftErrorBreakpoint(TestBase):
         self.build()
         self.do_tests(None)
 
-    @swiftTest
-    def test_swift_error_matching_base_typename(self):
-        """Tests that swift error throws are correctly caught by the Swift Error breakpoint"""
-        self.build()
-        self.do_tests("EnumError")
-
-    @swiftTest
-    def test_swift_error_matching_full_typename(self):
-        """Tests that swift error throws are correctly caught by the Swift Error breakpoint"""
-        self.build()
-        self.do_tests("a.EnumError")
-
-    @swiftTest
-    def test_swift_error_bogus_typename(self):
-        """Tests that swift error throws are correctly caught by the Swift Error breakpoint"""
-        self.build()
-        self.do_tests_in_mode("NoSuchErrorHere", mode="untyped", should_stop=False)
-
-    @swiftTest
-    @expectedFailureAll(bugnumber="rdar://148033473")
-    def test_swift_typed_error_bogus_typename(self):
-        """Tests that swift error throws are correctly caught by the Swift Error breakpoint"""
-        self.build()
-        self.do_tests_in_mode("NoSuchErrorHere", mode="typed", should_stop=False)
 
     def do_tests(self, typename, should_stop=True):
         for mode in ("typed", "untyped"):

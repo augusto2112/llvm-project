@@ -366,6 +366,7 @@ public:
   TypeMap &GetTypeMap() { return m_type_map; }
   const TypeMap &GetTypeMap() const { return m_type_map; }
 
+  llvm::DenseSet<ConstString> paths;
 private:
   /// Matching types get added to this map as type search continues.
   TypeMap m_type_map;
