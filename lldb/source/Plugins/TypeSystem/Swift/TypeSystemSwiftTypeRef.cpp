@@ -435,25 +435,15 @@ TypeSP TypeSystemSwiftTypeRefForExpressions::LookupClangType(
   if (m_clang_type_cache.Lookup(key, result))
     return result;
 
-  auto lookup = [&](const ModuleSP &m) -> bool {
-    // Don't recursively call into LookupClangTypes() to avoid filling
-    // hundreds of image caches with negative results.
-    result = ::LookupClangType(const_cast<Module &>(*m), decl_context);
-    // Cache it in the expression context.
-    if (result)
-      m_clang_type_cache.Insert(key, result);
-    return !result;
-  };
-
-  // Visit the current module first as a performance optimization heuristic.
   ModuleSP cur_module = sc.module_sp;
-  if (cur_module)
-    if (!lookup(cur_module))
-      return result;
-
-  if (TargetSP target_sp = GetTargetWP().lock())
-    target_sp->GetImages().ForEach(lookup);
-
+  if (TargetSP target_sp = GetTargetWP().lock()) {
+    TypeQuery query(decl_context, TypeQueryOptions::e_find_one |
+                                      TypeQueryOptions::e_module_search);
+    query.SetLanguages(TypeSystemClang::GetSupportedLanguagesForTypes());
+    TypeResults results;
+    target_sp->GetImages().FindTypes(cur_module.get(), query, results);
+    result = results.GetFirstType();
+  }
   /// Cache the negative result. This is safe to do because ModulesDidLoad will
   /// clear the cache.
   if (!result)
