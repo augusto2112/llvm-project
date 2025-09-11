@@ -316,6 +316,22 @@ public:
                      const ModuleFunctionSearchOptions &options,
                      SymbolContextList &sc_list);
 
+  /// Find functions by a vector of lookup infos.
+  ///
+  /// If the function is an inlined function, it will have a block,
+  /// representing the inlined function, and the function will be the
+  /// containing function.  If it is not inlined, then the block will be NULL.
+  ///
+  /// \param[in] lookup_infos
+  ///     The vector of lookup infos of the function we are looking for.
+  ///
+  /// \param[out] sc_list
+  ///     A symbol context list that gets filled in with all of the
+  ///     matches.         
+  void FindFunctions(const std::vector<LookupInfo> &lookup_infos,
+                     const CompilerDeclContext &parent_decl_ctx,
+                     const ModuleFunctionSearchOptions &options,
+                     SymbolContextList &sc_list);
   /// Find functions by name.
   ///
   /// If the function is an inlined function, it will have a block,
@@ -951,9 +967,15 @@ public:
   public:
     LookupInfo() = default;
 
-    LookupInfo(ConstString name, lldb::FunctionNameType name_type_mask,
-               lldb::LanguageType language);
-
+    /// Creates a vector of lookup infos.
+    ///
+    /// \return A vector containing one LookupInfo per relevant language.
+    ///         When lang_type is specified, returns a single-element vector.
+    ///         When lang_type is eLanguageTypeUnknown, returns one LookupInfo
+    ///         for each available language.
+    static std::vector<LookupInfo>
+    MakeLookupInfo(ConstString name, lldb::FunctionNameType name_type_mask,
+                   lldb::LanguageType lang_type);
     ConstString GetName() const { return m_name; }
 
     void SetName(ConstString name) { m_name = name; }
@@ -993,6 +1015,10 @@ public:
     /// If \b true, then demangled names that match will need to contain
     /// "m_name" in order to be considered a match
     bool m_match_name_after_lookup = false;
+
+private:
+    LookupInfo(ConstString name, lldb::FunctionNameType name_type_mask,
+               lldb::LanguageType lang_type);
   };
 
   /// Get a unique hash for this module.

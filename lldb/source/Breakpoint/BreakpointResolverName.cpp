@@ -215,19 +215,20 @@ StructuredData::ObjectSP BreakpointResolverName::SerializeToStructuredData() {
 
 void BreakpointResolverName::AddNameLookup(ConstString name,
                                            FunctionNameType name_type_mask) {
-
-  Module::LookupInfo lookup(name, name_type_mask, m_language);
-  m_lookups.emplace_back(lookup);
+  std::vector<Module::LookupInfo> infos = Module::LookupInfo::MakeLookupInfo(name, name_type_mask, m_language);
+  llvm::append_range(m_lookups, infos);
 
   auto add_variant_funcs = [&](Language *lang) {
     for (Language::MethodNameVariant variant :
          lang->GetMethodNameVariants(name)) {
       // FIXME: Should we be adding variants that aren't of type Full?
       if (variant.GetType() & lldb::eFunctionNameTypeFull) {
-        Module::LookupInfo variant_lookup(name, variant.GetType(),
+        std::vector<Module::LookupInfo> variant_lookups = Module::LookupInfo::MakeLookupInfo(name, variant.GetType(),
                                           lang->GetLanguageType());
-        variant_lookup.SetLookupName(variant.GetName());
-        m_lookups.emplace_back(variant_lookup);
+        llvm::for_each(variant_lookups, [&](auto &variant_lookup) {
+          variant_lookup.SetLookupName(variant.GetName());
+        });
+        llvm::append_range(m_lookups, variant_lookups);
       }
     }
     return true;

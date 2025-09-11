@@ -523,9 +523,10 @@ Error opts::symbols::findFunctions(lldb_private::Module &Module) {
         ContextOr->IsValid() ? *ContextOr : CompilerDeclContext();
 
     List.Clear();
-    lldb_private::Module::LookupInfo lookup_info(
+    std::vector<lldb_private::Module::LookupInfo> lookup_infos = lldb_private::Module::LookupInfo::MakeLookupInfo(
         ConstString(Name), getFunctionNameFlags(), eLanguageTypeUnknown);
-    Symfile.FindFunctions(lookup_info, ContextPtr, true, List);
+    for (const auto &lookup_info : lookup_infos)
+      Symfile.FindFunctions(lookup_info, ContextPtr, true, List);
   }
   outs() << formatv("Found {0} functions:\n", List.GetSize());
   StreamString Stream;
