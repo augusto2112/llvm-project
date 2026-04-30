@@ -2780,31 +2780,47 @@ TypeSystemSwiftTypeRef::RemoveMarkerProtocols(
     swift::Demangle::Demangler &dem, swift::Demangle::NodePointer node,
     swift::Mangle::ManglingFlavor flavor) {
   using namespace swift::Demangle;
-  NodePointer type_list_node = swift_demangle::NodeAtPath(
-      node, {Node::Kind::Global, Node::Kind::TypeMangling, Node::Kind::Type,
-             Node::Kind::ProtocolList, Node::Kind::TypeList});
-  if (!type_list_node)
+  if (!node)
     return node;
 
-  // Collect indices of marker protocols, then remove in reverse order so
-  // that earlier indices remain valid.
-  swift_demangle::NodeBuilder b(dem);
-  llvm::SmallVector<size_t> to_remove;
-  for (size_t i = 0; i < type_list_node->getNumChildren(); ++i) {
-    // Mangle a single-protocol type for this child so we can look it up in the
-    // type cache.
-    auto *protocol_list =
-        b.Node(Node::Kind::ProtocolList,
-               b.Node(Node::Kind::TypeList, type_list_node->getChild(i)));
-    auto mangling = mangleNode(b.GlobalType(protocol_list), flavor);
-    if (!mangling.isSuccess())
-      return llvm::createStringError("failed to mangle protocol in type: " +
-                                     nodeToString(node));
-    if (IsMarkerProtocol(ConstString(mangling.result())))
-      to_remove.push_back(i);
+  // Strip marker protocols from this node's ProtocolList > TypeList, if it
+  // has that shape. Operating at every matching node rather than only the
+  // top-level path lets us handle nested existentials like (any Sendable)?,
+  // Array<any Sendable>, or a user-defined generic specialised with an
+  // existential that includes a marker protocol.
+  if (node->getKind() == Node::Kind::ProtocolList &&
+      node->getNumChildren() == 1 &&
+      node->getFirstChild()->getKind() == Node::Kind::TypeList) {
+    NodePointer type_list_node = node->getFirstChild();
+    swift_demangle::NodeBuilder b(dem);
+    llvm::SmallVector<size_t> to_remove;
+    for (size_t i = 0; i < type_list_node->getNumChildren(); ++i) {
+      // Mangle a single-protocol type for this child so we can look it up in
+      // the type cache.
+      auto *protocol_list =
+          b.Node(Node::Kind::ProtocolList,
+                 b.Node(Node::Kind::TypeList, type_list_node->getChild(i)));
+      auto mangling = mangleNode(b.GlobalType(protocol_list), flavor);
+      if (!mangling.isSuccess())
+        return llvm::createStringError("failed to mangle protocol in type: " +
+                                       nodeToString(node));
+      if (IsMarkerProtocol(ConstString(mangling.result())))
+        to_remove.push_back(i);
+    }
+    for (size_t i : llvm::reverse(to_remove))
+      type_list_node->removeChildAt(i);
   }
-  for (size_t i : llvm::reverse(to_remove))
-    type_list_node->removeChildAt(i);
+
+  // Recurse into every child so we reach ProtocolList nodes nested under
+  // BoundGenericEnum / BoundGenericStruct / BoundGenericClass / Tuple / etc.
+  // DWARFASTParserSwift already walks generic arguments when parsing the
+  // outer type, so by the time we get here the inner protocol DIEs have been
+  // parsed and the IsMarkerProtocol payload is set on their cache entries.
+  for (size_t i = 0; i < node->getNumChildren(); ++i) {
+    auto child_or_err = RemoveMarkerProtocols(dem, node->getChild(i), flavor);
+    if (!child_or_err)
+      return child_or_err.takeError();
+  }
   return node;
 }
 
