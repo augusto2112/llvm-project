@@ -21,6 +21,7 @@
 #include "swift/RemoteInspection/TypeLowering.h"
 #include "swift/RemoteInspection/TypeRef.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/raw_ostream.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -136,6 +137,75 @@ static swift::reflection::TypeInfoComparison DwarfValidationFlags() {
           .GetSwiftValidateTypeSystemDWARF());
 }
 
+/// Best-effort, succinct description of the FIRST way two TypeInfos differ, for
+/// a human-readable divergence summary. Mirrors the dimensions
+/// TypeInfo::Equals checks; falls back to a generic note for nested/field-level
+/// differences (the full dumps carry those details).
+static std::string
+firstTypeInfoDifference(const swift::reflection::TypeInfo &a,
+                        const swift::reflection::TypeInfo &b,
+                        swift::reflection::TypeInfoComparison flags) {
+  using namespace swift::reflection;
+  auto n = [](uint64_t x) { return std::to_string(x); };
+
+  if (a.getKind() != b.getKind())
+    return "kind: " + n((unsigned)a.getKind()) + " != " +
+           n((unsigned)b.getKind());
+  if (contains(flags, TypeInfoComparison::Size) && a.getSize() != b.getSize())
+    return "size: " + n(a.getSize()) + " != " + n(b.getSize());
+  if (contains(flags, TypeInfoComparison::Alignment) &&
+      a.getAlignment() != b.getAlignment())
+    return "alignment: " + n(a.getAlignment()) + " != " + n(b.getAlignment());
+  if (contains(flags, TypeInfoComparison::Stride) &&
+      a.getStride() != b.getStride())
+    return "stride: " + n(a.getStride()) + " != " + n(b.getStride());
+  if (contains(flags, TypeInfoComparison::NumExtraInhabitants) &&
+      a.getNumExtraInhabitants() != b.getNumExtraInhabitants())
+    return "num_extra_inhabitants: " + n(a.getNumExtraInhabitants()) + " != " +
+           n(b.getNumExtraInhabitants());
+  if (contains(flags, TypeInfoComparison::Borrowability) &&
+      a.getBorrowability() != b.getBorrowability())
+    return "borrowability: " + n((unsigned)a.getBorrowability()) + " != " +
+           n((unsigned)b.getBorrowability());
+  if (contains(flags, TypeInfoComparison::AddressableForDependencies) &&
+      a.isAddressableForDependencies() != b.isAddressableForDependencies())
+    return std::string("addressable_for_dependencies: ") +
+           (a.isAddressableForDependencies() ? "true" : "false") + " != " +
+           (b.isAddressableForDependencies() ? "true" : "false");
+
+  if (auto *ra = llvm::dyn_cast<RecordTypeInfo>(&a)) {
+    auto *rb = llvm::cast<RecordTypeInfo>(&b);
+    if (ra->getRecordKind() != rb->getRecordKind())
+      return "record kind: " + n((unsigned)ra->getRecordKind()) + " != " +
+             n((unsigned)rb->getRecordKind());
+    if (ra->getNumFields() != rb->getNumFields())
+      return "field count: " + n(ra->getNumFields()) + " != " +
+             n(rb->getNumFields());
+    return "(field-level difference — see dumps below)";
+  }
+  if (auto *ea = llvm::dyn_cast<EnumTypeInfo>(&a)) {
+    auto *eb = llvm::cast<EnumTypeInfo>(&b);
+    if (ea->getEnumKind() != eb->getEnumKind())
+      return "enum kind: " + n((unsigned)ea->getEnumKind()) + " != " +
+             n((unsigned)eb->getEnumKind());
+    if (ea->getCases().size() != eb->getCases().size())
+      return "case count: " + n(ea->getCases().size()) + " != " +
+             n(eb->getCases().size());
+    return "(case-level difference — see dumps below)";
+  }
+  if (auto *fa = llvm::dyn_cast<ReferenceTypeInfo>(&a)) {
+    auto *fb = llvm::cast<ReferenceTypeInfo>(&b);
+    if (fa->getReferenceKind() != fb->getReferenceKind())
+      return "reference kind: " + n((unsigned)fa->getReferenceKind()) + " != " +
+             n((unsigned)fb->getReferenceKind());
+    if (fa->getReferenceCounting() != fb->getReferenceCounting())
+      return "reference counting: " +
+             n((unsigned)fa->getReferenceCounting()) + " != " +
+             n((unsigned)fb->getReferenceCounting());
+  }
+  return "(structural difference — see dumps below)";
+}
+
 /// Log + assert on a reflection-vs-DWARF divergence. `refl`/`dwarf` are the two
 /// shadow results; errors are consumed here. Works for TypeInfo and any
 /// subclass (comparison and dump dispatch virtually).
@@ -151,6 +221,27 @@ static void ReportShadowComparison(llvm::StringRef name, ExpectedTI &refl,
       std::stringstream r, d;
       refl->dump(r);
       dwarf->dump(d);
+      // Print a succinct, always-visible summary to stderr just before the
+      // assert, so a divergence is diagnosable without the "lldb types" log
+      // channel enabled: what was queried, the level, the first differing
+      // dimension, and both TypeInfo dumps for detail.
+      std::string demangled = swift::Demangle::demangleSymbolAsString(name);
+      std::string summary;
+      llvm::raw_string_ostream os(summary);
+      os << "\n=== Swift reflection-vs-DWARF TypeInfo divergence ===\n"
+         << "  type:  " << name << "\n";
+      if (!demangled.empty() && demangled != name.str())
+        os << "  as:    " << demangled << "\n";
+      os << "  level: "
+         << ModuleList::GetGlobalModuleListProperties()
+                .GetSwiftValidateTypeSystemDWARF()
+         << "\n"
+         << "  diff:  " << firstTypeInfoDifference(*refl, *dwarf, flags) << "\n"
+         << "  --- reflection-only ---\n"
+         << r.str() << "  --- DWARF-only ---\n"
+         << d.str()
+         << "=====================================================\n";
+      llvm::errs() << os.str();
       LLDB_LOG(log,
                "reflection-vs-DWARF TypeInfo divergence for {0}:\n"
                "reflection-only:\n{1}\nDWARF-only:\n{2}",
