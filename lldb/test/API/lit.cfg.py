@@ -275,6 +275,16 @@ for env_var in ("ASAN_OPTIONS", "DYLD_INSERT_LIBRARIES"):
     if env_var in config.environment:
         dotest_cmd += ["--inferior-env", env_var + "=" + config.environment[env_var]]
 
+# Reflection-vs-DWARF differential validation: activate the pass when requested
+# via `-Dswift-validate-dwarf=LEVEL` or the LLDB_SWIFT_VALIDATE_DWARF env var
+# (lit does not forward arbitrary env vars to the dotest subprocess, so it is
+# threaded through explicitly here).
+swift_validate_dwarf = lit_config.params.get(
+    "swift-validate-dwarf", os.environ.get("LLDB_SWIFT_VALIDATE_DWARF")
+)
+if swift_validate_dwarf:
+    dotest_cmd += ["--swift-validate-dwarf", swift_validate_dwarf]
+
 if is_configured("test_arch"):
     dotest_cmd += ["--arch", config.test_arch]
 
