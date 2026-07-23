@@ -70,14 +70,31 @@ struct DescriptorFinderForwarder : public swift::reflection::DescriptorFinder {
     m_image_added |= image_added;
   }
 
+  /// The fixed source-selection policy for this context.
+  enum class Policy {
+    Primary,        // Existing GetSwiftEnableFullDwarfDebugging()-driven logic.
+    ReflectionOnly, // Never consult DWARF (pure reflection-metadata layout).
+    DwarfOnly,      // Always consult DWARF (pure DWARF layout).
+  };
+
+  void SetPolicy(Policy policy) { m_policy = policy; }
+
 private:
   bool shouldConsultDescriptorFinder() {
     // Embedded Swift never has reflection metadata for its types, so the
     // external descriptor finder is the only source of type information, and
-    // the setting below has no say in the matter.
+    // neither the policy nor the setting below has a say in the matter.
     if (m_always_consult)
       return true;
 
+    switch (m_policy) {
+    case Policy::ReflectionOnly:
+      return false;
+    case Policy::DwarfOnly:
+      return true;
+    case Policy::Primary:
+      break;
+    }
     switch (ModuleList::GetGlobalModuleListProperties()
                 .GetSwiftEnableFullDwarfDebugging()) {
     case lldb_private::AutoBool::True:
@@ -95,6 +112,7 @@ private:
       m_descriptor_finders;
   bool m_image_added = false;
   const bool m_always_consult;
+  Policy m_policy = Policy::Primary;
 };
 
 /// An implementation of the generic ReflectionContextInterface that
