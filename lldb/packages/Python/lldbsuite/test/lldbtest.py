@@ -794,6 +794,16 @@ class Base(unittest.TestCase):
             "settings set target.check-vo-ownership true",
         ]
 
+        # Reflection-vs-DWARF differential validation: when the differential
+        # pass requests it, compare reflection-metadata layout against DWARF
+        # layout at the given level. Empty/unset leaves the feature off.
+        dwarf_validate_level = os.environ.get("LLDB_SWIFT_VALIDATE_DWARF")
+        if dwarf_validate_level:
+            commands.append(
+                "settings set -- symbols.swift-validate-typesystem-dwarf %s"
+                % dwarf_validate_level
+            )
+
         # Set any user-overridden settings.
         for setting, value in configuration.settings:
             commands.append("setting set %s %s" % (setting, value))
