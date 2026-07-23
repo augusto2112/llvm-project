@@ -37,6 +37,13 @@ let Definition = "modulelist" in {
   def SwiftValidateTypeSystem: Property<"swift-validate-typesystem", "Boolean">,
     DefaultFalse,
     Desc<"Validate all Swift typesystem queries. Used for testing an asserts-enabled LLDB only.">;
+  def SwiftValidateTypeSystemDWARF: Property<"swift-validate-typesystem-dwarf", "String">,
+    DefaultStringValue<"">,
+    Desc<"Additionally validate Swift type layout by computing it exclusively "
+         "from reflection metadata and exclusively from DWARF and comparing the "
+         "two. Value is a level (off|layout|names|strict) or a comma-separated "
+         "list of dimensions. Requires swift-validate-typesystem. Used for "
+         "testing an asserts-enabled LLDB only.">;
   def SwiftTypeSystemFallback
       : Property<"swift-typesystem-compiler-fallback", "Boolean">,
         DefaultFalse,
