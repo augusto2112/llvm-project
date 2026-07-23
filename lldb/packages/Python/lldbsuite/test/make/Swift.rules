@@ -51,6 +51,12 @@ ifeq "$(findstring -target,$(SWIFTFLAGS))" ""
   SWIFTFLAGS += $(TARGET_SWIFTFLAGS)
 endif
 
+# When running the reflection-vs-DWARF differential validation pass, emit full
+# type DWARF so the DWARF-only shadow context has complete, comparable data.
+ifneq "$(LLDB_SWIFT_VALIDATE_DWARF)" ""
+SWIFTFLAGS += -gdwarf-types
+endif
+
 ifeq "$(OS)" "Windows_NT"
   SWIFTFLAGS += -resource-dir "$(SWIFTSDKROOT)/usr/lib/swift"
 endif
