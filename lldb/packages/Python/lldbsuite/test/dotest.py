@@ -383,6 +383,9 @@ def parseOptionsAndInitTestdirs():
         # that explicitly require no debug info.
         os.environ["CFLAGS"] = "-gdwarf-{}".format(configuration.dwarf_version)
 
+    if args.swift_validate_dwarf is not None:
+        os.environ["LLDB_SWIFT_VALIDATE_DWARF"] = args.swift_validate_dwarf
+
     if args.settings:
         for setting in args.settings:
             if not len(setting) == 1 or not setting[0].count("="):

@@ -102,6 +102,20 @@ def create_parser():
     )
 
     group.add_argument(
+        "--swift-validate-dwarf",
+        nargs="?",
+        const="strict",
+        default=None,
+        metavar="LEVEL",
+        help=(
+            "Run the reflection-vs-DWARF differential validation pass at LEVEL "
+            "(off|layout|names|strict, or a comma-separated dimension list). "
+            "Builds lang/swift inferiors with -gdwarf-types and enables the "
+            "comparison. Defaults to 'strict' when given with no value."
+        ),
+    )
+
+    group.add_argument(
         "--make",
         metavar="make",
         dest="make",
