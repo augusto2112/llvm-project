@@ -18,6 +18,9 @@
 #include "lldb/Utility/Log.h"
 #include "swift/Demangling/Demangle.h"
 #include "swift/RemoteInspection/DescriptorFinder.h"
+#include "swift/RemoteInspection/TypeLowering.h"
+#include "swift/RemoteInspection/TypeRef.h"
+#include "llvm/Support/Error.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -115,6 +118,59 @@ private:
   Policy m_policy = Policy::Primary;
 };
 
+/// The DWARF differential is active iff the master validation switch is on and
+/// the DWARF comparison level parses to a non-empty flag set.
+static bool IsDwarfValidationActive() {
+  auto &props = ModuleList::GetGlobalModuleListProperties();
+  if (!props.GetSwiftValidateTypeSystem())
+    return false;
+  return swift::reflection::parseTypeInfoComparison(
+             props.GetSwiftValidateTypeSystemDWARF()) !=
+         swift::reflection::TypeInfoComparison::None;
+}
+
+/// The active comparison flags (only meaningful when IsDwarfValidationActive()).
+static swift::reflection::TypeInfoComparison DwarfValidationFlags() {
+  return swift::reflection::parseTypeInfoComparison(
+      ModuleList::GetGlobalModuleListProperties()
+          .GetSwiftValidateTypeSystemDWARF());
+}
+
+/// Log + assert on a reflection-vs-DWARF divergence. `refl`/`dwarf` are the two
+/// shadow results; errors are consumed here. Works for TypeInfo and any
+/// subclass (comparison and dump dispatch virtually).
+template <typename ExpectedTI>
+static void ReportShadowComparison(llvm::StringRef name, ExpectedTI &refl,
+                                   ExpectedTI &dwarf,
+                                   swift::reflection::TypeInfoComparison flags) {
+  Log *log = GetLog(LLDBLog::Types);
+  bool have_refl = static_cast<bool>(refl);
+  bool have_dwarf = static_cast<bool>(dwarf);
+  if (have_refl && have_dwarf) {
+    if (!refl->Equals(*dwarf, flags)) {
+      std::stringstream r, d;
+      refl->dump(r);
+      dwarf->dump(d);
+      LLDB_LOG(log,
+               "reflection-vs-DWARF TypeInfo divergence for {0}:\n"
+               "reflection-only:\n{1}\nDWARF-only:\n{2}",
+               name, r.str(), d.str());
+      assert(false && "reflection-vs-DWARF TypeInfo divergence");
+    }
+  } else if (have_refl != have_dwarf) {
+    // Exactly one side produced a result: a DWARF-completeness signal, not a
+    // layout bug. Log without asserting.
+    LLDB_LOG(log,
+             "reflection-vs-DWARF TypeInfo asymmetry for {0}: "
+             "reflection-only={1} DWARF-only={2}",
+             name, have_refl, have_dwarf);
+  }
+  if (!refl)
+    llvm::consumeError(refl.takeError());
+  if (!dwarf)
+    llvm::consumeError(dwarf.takeError());
+}
+
 /// An implementation of the generic ReflectionContextInterface that
 /// is templatized on target pointer width and specialized to either
 /// 32-bit or 64-bit pointers, with and without ObjC interoperability.
@@ -126,10 +182,13 @@ class TargetReflectionContext : public ReflectionContextInterface {
   struct Instance {
     Instance(std::shared_ptr<swift::reflection::MemoryReader> reader,
              SwiftMetadataCache *swift_metadata_cache,
-             swift::Mangle::ManglingFlavor flavor)
+             swift::Mangle::ManglingFlavor flavor,
+             DescriptorFinderForwarder::Policy policy =
+                 DescriptorFinderForwarder::Policy::Primary)
         : m_forwader(flavor == swift::Mangle::ManglingFlavor::Embedded),
           m_reflection_ctx(reader, swift_metadata_cache, &m_forwader, flavor),
           m_type_converter(m_reflection_ctx.getBuilder().getTypeConverter()) {
+      m_forwader.SetPolicy(policy);
       m_type_converter.enableErrorCache();
     }
 
@@ -510,6 +569,9 @@ class TargetReflectionContext : public ReflectionContextInterface {
 
   std::shared_ptr<swift::reflection::MemoryReader> m_reader;
   SwiftMetadataCache *m_swift_metadata_cache;
+  /// The source-selection policy handed to every Instance this context creates.
+  DescriptorFinderForwarder::Policy m_policy =
+      DescriptorFinderForwarder::Policy::Primary;
 
   /// The context for the regular (`$s`) mangling flavor. It reads either 
   // reflection metadata or DWARF.
@@ -526,7 +588,7 @@ class TargetReflectionContext : public ReflectionContextInterface {
       auto *cache = flavor == swift::Mangle::ManglingFlavor::Embedded
                         ? nullptr
                         : m_swift_metadata_cache;
-      instance = std::make_unique<Instance>(m_reader, cache, flavor);
+      instance = std::make_unique<Instance>(m_reader, cache, flavor, m_policy);
     }
     return *instance;
   }
@@ -550,12 +612,30 @@ class TargetReflectionContext : public ReflectionContextInterface {
     return Get(m_regular, swift::Mangle::ManglingFlavor::Default);
   }
 
+  // Validation-only shadow contexts, present only when the DWARF differential
+  // is active. Same template instantiation as the primary; their own shadow
+  // pointers are null so they compute without recursing.
+  std::unique_ptr<TargetReflectionContext> m_reflection_only;
+  std::unique_ptr<TargetReflectionContext> m_dwarf_only;
+
 public:
   TargetReflectionContext(
       std::shared_ptr<swift::reflection::MemoryReader> reader,
-      SwiftMetadataCache *swift_metadata_cache)
+      SwiftMetadataCache *swift_metadata_cache,
+      DescriptorFinderForwarder::Policy policy =
+          DescriptorFinderForwarder::Policy::Primary)
       : m_reader(std::move(reader)),
-        m_swift_metadata_cache(swift_metadata_cache) {}
+        m_swift_metadata_cache(swift_metadata_cache), m_policy(policy) {
+    if (policy == DescriptorFinderForwarder::Policy::Primary &&
+        IsDwarfValidationActive()) {
+      m_reflection_only = std::make_unique<TargetReflectionContext>(
+          m_reader, swift_metadata_cache,
+          DescriptorFinderForwarder::Policy::ReflectionOnly);
+      m_dwarf_only = std::make_unique<TargetReflectionContext>(
+          m_reader, swift_metadata_cache,
+          DescriptorFinderForwarder::Policy::DwarfOnly);
+    }
+  }
 
   /// Register an image's reflection metadata.
   std::optional<uint32_t> AddImage(
@@ -563,13 +643,19 @@ public:
           swift::ReflectionSectionKind)>
           find_section,
       llvm::SmallVector<llvm::StringRef, 1> likely_module_names) override {
-    return GetRegular().AddImage(find_section, likely_module_names);
+    auto id = GetRegular().AddImage(find_section, likely_module_names);
+    if (m_reflection_only)
+      m_reflection_only->AddImage(find_section, likely_module_names);
+    return id;
   }
 
   std::optional<uint32_t>
   AddImage(swift::remote::RemoteAddress image_start,
            llvm::SmallVector<llvm::StringRef, 1> likely_module_names) override {
-    return GetRegular().AddImage(image_start, likely_module_names);
+    auto id = GetRegular().AddImage(image_start, likely_module_names);
+    if (m_reflection_only)
+      m_reflection_only->AddImage(image_start, likely_module_names);
+    return id;
   }
 
   llvm::Expected<const swift::reflection::TypeRef &>
@@ -592,8 +678,12 @@ public:
       swift::remote::TypeInfoProvider *provider,
       swift::Mangle::ManglingFlavor flavor,
       swift::reflection::DescriptorFinder *descriptor_finder) override {
-    return Get(flavor).GetClassInstanceTypeInfo(type_ref, provider,
-                                                descriptor_finder);
+    auto result = Get(flavor).GetClassInstanceTypeInfo(type_ref, provider,
+                                                       descriptor_finder);
+    if (m_reflection_only && m_dwarf_only)
+      CompareShadowsForClassInstance(type_ref, provider, flavor,
+                                     descriptor_finder);
+    return result;
   }
 
   llvm::Expected<const swift::reflection::TypeInfo &>
@@ -604,8 +694,11 @@ public:
     auto type_ref_or_err = GetCanonicalTypeRef(type);
     if (!type_ref_or_err)
       return type_ref_or_err.takeError();
-    return Get(flavor).GetTypeInfoFromTypeRef(*type_ref_or_err, provider,
-                                              descriptor_finder);
+    auto result = Get(flavor).GetTypeInfoFromTypeRef(*type_ref_or_err, provider,
+                                                     descriptor_finder);
+    if (m_reflection_only && m_dwarf_only)
+      CompareShadowsForType(type, provider, descriptor_finder);
+    return result;
   }
 
   llvm::Expected<const swift::reflection::TypeInfo &> GetTypeInfoFromInstance(
@@ -733,6 +826,50 @@ public:
     // and no TypeRefBuilder are involved.
     return GetRegular().asyncTaskInfo(AsyncTaskPtr, ChildTaskLimit,
                                       AsyncBacktraceLimit);
+  }
+
+  /// Compute a class-instance RecordTypeInfo on a shadow by re-deriving the
+  /// TypeRef in that shadow's own builder from the mangled name.
+  llvm::Expected<const swift::reflection::RecordTypeInfo &>
+  ClassInstanceOnShadow(TargetReflectionContext &shadow, llvm::StringRef mangled,
+                        swift::remote::TypeInfoProvider *provider,
+                        swift::Mangle::ManglingFlavor flavor,
+                        swift::reflection::DescriptorFinder *descriptor_finder) {
+    auto tr_or_err = shadow.GetTypeRef(mangled);
+    if (!tr_or_err)
+      return tr_or_err.takeError();
+    return shadow.GetClassInstanceTypeInfo(*tr_or_err, provider, flavor,
+                                           descriptor_finder);
+  }
+
+  /// Differential check for GetTypeInfo(CompilerType). Each shadow re-derives
+  /// its own TypeRef through the normal pipeline.
+  void CompareShadowsForType(CompilerType type,
+                             swift::remote::TypeInfoProvider *provider,
+                             swift::reflection::DescriptorFinder *df) {
+    auto flags = DwarfValidationFlags();
+    auto refl = m_reflection_only->GetTypeInfo(type, provider, df);
+    auto dwarf = m_dwarf_only->GetTypeInfo(type, provider, df);
+    ReportShadowComparison(type.GetMangledTypeName().GetStringRef(), refl, dwarf,
+                           flags);
+  }
+
+  /// Differential check for GetClassInstanceTypeInfo(TypeRef).
+  void CompareShadowsForClassInstance(
+      const swift::reflection::TypeRef &type_ref,
+      swift::remote::TypeInfoProvider *provider,
+      swift::Mangle::ManglingFlavor flavor,
+      swift::reflection::DescriptorFinder *df) {
+    swift::Demangle::Demangler dem;
+    auto mangled = type_ref.mangle(dem);
+    if (!mangled)
+      return;
+    auto flags = DwarfValidationFlags();
+    auto refl =
+        ClassInstanceOnShadow(*m_reflection_only, *mangled, provider, flavor, df);
+    auto dwarf =
+        ClassInstanceOnShadow(*m_dwarf_only, *mangled, provider, flavor, df);
+    ReportShadowComparison(*mangled, refl, dwarf, flags);
   }
 };
 } // namespace
