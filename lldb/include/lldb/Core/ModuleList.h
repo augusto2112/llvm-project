@@ -120,6 +120,7 @@ public:
   bool GetUseSwiftExplicitModuleLoader() const;
   bool SetUseSwiftExplicitModuleLoader(bool new_value);
   bool GetSwiftValidateTypeSystem() const;
+  llvm::StringRef GetSwiftValidateTypeSystemDWARF() const;
   bool GetSwiftTypeSystemFallback() const;
   bool GetSwiftLoadConformances() const;
   SwiftModuleLoadingMode GetSwiftModuleLoadingMode() const;
