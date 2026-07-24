@@ -116,6 +116,18 @@ def create_parser():
     )
 
     group.add_argument(
+        "--swift-validate-dwarf-journal",
+        metavar="DIR",
+        default=None,
+        help=(
+            "Run the reflection-vs-DWARF differential validation in report "
+            "mode: append a structured JSON record per divergence/asymmetry to "
+            "a per-process file in DIR instead of asserting. Requires "
+            "--swift-validate-dwarf to also be set."
+        ),
+    )
+
+    group.add_argument(
         "--make",
         metavar="make",
         dest="make",
