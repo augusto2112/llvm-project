@@ -21,11 +21,14 @@
 #include "DWARFDIE.h"
 #include "SymbolFileDWARFDebugMap.h"
 
+#include "Plugins/TypeSystem/Swift/SwiftASTContext.h"
 #include "Plugins/TypeSystem/Swift/TypeSystemSwiftTypeRef.h"
 #include "swift/Demangling/ManglingFlavor.h"
 #include "swift/RemoteInspection/DescriptorFinder.h"
 #include "swift/RemoteInspection/TypeLowering.h"
 
+#include "lldb/Core/Module.h"
+#include "lldb/Symbol/SymbolContext.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/Flags.h"
 #include "lldb/Utility/LLDBLog.h"
@@ -208,6 +211,51 @@ getTypeAndDie(TypeSystemSwiftTypeRef &ts,
   return {{type, die}};
 }
 
+/// Determines whether the protocol existential described by \p type is
+/// class-constrained (its instance is a single retainable object pointer plus
+/// witness tables), as opposed to an opaque existential (three-word inline
+/// buffer plus metadata and witness tables). A protocol is class-constrained
+/// when it inherits AnyObject, is declared class-only, or has a superclass
+/// bound (e.g. `protocol P: AnyObject {}`).
+///
+/// The class-constraint is not encoded in the DWARF field-descriptor path, but
+/// it is recoverable from LLDB's type system: TypeSystemSwiftTypeRef routes
+/// protocol layout queries to SwiftASTContext::GetProtocolTypeInfo, whose
+/// ProtocolInfo::m_is_class_only is set from ExistentialLayout::requiresClass().
+/// Matching this lets the shared TypeLowering ExistentialTypeInfoBuilder lower
+/// the existential as a ClassExistential (RecordKind::ClassExistential,
+/// size/stride 16) instead of falling through to the opaque representation
+/// (size/stride 40), which is what the reflection metadata already encodes as
+/// FieldDescriptorKind::ClassProtocol.
+static bool IsClassConstrainedProtocol(CompilerType type) {
+  auto ts_sp =
+      type.GetTypeSystem().dyn_cast_or_null<TypeSystemSwiftTypeRef>();
+  if (!ts_sp)
+    return false;
+
+  Module *module = ts_sp->GetModule();
+  if (!module)
+    return false;
+
+  SymbolContext sc(module->shared_from_this());
+  SwiftASTContextSP swift_ast_ctx = ts_sp->GetSwiftASTContext(sc);
+  if (!swift_ast_ctx)
+    return false;
+
+  // Re-resolve the existential in the SwiftASTContext by its mangled name, so
+  // GetProtocolTypeInfo operates on an AST-native type.
+  CompilerType ast_type =
+      swift_ast_ctx->GetTypeFromMangledTypename(type.GetMangledTypeName());
+  if (!ast_type)
+    return false;
+
+  SwiftASTContext::ProtocolInfo protocol_info;
+  if (!swift_ast_ctx->GetProtocolTypeInfo(ast_type, protocol_info))
+    return false;
+
+  return protocol_info.m_is_class_only;
+}
+
 static std::optional<swift::reflection::FieldDescriptorKind>
 getFieldDescriptorKindForDie(CompilerType type) {
   auto type_class = type.GetTypeClass();
@@ -219,8 +267,17 @@ getFieldDescriptorKindForDie(CompilerType type) {
   case lldb::eTypeClassUnion:
     return swift::reflection::FieldDescriptorKind::Enum;
   default:
-    if (Flags(type.GetTypeInfo()).AnySet(lldb::eTypeIsProtocol))
+    if (Flags(type.GetTypeInfo()).AnySet(lldb::eTypeIsProtocol)) {
+      // Class-constrained protocols (e.g. `protocol P: AnyObject {}`) lower to
+      // a class existential (object pointer + witness table); the compiler
+      // emits FieldDescriptorKind::ClassProtocol for them. Opaque protocols
+      // stay FieldDescriptorKind::Protocol. Reflecting the class-constraint
+      // here lets the shared ExistentialTypeInfoBuilder pick the matching
+      // representation instead of defaulting every protocol to Opaque.
+      if (IsClassConstrainedProtocol(type))
+        return swift::reflection::FieldDescriptorKind::ClassProtocol;
       return swift::reflection::FieldDescriptorKind::Protocol;
+    }
     LLDB_LOG(GetLog(LLDBLog::Types),
              "Could not determine file descriptor kind for type: {0}",
              type.GetMangledTypeName());
