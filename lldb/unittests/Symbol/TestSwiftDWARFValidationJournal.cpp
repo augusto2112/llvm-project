@@ -12,6 +12,7 @@
 
 #include "Plugins/LanguageRuntime/Swift/SwiftDWARFValidationJournal.h"
 #include "swift/RemoteInspection/TypeLowering.h"
+#include "llvm/Support/JSON.h"
 #include "gtest/gtest.h"
 
 using namespace lldb_private::swift_dwarf_journal;
@@ -66,4 +67,42 @@ TEST(SwiftDWARFValidationJournal, StringVocabulary) {
   EXPECT_EQ(typeInfoKindString(ref), "reference");
   EXPECT_EQ(referenceKindString(ReferenceKind::Strong), "strong");
   EXPECT_EQ(referenceCountingString(ReferenceCounting::Native), "native");
+}
+
+TEST(SwiftDWARFValidationJournal, SerializeReference) {
+  auto ref = makeRef(1);
+  auto o = serializeTypeInfo(ref);
+  EXPECT_EQ(*o.getString("kind"), "reference");
+  EXPECT_EQ(*o.getInteger("size"), 8);
+  EXPECT_EQ(*o.getInteger("num_extra_inhabitants"), 1);
+  EXPECT_TRUE(*o.getBoolean("bitwise_takable"));
+  EXPECT_EQ(*o.getString("reference_kind"), "strong");
+  EXPECT_EQ(*o.getString("refcounting"), "native");
+}
+
+TEST(SwiftDWARFValidationJournal, SerializeStructWithField) {
+  using namespace swift::reflection;
+  BuiltinTypeInfo field_ti(/*Size=*/4, /*Alignment=*/4, /*Stride=*/4,
+                           /*NumExtraInhabitants=*/0,
+                           BitwiseBorrowability::TakableAndBorrowable,
+                           /*AddressableForDependencies=*/false);
+  std::vector<FieldInfo> fields{
+      FieldInfo("x", /*Offset=*/0, /*Value=*/0, /*TR=*/nullptr, field_ti)};
+  RecordTypeInfo rec(/*Size=*/4, /*Alignment=*/4, /*Stride=*/4,
+                     /*NumExtraInhabitants=*/0,
+                     BitwiseBorrowability::TakableAndBorrowable,
+                     /*AFD=*/false, RecordKind::Struct, fields);
+  auto o = serializeTypeInfo(rec);
+  EXPECT_EQ(*o.getString("kind"), "struct");
+  auto *arr = o.getArray("fields");
+  ASSERT_NE(arr, nullptr);
+  ASSERT_EQ(arr->size(), 1u);
+  auto *f0 = (*arr)[0].getAsObject();
+  ASSERT_NE(f0, nullptr);
+  EXPECT_EQ(*f0->getString("name"), "x");
+  EXPECT_EQ(*f0->getInteger("offset"), 0);
+  EXPECT_EQ(*f0->getString("kind"), "builtin");
+  // TR was null, so type_mangled is present-but-null.
+  ASSERT_NE(f0->get("type_mangled"), nullptr);
+  EXPECT_EQ(f0->get("type_mangled")->kind(), llvm::json::Value::Null);
 }
