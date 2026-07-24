@@ -21,9 +21,12 @@
 #ifndef LLDB_SOURCE_PLUGINS_LANGUAGERUNTIME_SWIFT_SWIFTDWARFVALIDATIONJOURNAL_H
 #define LLDB_SOURCE_PLUGINS_LANGUAGERUNTIME_SWIFT_SWIFTDWARFVALIDATIONJOURNAL_H
 
+#include "swift/Demangling/Demangler.h"
 #include "swift/RemoteInspection/TypeLowering.h"
+#include "swift/RemoteInspection/TypeRef.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/JSON.h"
 
 #include <string>
 #include <vector>
@@ -120,6 +123,61 @@ referenceCountingString(swift::reflection::ReferenceCounting c) {
     return "unknown";
   }
   return "unknown";
+}
+
+/// Serialize one level of a record's fields / an enum's cases. Each entry gets
+/// name, offset, value (enum case index/value), the nested TypeInfo's kind
+/// string, and the field/case TypeRef's mangled name (null when absent). Deeper
+/// nesting is not recursed — the capped text dump covers full detail.
+inline llvm::json::Array
+serializeFields(const std::vector<swift::reflection::FieldInfo> &fields) {
+  llvm::json::Array arr;
+  for (const auto &f : fields) {
+    llvm::json::Object fo;
+    fo["name"] = f.Name;
+    fo["offset"] = (int64_t)f.Offset;
+    fo["value"] = (int64_t)f.Value;
+    fo["kind"] = typeInfoKindString(f.TI);
+    if (f.TR) {
+      swift::Demangle::Demangler dem;
+      if (auto mangled = f.TR->mangle(dem))
+        fo["type_mangled"] = *mangled;
+      else
+        fo["type_mangled"] = nullptr;
+    } else {
+      fo["type_mangled"] = nullptr;
+    }
+    arr.push_back(std::move(fo));
+  }
+  return arr;
+}
+
+/// Serialize a TypeInfo to a structured JSON object, reusing the dump kind
+/// vocabulary. Scalars are always included; reference/builtin/record/enum add
+/// their kind-specific fields.
+inline llvm::json::Object
+serializeTypeInfo(const swift::reflection::TypeInfo &ti) {
+  using namespace swift::reflection;
+  llvm::json::Object o;
+  o["kind"] = typeInfoKindString(ti);
+  o["size"] = (int64_t)ti.getSize();
+  o["alignment"] = (int64_t)ti.getAlignment();
+  o["stride"] = (int64_t)ti.getStride();
+  o["num_extra_inhabitants"] = (int64_t)ti.getNumExtraInhabitants();
+  o["bitwise_takable"] = ti.isBitwiseTakable();
+  o["addressable_for_dependencies"] = ti.isAddressableForDependencies();
+
+  if (auto *ref = llvm::dyn_cast<ReferenceTypeInfo>(&ti)) {
+    o["reference_kind"] = referenceKindString(ref->getReferenceKind());
+    o["refcounting"] = referenceCountingString(ref->getReferenceCounting());
+  } else if (auto *bti = llvm::dyn_cast<BuiltinTypeInfo>(&ti)) {
+    o["builtin_mangled_name"] = bti->getMangledTypeName();
+  } else if (auto *rec = llvm::dyn_cast<RecordTypeInfo>(&ti)) {
+    o["fields"] = serializeFields(rec->getFields());
+  } else if (auto *en = llvm::dyn_cast<EnumTypeInfo>(&ti)) {
+    o["fields"] = serializeFields(en->getCases());
+  }
+  return o;
 }
 
 /// Every way two TypeInfos differ, honoring `flags` exactly as TypeInfo::Equals
