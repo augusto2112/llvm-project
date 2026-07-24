@@ -13,6 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <functional>
 #include <sstream>
 
 #include "DWARFDebugInfo.h"
@@ -25,6 +26,7 @@
 #include "swift/Demangling/ManglingFlavor.h"
 #include "swift/RemoteInspection/DescriptorFinder.h"
 #include "swift/RemoteInspection/TypeLowering.h"
+#include "swift/Strings.h"
 
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/Flags.h"
@@ -223,11 +225,105 @@ getProtocolFieldDescriptorKind(const DWARFDIE &die) {
   return swift::reflection::FieldDescriptorKind::Protocol;
 }
 
+/// Returns the immediate superclass DIE of \p die by following its
+/// DW_TAG_inheritance child, or an invalid DIE if there is none.
+static DWARFDIE GetImmediateSuperClassDIE(const DWARFDIE &die) {
+  const auto inheritance_die_it =
+      llvm::find_if(die.children(), [&](const DWARFDIE &child_die) {
+        return child_die.Tag() == llvm::dwarf::DW_TAG_inheritance;
+      });
+
+  if (inheritance_die_it == die.children().end())
+    return {};
+
+  auto inheritance_die = *inheritance_die_it;
+  return inheritance_die.GetAttributeValueAsReferenceDIE(
+      llvm::dwarf::DW_AT_type);
+}
+
+/// Determines whether the Swift class described by \p die is rooted in an
+/// imported Objective-C class (for example an @objc class deriving from
+/// NSObject). Such classes are reference-counted as ReferenceCounting::Unknown
+/// at runtime, and the compiler emits their field descriptor as
+/// FieldDescriptorKind::ObjCClass accordingly (see
+/// swift/lib/IRGen/GenReflection.cpp:layoutRecord). LLDB must make the same
+/// decision when synthesizing a descriptor from DWARF so that the shared
+/// TypeLowering engine lowers the reference identically.
+///
+/// The needed signal is present in DWARF: walking the DW_TAG_inheritance chain
+/// to the root superclass, an ObjC-imported root is an imported Clang type
+/// living in the special "__C" module. Its DW_AT_linkage_name demangles to a
+/// class in that module (e.g. NSObject = "$sSo8NSObjectCD" -> __C.NSObject).
+/// Note that the DW_AT_APPLE_runtime_class attribute is NOT a reliable signal
+/// here: the DWARF DIE reached through the Swift inheritance chain is the
+/// Swift-side ("So"-mangled) shadow of the imported class and carries
+/// DW_AT_APPLE_runtime_class(DW_LANG_Swift), not DW_LANG_ObjC.
+static bool IsObjCRootedClass(const DWARFDIE &die) {
+  DWARFDIE current = die;
+  // Walk to the root of the inheritance chain. Bound the walk to guard against
+  // pathological / cyclic debug info.
+  DWARFDIE root = current;
+  for (unsigned depth = 0; current && depth < 256; ++depth) {
+    root = current;
+    current = GetImmediateSuperClassDIE(current);
+  }
+
+  if (!root)
+    return false;
+
+  // The root superclass is ObjC-imported iff its mangled name demangles to a
+  // nominal type in the "__C" (imported Clang/Objective-C) module.
+  const char *linkage_name =
+      root.GetAttributeValueAsString(llvm::dwarf::DW_AT_linkage_name, nullptr);
+  if (!linkage_name)
+    return false;
+
+  swift::Demangle::Demangler dem;
+  swift::Demangle::NodePointer node = dem.demangleSymbol(linkage_name);
+  if (!node)
+    return false;
+
+  // Find the outermost nominal (Class/Structure/Enum) node and inspect its
+  // Module child.
+  bool is_objc = false;
+  swift::Demangle::NodePointer nominal = nullptr;
+  std::function<void(swift::Demangle::NodePointer)> find_nominal =
+      [&](swift::Demangle::NodePointer n) {
+        if (!n || nominal)
+          return;
+        switch (n->getKind()) {
+        case swift::Demangle::Node::Kind::Class:
+        case swift::Demangle::Node::Kind::Structure:
+        case swift::Demangle::Node::Kind::Enum:
+          nominal = n;
+          return;
+        default:
+          break;
+        }
+        for (swift::Demangle::NodePointer child : *n)
+          find_nominal(child);
+      };
+  find_nominal(node);
+
+  if (nominal && nominal->getNumChildren() > 0) {
+    swift::Demangle::NodePointer module = nominal->getFirstChild();
+    if (module && module->getKind() == swift::Demangle::Node::Kind::Module &&
+        module->hasText())
+      is_objc = module->getText() == swift::MANGLING_MODULE_OBJC;
+  }
+  return is_objc;
+}
+
 static std::optional<swift::reflection::FieldDescriptorKind>
 getFieldDescriptorKindForDie(CompilerType type, const DWARFDIE &die) {
   auto type_class = type.GetTypeClass();
   switch (type_class) {
   case lldb::eTypeClassClass:
+    // ObjC-rooted Swift classes (e.g. an @objc class deriving from NSObject)
+    // are reference-counted as Unknown, matching the compiler-emitted
+    // ObjCClass field descriptor. Pure Swift classes remain Class (Native).
+    if (IsObjCRootedClass(die))
+      return swift::reflection::FieldDescriptorKind::ObjCClass;
     return swift::reflection::FieldDescriptorKind::Class;
   case lldb::eTypeClassStruct:
     return swift::reflection::FieldDescriptorKind::Struct;
@@ -339,6 +435,7 @@ public:
     switch (Kind) {
     case swift::reflection::FieldDescriptorKind::Struct:
     case swift::reflection::FieldDescriptorKind::Class:
+    case swift::reflection::FieldDescriptorKind::ObjCClass:
       return getFieldRecordsFromStructOrClass(m_die, dwarf_parser);
     case swift::reflection::FieldDescriptorKind::Enum:
       return getFieldRecordsFromEnum(m_die, dwarf_parser);
