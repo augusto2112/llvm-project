@@ -13,6 +13,7 @@
 #include "swift/RemoteInspection/ReflectionContext.h"
 #include "Plugins/TypeSystem/Swift/TypeSystemSwiftTypeRef.h"
 #include "ReflectionContextInterface.h"
+#include "SwiftDWARFValidationJournal.h"
 #include "SwiftLanguageRuntime.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
@@ -137,6 +138,14 @@ static swift::reflection::TypeInfoComparison DwarfValidationFlags() {
           .GetSwiftValidateTypeSystemDWARF());
 }
 
+/// The report-mode journal directory; empty means the default assert-on-
+/// divergence behavior.
+static std::string DwarfValidationJournalDir() {
+  return ModuleList::GetGlobalModuleListProperties()
+      .GetSwiftValidateTypeSystemDWARFJournal()
+      .str();
+}
+
 /// Best-effort, succinct description of the FIRST way two TypeInfos differ, for
 /// a human-readable divergence summary. Mirrors the dimensions
 /// TypeInfo::Equals checks; falls back to a generic note for nested/field-level
@@ -206,55 +215,92 @@ firstTypeInfoDifference(const swift::reflection::TypeInfo &a,
   return "(structural difference — see dumps below)";
 }
 
-/// Log + assert on a reflection-vs-DWARF divergence. `refl`/`dwarf` are the two
-/// shadow results; errors are consumed here. Works for TypeInfo and any
-/// subclass (comparison and dump dispatch virtually).
+/// Report a reflection-vs-DWARF divergence. `refl`/`dwarf` are the two shadow
+/// results; errors are consumed here. Default (no journal directory): print the
+/// stderr summary and assert on divergence, log asymmetry. Report mode (journal
+/// directory set): append a structured JSON record per divergence/asymmetry and
+/// keep going, so one suite run captures every divergence. Works for TypeInfo
+/// and any subclass (comparison and dump dispatch virtually).
 template <typename ExpectedTI>
 static void ReportShadowComparison(llvm::StringRef name, ExpectedTI &refl,
                                    ExpectedTI &dwarf,
-                                   swift::reflection::TypeInfoComparison flags) {
+                                   swift::reflection::TypeInfoComparison flags,
+                                   llvm::StringRef producer,
+                                   uint64_t provider_id) {
   Log *log = GetLog(LLDBLog::Types);
   bool have_refl = static_cast<bool>(refl);
   bool have_dwarf = static_cast<bool>(dwarf);
+  std::string journal = DwarfValidationJournalDir();
+  std::string level = ModuleList::GetGlobalModuleListProperties()
+                          .GetSwiftValidateTypeSystemDWARF()
+                          .str();
+
   if (have_refl && have_dwarf) {
     if (!refl->Equals(*dwarf, flags)) {
-      std::stringstream r, d;
-      refl->dump(r);
-      dwarf->dump(d);
-      // Print a succinct, always-visible summary to stderr just before the
-      // assert, so a divergence is diagnosable without the "lldb types" log
-      // channel enabled: what was queried, the level, the first differing
-      // dimension, and both TypeInfo dumps for detail.
-      std::string demangled = swift::Demangle::demangleSymbolAsString(name);
-      std::string summary;
-      llvm::raw_string_ostream os(summary);
-      os << "\n=== Swift reflection-vs-DWARF TypeInfo divergence ===\n"
-         << "  type:  " << name << "\n";
-      if (!demangled.empty() && demangled != name.str())
-        os << "  as:    " << demangled << "\n";
-      os << "  level: "
-         << ModuleList::GetGlobalModuleListProperties()
-                .GetSwiftValidateTypeSystemDWARF()
-         << "\n"
-         << "  diff:  " << firstTypeInfoDifference(*refl, *dwarf, flags) << "\n"
-         << "  --- reflection-only ---\n"
-         << r.str() << "  --- DWARF-only ---\n"
-         << d.str()
-         << "=====================================================\n";
-      llvm::errs() << os.str();
-      LLDB_LOG(log,
-               "reflection-vs-DWARF TypeInfo divergence for {0}:\n"
-               "reflection-only:\n{1}\nDWARF-only:\n{2}",
-               name, r.str(), d.str());
-      assert(false && "reflection-vs-DWARF TypeInfo divergence");
+      if (!journal.empty()) {
+        // Report mode: record and continue.
+        swift_dwarf_journal::JournalRecordInputs in;
+        in.type_mangled = name;
+        in.producer = producer;
+        in.level = level;
+        in.provider_id = provider_id;
+        in.refl = &*refl;
+        in.dwarf = &*dwarf;
+        in.flags = flags;
+        swift_dwarf_journal::writeJournalRecord(
+            journal,
+            llvm::json::Value(swift_dwarf_journal::buildJournalRecord(in)));
+      } else {
+        std::stringstream r, d;
+        refl->dump(r);
+        dwarf->dump(d);
+        // Print a succinct, always-visible summary to stderr just before the
+        // assert, so a divergence is diagnosable without the "lldb types" log
+        // channel enabled: what was queried, the level, the first differing
+        // dimension, and both TypeInfo dumps for detail.
+        std::string demangled = swift::Demangle::demangleSymbolAsString(name);
+        std::string summary;
+        llvm::raw_string_ostream os(summary);
+        os << "\n=== Swift reflection-vs-DWARF TypeInfo divergence ===\n"
+           << "  type:  " << name << "\n";
+        if (!demangled.empty() && demangled != name.str())
+          os << "  as:    " << demangled << "\n";
+        os << "  level: " << level << "\n"
+           << "  diff:  " << firstTypeInfoDifference(*refl, *dwarf, flags)
+           << "\n"
+           << "  --- reflection-only ---\n"
+           << r.str() << "  --- DWARF-only ---\n"
+           << d.str()
+           << "=====================================================\n";
+        llvm::errs() << os.str();
+        LLDB_LOG(log,
+                 "reflection-vs-DWARF TypeInfo divergence for {0}:\n"
+                 "reflection-only:\n{1}\nDWARF-only:\n{2}",
+                 name, r.str(), d.str());
+        assert(false && "reflection-vs-DWARF TypeInfo divergence");
+      }
     }
   } else if (have_refl != have_dwarf) {
     // Exactly one side produced a result: a DWARF-completeness signal, not a
-    // layout bug. Log without asserting.
-    LLDB_LOG(log,
-             "reflection-vs-DWARF TypeInfo asymmetry for {0}: "
-             "reflection-only={1} DWARF-only={2}",
-             name, have_refl, have_dwarf);
+    // layout bug. Record it in report mode; otherwise log without asserting.
+    if (!journal.empty()) {
+      swift_dwarf_journal::JournalRecordInputs in;
+      in.type_mangled = name;
+      in.producer = producer;
+      in.level = level;
+      in.provider_id = provider_id;
+      in.refl = have_refl ? &*refl : nullptr;
+      in.dwarf = have_dwarf ? &*dwarf : nullptr;
+      in.flags = flags;
+      swift_dwarf_journal::writeJournalRecord(
+          journal,
+          llvm::json::Value(swift_dwarf_journal::buildJournalRecord(in)));
+    } else {
+      LLDB_LOG(log,
+               "reflection-vs-DWARF TypeInfo asymmetry for {0}: "
+               "reflection-only={1} DWARF-only={2}",
+               name, have_refl, have_dwarf);
+    }
   }
   if (!refl)
     llvm::consumeError(refl.takeError());
@@ -942,7 +988,9 @@ public:
     auto refl = m_reflection_only->GetTypeInfo(type, provider, df);
     auto dwarf = m_dwarf_only->GetTypeInfo(type, provider, df);
     ReportShadowComparison(type.GetMangledTypeName().GetStringRef(), refl, dwarf,
-                           flags);
+                           flags, "GetTypeInfo",
+                           provider ? (uint64_t)(uintptr_t)provider->getId()
+                                    : 0);
   }
 
   /// Differential check for GetClassInstanceTypeInfo(TypeRef).
@@ -960,7 +1008,10 @@ public:
         ClassInstanceOnShadow(*m_reflection_only, *mangled, provider, flavor, df);
     auto dwarf =
         ClassInstanceOnShadow(*m_dwarf_only, *mangled, provider, flavor, df);
-    ReportShadowComparison(*mangled, refl, dwarf, flags);
+    ReportShadowComparison(*mangled, refl, dwarf, flags,
+                           "GetClassInstanceTypeInfo",
+                           provider ? (uint64_t)(uintptr_t)provider->getId()
+                                    : 0);
   }
 };
 } // namespace
