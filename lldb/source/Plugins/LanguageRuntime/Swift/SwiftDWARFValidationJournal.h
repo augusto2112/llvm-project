@@ -257,6 +257,35 @@ allTypeInfoDifferences(const swift::reflection::TypeInfo &a,
   return diffs;
 }
 
+/// A coarse, deterministic cluster fingerprint: the comma-joined differing
+/// dimensions, then a leaf/category token (a builtin's mangled name, or a
+/// reference's "<kind>.<counting>", else the reflection TypeInfo's kind
+/// string), then the producer. Heuristic by design — downstream clustering may
+/// split or merge on it.
+inline std::string computeRootCauseKey(const std::vector<TIDifference> &diffs,
+                                       const swift::reflection::TypeInfo *refl,
+                                       llvm::StringRef producer) {
+  std::string dims;
+  for (size_t i = 0; i < diffs.size(); ++i) {
+    if (i)
+      dims += ",";
+    dims += diffs[i].dimension;
+  }
+  std::string category = "unknown";
+  if (refl) {
+    category = typeInfoKindString(*refl);
+    if (auto *bti = llvm::dyn_cast<swift::reflection::BuiltinTypeInfo>(refl)) {
+      if (!bti->getMangledTypeName().empty())
+        category = bti->getMangledTypeName();
+    } else if (auto *ref =
+                   llvm::dyn_cast<swift::reflection::ReferenceTypeInfo>(refl)) {
+      category = referenceKindString(ref->getReferenceKind()) + "." +
+                 referenceCountingString(ref->getReferenceCounting());
+    }
+  }
+  return dims + "|" + category + "|" + producer.str();
+}
+
 } // namespace swift_dwarf_journal
 } // namespace lldb_private
 

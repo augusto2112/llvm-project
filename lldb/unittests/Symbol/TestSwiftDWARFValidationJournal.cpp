@@ -106,3 +106,26 @@ TEST(SwiftDWARFValidationJournal, SerializeStructWithField) {
   ASSERT_NE(f0->get("type_mangled"), nullptr);
   EXPECT_EQ(f0->get("type_mangled")->kind(), llvm::json::Value::Null);
 }
+
+TEST(SwiftDWARFValidationJournal, RootCauseKeyForReference) {
+  auto refl = makeRef(2147483647);
+  auto dwarf = makeRef(1);
+  auto diffs = allTypeInfoDifferences(refl, dwarf, TypeInfoComparison::Strict);
+  auto key = computeRootCauseKey(diffs, &refl, "GetClassInstanceTypeInfo");
+  EXPECT_EQ(key,
+            "num_extra_inhabitants|strong.native|GetClassInstanceTypeInfo");
+}
+
+TEST(SwiftDWARFValidationJournal, RootCauseKeyFallsBackToKind) {
+  using namespace swift::reflection;
+  BuiltinTypeInfo a(/*Size=*/8, /*Alignment=*/8, /*Stride=*/8,
+                    /*NumExtraInhabitants=*/2,
+                    BitwiseBorrowability::TakableAndBorrowable, /*AFD=*/false);
+  BuiltinTypeInfo b(/*Size=*/8, /*Alignment=*/8, /*Stride=*/8,
+                    /*NumExtraInhabitants=*/1,
+                    BitwiseBorrowability::TakableAndBorrowable, /*AFD=*/false);
+  auto diffs = allTypeInfoDifferences(a, b, TypeInfoComparison::Strict);
+  // Builtin constructed without a name -> leaf is empty -> category is the kind.
+  auto key = computeRootCauseKey(diffs, &a, "GetTypeInfo");
+  EXPECT_EQ(key, "num_extra_inhabitants|builtin|GetTypeInfo");
+}
