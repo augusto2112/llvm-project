@@ -44,6 +44,15 @@ let Definition = "modulelist" in {
          "two. Value is a level (off|layout|names|strict) or a comma-separated "
          "list of dimensions. Requires swift-validate-typesystem. Used for "
          "testing an asserts-enabled LLDB only.">;
+  def SwiftValidateTypeSystemDWARFJournal: Property<"swift-validate-typesystem-dwarf-journal", "String">,
+    DefaultStringValue<"">,
+    Desc<"When non-empty, the reflection-vs-DWARF differential validation runs "
+         "in report mode: instead of asserting on the first divergence, it "
+         "appends a structured JSON record per divergence/asymmetry to a "
+         "per-process file in this directory and continues. Empty preserves the "
+         "default assert-on-divergence behavior. Requires "
+         "swift-validate-typesystem-dwarf. Used for testing an asserts-enabled "
+         "LLDB only.">;
   def SwiftTypeSystemFallback
       : Property<"swift-typesystem-compiler-fallback", "Boolean">,
         DefaultTrue,
