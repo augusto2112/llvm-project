@@ -285,6 +285,13 @@ swift_validate_dwarf = lit_config.params.get(
 if swift_validate_dwarf:
     dotest_cmd += ["--swift-validate-dwarf", swift_validate_dwarf]
 
+# Report-mode journal for the differential validation: mirror the level param.
+swift_validate_dwarf_journal = lit_config.params.get(
+    "swift-validate-dwarf-journal", os.environ.get("LLDB_SWIFT_VALIDATE_DWARF_JOURNAL")
+)
+if swift_validate_dwarf_journal:
+    dotest_cmd += ["--swift-validate-dwarf-journal", swift_validate_dwarf_journal]
+
 if is_configured("test_arch"):
     dotest_cmd += ["--arch", config.test_arch]
 
