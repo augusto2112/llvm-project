@@ -2,9 +2,11 @@ set(SWIFT_SOURCES
   TestSwiftASTContext.cpp
   TestTypeSystemSwiftTypeRef.cpp
   TestSwiftDemangler.cpp
+  TestSwiftDWARFValidationJournal.cpp
 )
 set(SWIFT_LIBS
   lldbPluginTypeSystemSwift
+  swiftRemoteInspection
 )
 set(LLVM_OPTIONAL_SOURCES ${SWIFT_SOURCES})
 if (NOT LLDB_ENABLE_SWIFT_SUPPORT)
