@@ -230,13 +230,13 @@ static void ReportShadowComparison(llvm::StringRef name, ExpectedTI &refl,
   Log *log = GetLog(LLDBLog::Types);
   bool have_refl = static_cast<bool>(refl);
   bool have_dwarf = static_cast<bool>(dwarf);
-  std::string journal = DwarfValidationJournalDir();
-  std::string level = ModuleList::GetGlobalModuleListProperties()
-                          .GetSwiftValidateTypeSystemDWARF()
-                          .str();
 
   if (have_refl && have_dwarf) {
     if (!refl->Equals(*dwarf, flags)) {
+      std::string journal = DwarfValidationJournalDir();
+      std::string level = ModuleList::GetGlobalModuleListProperties()
+                              .GetSwiftValidateTypeSystemDWARF()
+                              .str();
       if (!journal.empty()) {
         // Report mode: record and continue.
         swift_dwarf_journal::JournalRecordInputs in;
@@ -283,6 +283,10 @@ static void ReportShadowComparison(llvm::StringRef name, ExpectedTI &refl,
   } else if (have_refl != have_dwarf) {
     // Exactly one side produced a result: a DWARF-completeness signal, not a
     // layout bug. Record it in report mode; otherwise log without asserting.
+    std::string journal = DwarfValidationJournalDir();
+    std::string level = ModuleList::GetGlobalModuleListProperties()
+                            .GetSwiftValidateTypeSystemDWARF()
+                            .str();
     if (!journal.empty()) {
       swift_dwarf_journal::JournalRecordInputs in;
       in.type_mangled = name;
