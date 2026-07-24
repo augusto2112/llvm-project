@@ -741,11 +741,16 @@ getDWARFBuiltinTypeDescriptor(TypeSystemSwiftTypeRef &swift_typesystem,
     return nullptr;
   auto &[type, die] = *pair;
 
+  // A multi-payload enum is emitted as a DW_TAG_structure_type whose first
+  // child is a DW_TAG_variant_part. Such a DIE never carries a valid alignment
+  // (see below), so track it so we can defer its layout to reflection.
+  bool is_multi_payload_enum = false;
   if (!TypeSystemSwiftTypeRef::IsBuiltinType(type)) {
     if (die.Tag() == llvm::dwarf::DW_TAG_structure_type) {
       auto child = die.GetFirstChild();
       if (child.Tag() != llvm::dwarf::DW_TAG_variant_part)
         return nullptr;
+      is_multi_payload_enum = true;
     } else if (die.Tag() != llvm::dwarf::DW_TAG_base_type)
       return nullptr;
   }
@@ -755,12 +760,37 @@ getDWARFBuiltinTypeDescriptor(TypeSystemSwiftTypeRef &swift_typesystem,
   if (byte_size == LLDB_INVALID_ADDRESS)
     return nullptr;
 
-  auto alignment = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_alignment,
-                                                   byte_size ? byte_size : 8);
+  // The Swift compiler does not currently emit DW_AT_alignment on the composite
+  // DIE for a multi-payload enum. Fabricating one here (previously it defaulted
+  // to DW_AT_byte_size) produces a bogus, often non-power-of-two alignment
+  // (e.g. byte_size 33 -> alignment 33 -> stride alignUp(33, 33) = 65), whereas
+  // the authoritative layout is alignment = max(payload alignments) and
+  // stride = alignUp(size, alignment). Rather than synthesize a wrong fixed
+  // descriptor, return nullptr for this case so EnumTypeInfoBuilder::build
+  // falls into its dynamic multi-payload branch, which accumulates the
+  // alignment from the payloads and matches reflection. The fixed-descriptor
+  // path is preserved unchanged whenever DW_AT_alignment is actually present.
+  auto alignment_attr =
+      die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_alignment);
+  if (is_multi_payload_enum && !alignment_attr)
+    return nullptr;
+
+  uint64_t alignment = alignment_attr.value_or(byte_size ? byte_size : 8);
 
   // TODO: this seems simple to calculate but maybe we should encode the stride
   // in DWARF? That's what reflection metadata does.
-  unsigned stride = ((byte_size + alignment - 1) & ~(alignment - 1));
+  //
+  // stride = alignUp(byte_size, alignment). The mask-based round-up is only
+  // correct for power-of-two alignments; guard against a non-power-of-two
+  // alignment (which would silently corrupt the stride) by falling back to a
+  // safe division-based round-up.
+  unsigned stride;
+  if (alignment != 0 && (alignment & (alignment - 1)) == 0)
+    stride = (byte_size + alignment - 1) & ~(alignment - 1);
+  else if (alignment != 0)
+    stride = ((byte_size + alignment - 1) / alignment) * alignment;
+  else
+    stride = byte_size;
 
   auto num_extra_inhabitants = die.GetAttributeValueAsUnsigned(
       llvm::dwarf::DW_AT_LLVM_num_extra_inhabitants, 0);
