@@ -21,18 +21,29 @@
 #ifndef LLDB_SOURCE_PLUGINS_LANGUAGERUNTIME_SWIFT_SWIFTDWARFVALIDATIONJOURNAL_H
 #define LLDB_SOURCE_PLUGINS_LANGUAGERUNTIME_SWIFT_SWIFTDWARFVALIDATIONJOURNAL_H
 
+#include "swift/Demangling/Demangle.h"
 #include "swift/Demangling/Demangler.h"
 #include "swift/RemoteInspection/TypeLowering.h"
 #include "swift/RemoteInspection/TypeRef.h"
+#include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Casting.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/Path.h"
+#include "llvm/Support/Process.h"
+#include "llvm/Support/raw_ostream.h"
 
+#include <cstdlib>
+#include <sstream>
 #include <string>
 #include <vector>
 
 namespace lldb_private {
 namespace swift_dwarf_journal {
+
+/// Current journal record schema version. Bump on any breaking field change.
+inline constexpr int kSchemaVersion = 1;
 
 /// One differing dimension between two TypeInfos. `refl`/`dwarf` are the
 /// stringified values from each shadow context. For a deep (nested) difference
@@ -284,6 +295,110 @@ inline std::string computeRootCauseKey(const std::vector<TIDifference> &diffs,
     }
   }
   return dims + "|" + category + "|" + producer.str();
+}
+
+/// The text dump of a TypeInfo, capped so the journal stays compact. The
+/// structured *_ti object is primary; this is a human fallback.
+inline std::string cappedDump(const swift::reflection::TypeInfo &ti,
+                              size_t cap = 2048) {
+  std::stringstream ss;
+  ti.dump(ss);
+  std::string s = ss.str();
+  if (s.size() > cap) {
+    s.resize(cap);
+    s += "...(truncated)";
+  }
+  return s;
+}
+
+/// "embedded" for the $e mangling flavor, else "swift".
+inline std::string manglingFlavorString(llvm::StringRef name) {
+  return (name.starts_with("$e") || name.starts_with("_$e")) ? "embedded"
+                                                             : "swift";
+}
+
+/// Inputs for a single journal record. Exactly one of the divergence
+/// (both TIs) or asymmetry (one TI) shapes is expressed by which of
+/// refl/dwarf is non-null.
+struct JournalRecordInputs {
+  llvm::StringRef type_mangled;
+  llvm::StringRef producer;
+  llvm::StringRef level;
+  uint64_t provider_id = 0;
+  const swift::reflection::TypeInfo *refl = nullptr;
+  const swift::reflection::TypeInfo *dwarf = nullptr;
+  swift::reflection::TypeInfoComparison flags =
+      swift::reflection::TypeInfoComparison::None;
+};
+
+/// Build the schema-1 JSON record for one divergence/asymmetry.
+inline llvm::json::Object buildJournalRecord(const JournalRecordInputs &in) {
+  llvm::json::Object rec;
+  bool have_refl = in.refl != nullptr;
+  bool have_dwarf = in.dwarf != nullptr;
+  bool divergence = have_refl && have_dwarf;
+
+  rec["schema"] = kSchemaVersion;
+  rec["kind"] = divergence ? "divergence" : "asymmetry";
+  rec["type_mangled"] = in.type_mangled;
+  std::string demangled =
+      swift::Demangle::demangleSymbolAsString(in.type_mangled);
+  rec["type_demangled"] =
+      demangled.empty() ? in.type_mangled.str() : demangled;
+  rec["mangling_flavor"] = manglingFlavorString(in.type_mangled);
+  rec["producer"] = in.producer;
+  rec["level"] = in.level;
+
+  std::vector<TIDifference> diffs;
+  if (divergence)
+    diffs = allTypeInfoDifferences(*in.refl, *in.dwarf, in.flags);
+  llvm::json::Array darr;
+  for (const auto &d : diffs)
+    darr.push_back(llvm::json::Object{{"dimension", d.dimension},
+                                      {"refl", d.refl},
+                                      {"dwarf", d.dwarf}});
+  rec["differences"] = std::move(darr);
+
+  rec["root_cause_key"] =
+      divergence
+          ? computeRootCauseKey(diffs, in.refl, in.producer)
+          : ("asymmetry|" +
+             std::string(have_refl ? "refl_only" : "dwarf_only") + "|" +
+             in.producer.str());
+
+  rec["refl_present"] = have_refl;
+  rec["dwarf_present"] = have_dwarf;
+  if (have_refl) {
+    rec["refl_ti"] = serializeTypeInfo(*in.refl);
+    rec["refl_dump"] = cappedDump(*in.refl);
+  }
+  if (have_dwarf) {
+    rec["dwarf_ti"] = serializeTypeInfo(*in.dwarf);
+    rec["dwarf_dump"] = cappedDump(*in.dwarf);
+  }
+  if (const char *test = ::getenv("LLDB_SWIFT_VALIDATE_DWARF_TEST_BUILDDIR"))
+    rec["test"] = test;
+  rec["provider_id"] = (int64_t)in.provider_id;
+  rec["pid"] = (int64_t)llvm::sys::Process::getProcessId();
+  return rec;
+}
+
+/// Append one record as a single compact JSON line to
+/// <journal_dir>/divergences-<pid>.jsonl. Per-process file + append means no
+/// locking and no interleaving across lit's per-test processes. Best-effort:
+/// journaling never fails a debug session.
+inline void writeJournalRecord(llvm::StringRef journal_dir,
+                               llvm::json::Value record) {
+  llvm::SmallString<256> path(journal_dir);
+  llvm::sys::path::append(
+      path, "divergences-" +
+                std::to_string(llvm::sys::Process::getProcessId()) + ".jsonl");
+  std::error_code ec;
+  llvm::raw_fd_ostream os(path, ec,
+                          llvm::sys::fs::OF_Append | llvm::sys::fs::OF_Text);
+  if (ec)
+    return;
+  os << record << "\n"; // json::Value operator<< is compact (single line).
 }
 
 } // namespace swift_dwarf_journal
