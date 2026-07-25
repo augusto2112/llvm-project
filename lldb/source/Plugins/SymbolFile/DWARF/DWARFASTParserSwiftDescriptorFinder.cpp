@@ -626,6 +626,15 @@ DWARFASTParserSwift::getBuiltinTypeDescriptor(
   if (byte_size == LLDB_INVALID_ADDRESS)
     return nullptr;
 
+  // A byte size of zero is never a real enum layout; it is the placeholder the
+  // compiler emits on the unsubstituted DIE of a generic enum (see
+  // IRGenDebugInfo::createUnsubstitutedVariantType), which is the DIE
+  // getTypeAndDie() redirects to. Such a descriptor would describe nothing, so
+  // return no descriptor at all and let EnumTypeInfoBuilder::build derive the
+  // layout from the payloads.
+  if (is_enum && byte_size == 0)
+    return nullptr;
+
   // The compiler emits DW_AT_alignment whenever it knows a type's alignment, so
   // a missing attribute means the alignment is unknown. It does not mean the
   // natural alignment for the type, which is the usual DWARF reading: that
@@ -636,25 +645,25 @@ DWARFASTParserSwift::getBuiltinTypeDescriptor(
   auto maybe_alignment =
       die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_alignment);
 
-  bool is_unsubustituted_enum = !maybe_alignment && is_enum;
-  // If we don't know the alignment there are two cases:
-  // - This is a builtin type, encoded as a DW_TAG_base_type, whose alignment
-  // matches its size.
-  // - This is an unsubstituted enum, in which case we can't procude a builtin
-  // descriptor since we can't know the alignment.
-  if (is_unsubustituted_enum)
-    return nullptr;
-
-  uint64_t alignment = maybe_alignment.value_or(byte_size);
-  if (alignment == 0) {
+  // For an enum whose alignment DWARF doesn't carry, defer only the alignment:
+  // report it (and the stride derived from it) as unknown, which
+  // EnumTypeInfoBuilder::build answers with the alignment it accumulated from
+  // the payloads. This keeps the DW_AT_byte_size and
+  // DW_AT_LLVM_num_extra_inhabitants that DWARF does carry, which the dynamic
+  // multi-payload branch would otherwise recompute wrongly by appending an
+  // out-of-line tag byte.
+  uint64_t alignment = maybe_alignment.value_or(is_enum ? 0 : byte_size);
+  if (!is_enum && alignment == 0) {
     assert(false && "Unexpected 0 alignment!");
     return nullptr;
   }
 
   // Clamping to 1 matches how reflection lowers a zero-sized type; see the
   // stride computation in TypeLowering.cpp. Leaving it at 0 would make
-  // distinct elements of a zero-sized type share an address.
-  unsigned stride = std::max<unsigned>(llvm::alignTo(byte_size, alignment), 1);
+  // distinct elements of a zero-sized type share an address. An unknown
+  // alignment leaves the stride unknown too; don't synthesize one.
+  unsigned stride =
+      alignment ? std::max<unsigned>(llvm::alignTo(byte_size, alignment), 1) : 0;
 
   auto num_extra_inhabitants = die.GetAttributeValueAsUnsigned(
       llvm::dwarf::DW_AT_LLVM_num_extra_inhabitants, 0);
