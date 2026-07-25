@@ -6,6 +6,7 @@ import lldbsuite.test.lldbutil as lldbutil
 class TestCase(TestBase):
 
     @requireNotEmbeddedSwift
+    @noSwiftDWARFValidation
     @swiftTest
     def test_backtrace_selected_task_variable(self):
         self.build()
@@ -15,6 +16,7 @@ class TestCase(TestBase):
         self.do_backtrace_selected_task("task")
 
     @requireNotEmbeddedSwift
+    @noSwiftDWARFValidation
     @swiftTest
     def test_backtrace_selected_task_address(self):
         self.build()
@@ -39,6 +41,7 @@ class TestCase(TestBase):
         )
 
     @requireNotEmbeddedSwift
+    @noSwiftDWARFValidation
     @swiftTest
     def test_navigate_stack_of_selected_task_variable(self):
         self.build()
@@ -48,6 +51,7 @@ class TestCase(TestBase):
         self.do_test_navigate_selected_task_stack(process, "task")
 
     @requireNotEmbeddedSwift
+    @noSwiftDWARFValidation
     @swiftTest
     def test_navigate_stack_of_selected_task_address(self):
         self.build()

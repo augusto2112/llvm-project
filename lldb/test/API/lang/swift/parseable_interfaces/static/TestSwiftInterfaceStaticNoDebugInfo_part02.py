@@ -102,6 +102,7 @@ class TestSwiftInterfaceStaticNoDebugInfo(TestBase):
 
 
     @requireNotEmbeddedSwift
+    @noSwiftDWARFValidation
     @swiftTest
     @skipIfWindows
     def test_swift_interface_fallback(self):
