@@ -1025,7 +1025,11 @@ public:
       swift::Mangle::ManglingFlavor flavor,
       swift::reflection::DescriptorFinder *df) {
     swift::Demangle::Demangler dem;
-    auto mangled = type_ref.mangle(dem);
+    // Re-mangle with the flavor the caller's type actually came from. A
+    // TypeRef stores nominal names without a mangling prefix, so mangling
+    // defaults to $s and would silently rename every Embedded Swift type to
+    // one that does not exist in the program.
+    auto mangled = type_ref.mangle(dem, flavor);
     if (!mangled)
       return;
     if (IsEmbeddedSwiftName(*mangled))
