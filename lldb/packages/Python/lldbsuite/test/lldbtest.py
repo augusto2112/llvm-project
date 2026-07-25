@@ -2269,6 +2269,17 @@ class TestBase(Base, metaclass=LLDBTestCaseFactory):
             if variant_value is not None:
                 variant.apply_settings(self, variant_value)
 
+        # Tests marked @noSwiftDWARFValidation drive LLDB to inspect Swift
+        # runtime data structures, whose types the program's DWARF does not
+        # describe, so the reflection-vs-DWARF differential has nothing
+        # meaningful to compare. Clear the setting setUpCommands() applied.
+        if getattr(
+            getattr(self, self.testMethodName, None),
+            "__no_swift_dwarf_validation__",
+            False,
+        ):
+            self.runCmd("settings clear symbols.swift-validate-typesystem-dwarf")
+
     def registerSharedLibrariesWithTarget(self, target, shlibs):
         """If we are remotely running the test suite, register the shared libraries with the target so they get uploaded, otherwise do nothing
 

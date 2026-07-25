@@ -6,6 +6,7 @@ import lldbsuite.test.lldbutil as lldbutil
 
 class TestSwiftRuntimeInstrumentationRecognizer(lldbtest.TestBase):
     @skipEmbeddedSwift
+    @noSwiftDWARFValidation
     @swiftTest
     @expectedFailureWindows
     def test(self):

@@ -1023,6 +1023,24 @@ def skipUnlessEmbeddedSwift(func):
         return None
     return _skipForVariant("swift_embedded", skip_fn, func)
 
+def noSwiftDWARFValidation(func):
+    """Decorate a test to run with the reflection-vs-DWARF differential off.
+
+    For use where LLDB inspects Swift *runtime* data structures rather than the
+    program's own types. Displaying a Task, or reporting a runtime trap, makes
+    LLDB ask the type system to lay out stdlib types the program never mentions
+    (TaskPriority, UnsafeCurrentTask, StaticString, ...). Reflection describes
+    them because they live in the runtime's metadata, but the program's DWARF
+    does not, because -gdwarf-types only emits what the module references. The
+    differential then reports a divergence that says nothing about the debug
+    info under test, and outside report mode it aborts on an assert.
+
+    This turns the comparison off for the whole test rather than skipping it, so
+    the feature under test still gets its coverage.
+    """
+    func.__no_swift_dwarf_validation__ = True
+    return func
+
 def skipIfHostIncompatibleWithTarget(func):
     """Decorate the item to skip tests when the host and target are incompatible."""
 
