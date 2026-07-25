@@ -136,6 +136,24 @@ static swift::reflection::TypeInfoComparison DwarfValidationFlags() {
           .GetSwiftValidateTypeSystemDWARF());
 }
 
+/// Whether \p mangled names an Embedded Swift type, for which the
+/// reflection-vs-DWARF differential is not a meaningful comparison.
+///
+/// Embedded Swift emits no reflection metadata at all: the frontend sets
+/// ReflectionMetadataMode::None for Feature::Embedded, and an embedded binary
+/// has no __swift5_* sections. Any reflection answer for such a type therefore
+/// comes from some other image -- in practice the host's non-embedded
+/// libswiftCore, which LLDB loads into the process for expression evaluation
+/// and which reflection-name matching finds because it is mangling-flavor
+/// blind. Comparing that against the program's own DWARF diffs two different
+/// ABIs (extra inhabitants, for one, differ because SwiftTargetInfo skips the
+/// Darwin LeastValidPointerValue under Feature::Embedded), so a mismatch says
+/// nothing about the debug info under test. Skip it rather than report it.
+static bool IsEmbeddedSwiftName(llvm::StringRef mangled) {
+  return SwiftLanguageRuntime::GetManglingFlavor(mangled) ==
+         swift::Mangle::ManglingFlavor::Embedded;
+}
+
 /// Best-effort, succinct description of the FIRST way two TypeInfos differ, for
 /// a human-readable divergence summary. Mirrors the dimensions
 /// TypeInfo::Equals checks; falls back to a generic note for nested/field-level
@@ -715,11 +733,13 @@ private:
   void CompareShadowsForType(CompilerType type,
                              swift::remote::TypeInfoProvider *provider,
                              swift::reflection::DescriptorFinder *df) {
+    llvm::StringRef name = type.GetMangledTypeName().GetStringRef();
+    if (IsEmbeddedSwiftName(name))
+      return;
     auto flags = DwarfValidationFlags();
     auto refl = m_reflection_only->GetTypeInfo(type, provider, df);
     auto dwarf = m_dwarf_only->GetTypeInfo(type, provider, df);
-    ReportShadowComparison(type.GetMangledTypeName().GetStringRef(), refl, dwarf,
-                           flags);
+    ReportShadowComparison(name, refl, dwarf, flags);
   }
 
   /// Differential check for GetClassInstanceTypeInfo(TypeRef).
@@ -735,6 +755,8 @@ private:
     // one that does not exist in the program.
     auto mangled = type_ref.mangle(dem, flavor);
     if (!mangled)
+      return;
+    if (IsEmbeddedSwiftName(*mangled))
       return;
     auto flags = DwarfValidationFlags();
     auto refl =

@@ -1964,6 +1964,16 @@ def _swift_module_importer_setup(test_instance, variant_value):
 def _embedded_swift_setup(test_instance, variant_value):
     if variant_value == "swiftembed":
         test_instance.extra_make_flags["SWIFT_EMBEDDED_MODE"] = "1"
+        # Embedded Swift emits no reflection metadata by construction (the
+        # frontend sets ReflectionMetadataMode::None for Feature::Embedded), so
+        # there is nothing to compare DWARF against: the reflection side would
+        # be answered from the host's non-embedded libswiftCore, i.e. a
+        # different ABI. Turn the differential off for this variant. This runs
+        # after setUpCommands(), which is where the setting is applied, and is
+        # the first point that knows which variant this test method is.
+        test_instance.runCmd(
+            "settings clear symbols.swift-validate-typesystem-dwarf"
+        )
     elif variant_value == "swift":
         test_instance.extra_make_flags["SWIFT_EMBEDDED_MODE"] = "0"
     else:
