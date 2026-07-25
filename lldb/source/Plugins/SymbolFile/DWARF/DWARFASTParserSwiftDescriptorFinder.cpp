@@ -13,6 +13,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include <algorithm>
 #include <functional>
 #include <sstream>
 
@@ -24,6 +25,8 @@
 
 #include "Plugins/TypeSystem/Swift/SwiftASTContext.h"
 #include "Plugins/TypeSystem/Swift/TypeSystemSwiftTypeRef.h"
+#include "swift/ABI/MetadataValues.h"
+#include "swift/ABI/System.h"
 #include "swift/Demangling/ManglingFlavor.h"
 #include "swift/RemoteInspection/DescriptorFinder.h"
 #include "swift/RemoteInspection/TypeLowering.h"
@@ -35,6 +38,8 @@
 #include "lldb/Utility/Flags.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
+
+#include "llvm/TargetParser/Triple.h"
 
 using namespace lldb;
 using namespace lldb_private;
@@ -443,12 +448,77 @@ public:
   llvm::StringRef getMangledTypeName() override { return m_type_name; }
 };
 
+/// Returns the number of extra inhabitants of a pointer-sized value that can
+/// never be null -- a heap object reference (Builtin.NativeObject,
+/// Builtin.UnknownObject) or a function pointer -- on the target described by
+/// \p triple, compiled with (\p is_embedded) or without Embedded Swift.
+///
+/// This mirrors PointerInfo::getExtraInhabitantCount in
+/// swift/lib/IRGen/ExtraInhabitants.cpp, which is how the compiler arrives at
+/// the count it emits for these builtins (see getHeapObjectExtraInhabitantCount
+/// there, and HeapTypeInfo::getFixedExtraInhabitantCount in
+/// swift/lib/IRGen/HeapTypeInfo.h). Every address below the target's
+/// LeastValidPointerValue is an invalid pointer and therefore an extra
+/// inhabitant; that count is shifted down by the number of low pointer bits the
+/// Objective-C runtime reserves, then clamped to the largest count the runtime
+/// supports. Nothing is subtracted for the null pointer, because
+/// PointerInfo::forHeapObject and PointerInfo::forFunction are both
+/// IsNotNullable -- that subtraction is what leaves Builtin.RawPointer, whose
+/// only extra inhabitant *is* null, with a count of one.
+static uint32_t getNotNullablePointerExtraInhabitantCount(
+    const llvm::Triple &triple, uint32_t pointer_size, bool is_embedded) {
+  // LeastValidPointerValue, as configured by SwiftTargetInfo::get in
+  // swift/lib/IRGen/SwiftTargetInfo.cpp: non-embedded 64-bit Darwin reserves
+  // the low 4 GiB of the address space (configureARM64 / configureX86_64, both
+  // of which skip that value under Feature::Embedded), while every other target
+  // -- including every embedded one -- keeps the single unmapped page assumed
+  // by SWIFT_ABI_DEFAULT_LEAST_VALID_POINTER. The pointer size check keeps
+  // arm64_32 on the default, matching configureARM64_32, and wasm32's
+  // SWIFT_ABI_WASM32_LEAST_VALID_POINTER is the default value anyway.
+  uint64_t least_valid_pointer = SWIFT_ABI_DEFAULT_LEAST_VALID_POINTER;
+  if (pointer_size == 8 && triple.isOSDarwin() && !is_embedded) {
+    switch (triple.getArch()) {
+    case llvm::Triple::aarch64:
+      least_valid_pointer = SWIFT_ABI_DARWIN_ARM64_LEAST_VALID_POINTER;
+      break;
+    case llvm::Triple::x86_64:
+      least_valid_pointer = SWIFT_ABI_DARWIN_X86_64_LEAST_VALID_POINTER;
+      break;
+    default:
+      break;
+    }
+  }
+
+  // The reserved low bits are the trailing ones of
+  // SwiftTargetInfo::ObjCPointerReservedBits, and are none at all without
+  // Objective-C interop (getNumLowObjCReservedBits in ExtraInhabitants.cpp),
+  // which defaults to Target.isOSDarwin() && !Embedded (see
+  // CompilerInvocation.cpp's Opts.EnableObjCInterop). Of the
+  // SWIFT_ABI_*_OBJC_RESERVED_BITS_MASK values in swift/shims/System.h only the
+  // x86_64 one reserves a low bit; the arm64 and x86_64-simulator masks reserve
+  // the sign bit instead. A function pointer reserves nothing either way
+  // (PointerInfo::forFunction), but on the one target where this shift is
+  // nonzero both the shifted and the unshifted count clamp to
+  // MaxNumExtraInhabitants, so one count serves every non-nullable pointer.
+  bool objc_interop = triple.isOSDarwin() && !is_embedded;
+  unsigned reserved_low_bits =
+      (objc_interop && triple.getArch() == llvm::Triple::x86_64 &&
+       !triple.isSimulatorEnvironment())
+          ? 1
+          : 0;
+
+  return std::min<uint64_t>(swift::ValueWitnessFlags::MaxNumExtraInhabitants,
+                            least_valid_pointer >> reserved_low_bits);
+}
+
 /// Returns a hardcoded builtin type descriptor for special stdlib builtin
 /// types. This mirrors the types created by
 /// IRGenModule::getOrCreateSpecialStlibBuiltinTypes() in the Swift compiler.
 static std::unique_ptr<swift::reflection::BuiltinTypeDescriptorBase>
 getHardcodedBuiltinTypeDescriptor(const swift::reflection::TypeRef *TR,
-                                  uint32_t pointer_size) {
+                                  uint32_t pointer_size,
+                                  const llvm::Triple &triple,
+                                  bool is_embedded) {
   auto *builtin_TR = llvm::dyn_cast<swift::reflection::BuiltinTypeRef>(TR);
   if (!builtin_TR)
     return nullptr;
@@ -467,13 +537,19 @@ getHardcodedBuiltinTypeDescriptor(const swift::reflection::TypeRef *TR,
             std::move(name));
       };
 
+  uint32_t not_nullable_pointer_extra_inhabitants =
+      getNotNullablePointerExtraInhabitantCount(triple, pointer_size,
+                                                is_embedded);
+
   // Builtin.NativeObject (Bo).
   if (mangled_name == "Bo")
-    return makePointerSizedDescriptor("Bo", /*num_extra_inhabitants=*/1);
+    return makePointerSizedDescriptor("Bo",
+                                      not_nullable_pointer_extra_inhabitants);
 
   // Builtin.UnknownObject (BO).
   if (mangled_name == "BO")
-    return makePointerSizedDescriptor("BO", /*num_extra_inhabitants=*/1);
+    return makePointerSizedDescriptor("BO",
+                                      not_nullable_pointer_extra_inhabitants);
 
   // Builtin.BridgeObject (Bb).
   if (mangled_name == "Bb") {
@@ -481,7 +557,8 @@ getHardcodedBuiltinTypeDescriptor(const swift::reflection::TypeRef *TR,
     return makePointerSizedDescriptor("Bb", extra_inhabitants);
   }
 
-  // Builtin.RawPointer.
+  // Builtin.RawPointer. Unlike the heap object and function pointers above, a
+  // raw pointer is nullable, and null is its only extra inhabitant.
   if (mangled_name == "Bp")
     return makePointerSizedDescriptor("Bp", /*num_extra_inhabitants=*/1);
 
@@ -500,7 +577,8 @@ getHardcodedBuiltinTypeDescriptor(const swift::reflection::TypeRef *TR,
 
   // Thin function type () -> ().
   if (mangled_name == "yyXf")
-    return makePointerSizedDescriptor("yyXf", /*num_extra_inhabitants=*/1);
+    return makePointerSizedDescriptor("yyXf",
+                                      not_nullable_pointer_extra_inhabitants);
 
   // Existential metatype Any.Type.
   if (mangled_name == "ypXp") {
@@ -838,7 +916,9 @@ DWARFASTParserSwift::getBuiltinTypeDescriptor(
     return descriptor;
 
   uint32_t pointer_size = m_swift_typesystem.GetPointerByteSize();
-  return getHardcodedBuiltinTypeDescriptor(TR, pointer_size);
+  return getHardcodedBuiltinTypeDescriptor(
+      TR, pointer_size, m_swift_typesystem.GetTriple(),
+      m_swift_typesystem.IsEmbeddedSwift());
 }
 
 std::unique_ptr<swift::reflection::MultiPayloadEnumDescriptorBase>
