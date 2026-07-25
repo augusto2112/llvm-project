@@ -1313,7 +1313,8 @@ SwiftRuntimeTypeVisitor::VisitImpl(std::optional<unsigned> visit_only,
       LLDBTypeInfoProvider tip(m_runtime, ts);
       auto cti_or_err = reflection_ctx->GetClassInstanceTypeInfo(
           *tr, &tip,
-          ts.GetDescriptorFinder(m_exe_ctx.GetBestExecutionContextScope()));
+          ts.GetDescriptorFinder(m_exe_ctx.GetBestExecutionContextScope()),
+          m_flavor);
       if (!cti_or_err)
         return cti_or_err.takeError();
       if (auto *rti = llvm::dyn_cast_or_null<swift::reflection::RecordTypeInfo>(
@@ -1336,7 +1337,7 @@ SwiftRuntimeTypeVisitor::VisitImpl(std::optional<unsigned> visit_only,
           reflection_ctx->ForEachSuperClassType(
               &tip,
               ts.GetDescriptorFinder(m_exe_ctx.GetBestExecutionContextScope()),
-              tr, [&](SuperClassType sc) {
+              tr, m_flavor, [&](SuperClassType sc) {
                 auto *tr = sc.get_typeref();
                 if (!tr || llvm::isa<swift::reflection::ObjCClassTypeRef>(tr))
                   return true;
@@ -1449,7 +1450,7 @@ SwiftRuntimeTypeVisitor::VisitImpl(std::optional<unsigned> visit_only,
       // If the pointer based super class traversal failed (this may happen
       // when metadata is not present in the binary, for example: embedded
       // Swift), try the typeref based one next.
-      reflection_ctx->ForEachSuperClassType(&tip, desc_finder, tr,
+      reflection_ctx->ForEachSuperClassType(&tip, desc_finder, tr, m_flavor,
                                             superclass_finder);
 
     if (supers.empty() && tr) {
@@ -1457,8 +1458,8 @@ SwiftRuntimeTypeVisitor::VisitImpl(std::optional<unsigned> visit_only,
                "Couldn't find the type metadata for {0} in instance",
                m_type.GetTypeName());
 
-      auto cti_or_err =
-          reflection_ctx->GetClassInstanceTypeInfo(*tr, &tip, desc_finder);
+      auto cti_or_err = reflection_ctx->GetClassInstanceTypeInfo(
+          *tr, &tip, desc_finder, m_flavor);
       const swift::reflection::TypeInfo *cti = nullptr;
       if (cti_or_err)
         cti = &*cti_or_err;
