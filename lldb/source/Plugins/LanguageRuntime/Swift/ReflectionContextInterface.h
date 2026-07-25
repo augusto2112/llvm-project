@@ -20,6 +20,7 @@
 #include "lldb/lldb-defines.h"
 #include "lldb/lldb-types.h"
 #include "swift/ABI/ObjectFile.h"
+#include "swift/Demangling/ManglingFlavor.h"
 #include "swift/Remote/RemoteAddress.h"
 #include "swift/RemoteInspection/TypeRef.h"
 #include "swift/RemoteInspection/TypeRefBuilder.h"
@@ -91,11 +92,18 @@ public:
   /// @_originallyDefinedIn module fixups) and strips marker protocols.
   llvm::Expected<const swift::reflection::TypeRef &>
   GetCanonicalTypeRef(CompilerType type);
+  /// \param flavor the mangling flavor of the program \p type_ref came from.
+  /// A TypeRef stores its nominal names without a mangling prefix, so the
+  /// flavor cannot be recovered from it; it is only needed by the
+  /// reflection-vs-DWARF differential, which re-mangles \p type_ref to key its
+  /// shadow queries. Passing the wrong flavor there would name a type that
+  /// does not exist in the program.
   virtual llvm::Expected<const swift::reflection::RecordTypeInfo &>
   GetClassInstanceTypeInfo(
       const swift::reflection::TypeRef &type_ref,
       swift::remote::TypeInfoProvider *provider,
-      swift::reflection::DescriptorFinder *descriptor_finder) = 0;
+      swift::reflection::DescriptorFinder *descriptor_finder,
+      swift::Mangle::ManglingFlavor flavor) = 0;
   virtual llvm::Expected<const swift::reflection::TypeInfo &>
   GetTypeInfo(CompilerType type, swift::remote::TypeInfoProvider *provider,
               swift::reflection::DescriptorFinder *descriptor_finder) = 0;
@@ -117,10 +125,14 @@ public:
   /// other version of the function that uses the instance's pointer. This
   /// version is useful when reflection metadata has been stripped from the
   /// binary (for example, when debugging embedded Swift programs).
+  ///
+  /// \param flavor see GetClassInstanceTypeInfo; this traversal can reach the
+  /// class-instance path for each visited superclass.
   virtual bool
   ForEachSuperClassType(swift::remote::TypeInfoProvider *tip,
                         swift::reflection::DescriptorFinder *descriptor_finder,
                         const swift::reflection::TypeRef *tr,
+                        swift::Mangle::ManglingFlavor flavor,
                         std::function<bool(SuperClassType)> fn) = 0;
 
   virtual llvm::Expected<std::pair<const swift::reflection::TypeRef *,

@@ -353,7 +353,8 @@ public:
   GetClassInstanceTypeInfo(
       const swift::reflection::TypeRef &type_ref,
       swift::remote::TypeInfoProvider *provider,
-      swift::reflection::DescriptorFinder *descriptor_finder) override {
+      swift::reflection::DescriptorFinder *descriptor_finder,
+      swift::Mangle::ManglingFlavor flavor) override {
     auto on_exit = PushDescriptorFinderAndPopOnExit(descriptor_finder);
     auto start =
         m_reflection_ctx.computeUnalignedFieldStartOffset(&type_ref, provider);
@@ -369,7 +370,8 @@ public:
     if (!rti)
       return llvm::createStringError(m_type_converter.takeLastError());
     if (m_reflection_only && m_dwarf_only)
-      CompareShadowsForClassInstance(type_ref, provider, descriptor_finder);
+      CompareShadowsForClassInstance(type_ref, provider, descriptor_finder,
+                                     flavor);
     return *rti;
   }
 
@@ -419,12 +421,14 @@ public:
   ForEachSuperClassType(swift::remote::TypeInfoProvider *tip,
                         swift::reflection::DescriptorFinder *descriptor_finder,
                         const swift::reflection::TypeRef *tr,
+                        swift::Mangle::ManglingFlavor flavor,
                         std::function<bool(SuperClassType)> fn) override {
     // Guard against faulty self-referential metadata.
     unsigned limit = 256;
     while (tr && --limit) {
       if (fn({[=]() -> const swift::reflection::RecordTypeInfo * {
-                auto ti_or_err = GetRecordTypeInfo(*tr, tip, descriptor_finder);
+                auto ti_or_err =
+                    GetRecordTypeInfo(*tr, tip, descriptor_finder, flavor);
                 if (!ti_or_err) {
                   LLDB_LOG_ERRORV(GetLog(LLDBLog::Types), ti_or_err.takeError(),
                                   "ForEachSuperClassType: {0}");
@@ -640,7 +644,8 @@ private:
   llvm::Expected<const swift::reflection::RecordTypeInfo &>
   GetRecordTypeInfo(const swift::reflection::TypeRef &type_ref,
                     swift::remote::TypeInfoProvider *tip,
-                    swift::reflection::DescriptorFinder *descriptor_finder) {
+                    swift::reflection::DescriptorFinder *descriptor_finder,
+                    swift::Mangle::ManglingFlavor flavor) {
     auto type_info_or_err =
         GetTypeInfoFromTypeRef(type_ref, tip, descriptor_finder);
     if (!type_info_or_err)
@@ -651,7 +656,7 @@ private:
                 type_info))
       return *record_type_info;
     if (llvm::isa_and_nonnull<swift::reflection::ReferenceTypeInfo>(type_info))
-      return GetClassInstanceTypeInfo(type_ref, tip, descriptor_finder);
+      return GetClassInstanceTypeInfo(type_ref, tip, descriptor_finder, flavor);
     std::stringstream ss;
     type_ref.dump(ss);
     return llvm::createStringError(
@@ -696,12 +701,13 @@ private:
   llvm::Expected<const swift::reflection::RecordTypeInfo &>
   ClassInstanceOnShadow(TargetReflectionContext &shadow, llvm::StringRef mangled,
                         swift::remote::TypeInfoProvider *provider,
-                        swift::reflection::DescriptorFinder *descriptor_finder) {
+                        swift::reflection::DescriptorFinder *descriptor_finder,
+                        swift::Mangle::ManglingFlavor flavor) {
     auto tr_or_err = shadow.GetTypeRef(mangled);
     if (!tr_or_err)
       return tr_or_err.takeError();
     return shadow.GetClassInstanceTypeInfo(*tr_or_err, provider,
-                                           descriptor_finder);
+                                           descriptor_finder, flavor);
   }
 
   /// Differential check for GetTypeInfo(CompilerType). Each shadow re-derives
@@ -720,14 +726,21 @@ private:
   void CompareShadowsForClassInstance(
       const swift::reflection::TypeRef &type_ref,
       swift::remote::TypeInfoProvider *provider,
-      swift::reflection::DescriptorFinder *df) {
+      swift::reflection::DescriptorFinder *df,
+      swift::Mangle::ManglingFlavor flavor) {
     swift::Demangle::Demangler dem;
-    auto mangled = type_ref.mangle(dem);
+    // Re-mangle with the flavor the caller's type actually came from. A
+    // TypeRef stores nominal names without a mangling prefix, so mangling
+    // defaults to $s and would silently rename every Embedded Swift type to
+    // one that does not exist in the program.
+    auto mangled = type_ref.mangle(dem, flavor);
     if (!mangled)
       return;
     auto flags = DwarfValidationFlags();
-    auto refl = ClassInstanceOnShadow(*m_reflection_only, *mangled, provider, df);
-    auto dwarf = ClassInstanceOnShadow(*m_dwarf_only, *mangled, provider, df);
+    auto refl =
+        ClassInstanceOnShadow(*m_reflection_only, *mangled, provider, df, flavor);
+    auto dwarf =
+        ClassInstanceOnShadow(*m_dwarf_only, *mangled, provider, df, flavor);
     ReportShadowComparison(*mangled, refl, dwarf, flags);
   }
 };
