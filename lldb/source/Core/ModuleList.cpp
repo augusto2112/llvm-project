@@ -234,6 +234,13 @@ llvm::StringRef ModuleListProperties::GetSwiftValidateTypeSystemDWARF() const {
       idx, g_modulelist_properties[idx].default_cstr_value);
 }
 
+llvm::StringRef
+ModuleListProperties::GetSwiftValidateTypeSystemDWARFJournal() const {
+  const uint32_t idx = ePropertySwiftValidateTypeSystemDWARFJournal;
+  return GetPropertyAtIndexAs<llvm::StringRef>(
+      idx, g_modulelist_properties[idx].default_cstr_value);
+}
+
 bool ModuleListProperties::GetSwiftTypeSystemFallback() const {
   const uint32_t idx = ePropertySwiftTypeSystemFallback;
   return GetPropertyAtIndexAs<bool>(

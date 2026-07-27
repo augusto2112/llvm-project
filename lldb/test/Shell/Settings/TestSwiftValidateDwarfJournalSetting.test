@@ -1,0 +1,11 @@
+# RUN: %lldb-noinit -x -s %s | FileCheck %s
+settings show symbols.swift-validate-typesystem-dwarf-journal
+settings set symbols.swift-validate-typesystem-dwarf-journal /tmp/journal
+settings show symbols.swift-validate-typesystem-dwarf-journal
+q
+# The journal directory is empty by default (report mode off): the value
+# ends right after "=" with only optional trailing whitespace, i.e.
+# empty/unquoted, not a quoted string.
+# CHECK: symbols.swift-validate-typesystem-dwarf-journal (string) ={{ *$}}
+# ...and round-trips through set/show.
+# CHECK: symbols.swift-validate-typesystem-dwarf-journal (string) = "/tmp/journal"
