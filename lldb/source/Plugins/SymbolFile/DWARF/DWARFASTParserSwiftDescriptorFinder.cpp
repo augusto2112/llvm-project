@@ -568,11 +568,17 @@ getDWARFBuiltinTypeDescriptor(TypeSystemSwiftTypeRef &swift_typesystem,
     return nullptr;
   auto &[type, die] = *pair;
 
+  // A multi-payload enum is emitted as a DW_TAG_structure_type whose first
+  // child is a DW_TAG_variant_part. Such a DIE never carries an alignment (see
+  // below), so track it so we can report the alignment as unknown and let the
+  // consumer derive it.
+  bool is_multi_payload_enum = false;
   if (!TypeSystemSwiftTypeRef::IsBuiltinType(type)) {
     if (die.Tag() == llvm::dwarf::DW_TAG_structure_type) {
       auto child = die.GetFirstChild();
       if (child.Tag() != llvm::dwarf::DW_TAG_variant_part)
         return nullptr;
+      is_multi_payload_enum = true;
     } else if (die.Tag() != llvm::dwarf::DW_TAG_base_type)
       return nullptr;
   }
@@ -582,12 +588,54 @@ getDWARFBuiltinTypeDescriptor(TypeSystemSwiftTypeRef &swift_typesystem,
   if (byte_size == LLDB_INVALID_ADDRESS)
     return nullptr;
 
-  auto alignment = die.GetAttributeValueAsUnsigned(llvm::dwarf::DW_AT_alignment,
-                                                   byte_size ? byte_size : 8);
+  // A byte size of zero is never a real multi-payload enum layout; it is the
+  // placeholder the compiler emits on the unsubstituted DIE of a generic enum
+  // (see IRGenDebugInfo::createUnsubstitutedVariantType), which is the DIE
+  // getTypeAndDie() redirects to. Such a descriptor would describe nothing, so
+  // return no descriptor at all and let EnumTypeInfoBuilder::build derive the
+  // layout from the payloads.
+  if (is_multi_payload_enum && byte_size == 0)
+    return nullptr;
+
+  // The Swift compiler does not emit DW_AT_alignment on the composite DIE for a
+  // multi-payload enum: IRGenDebugInfo passes an alignment of zero whenever the
+  // type has its default alignment, and LLVM then omits the attribute.
+  // Fabricating one here (previously it defaulted to DW_AT_byte_size) produces
+  // a bogus, often non-power-of-two alignment (e.g. byte_size 33 -> alignment
+  // 33 -> stride alignUp(33, 33) = 65), whereas the authoritative layout is
+  // alignment = max(payload alignments) and stride = alignUp(size, alignment).
+  // So defer only the alignment: report it (and the stride derived from it) as
+  // unknown, which EnumTypeInfoBuilder::build answers with the alignment it
+  // accumulated from the payloads. This keeps the DW_AT_byte_size and
+  // DW_AT_LLVM_num_extra_inhabitants that DWARF does carry, which the dynamic
+  // multi-payload branch would otherwise recompute wrongly by appending an
+  // out-of-line tag byte. The fixed-descriptor path is preserved unchanged
+  // whenever DW_AT_alignment is actually present.
+  auto alignment_attr =
+      die.GetAttributeValueAsOptionalUnsigned(llvm::dwarf::DW_AT_alignment);
+  uint64_t alignment;
+  if (alignment_attr)
+    alignment = *alignment_attr;
+  else if (is_multi_payload_enum)
+    alignment = 0;
+  else
+    alignment = byte_size ? byte_size : 8;
 
   // TODO: this seems simple to calculate but maybe we should encode the stride
   // in DWARF? That's what reflection metadata does.
-  unsigned stride = ((byte_size + alignment - 1) & ~(alignment - 1));
+  //
+  // stride = alignUp(byte_size, alignment). The mask-based round-up is only
+  // correct for power-of-two alignments; guard against a non-power-of-two
+  // alignment (which would silently corrupt the stride) by falling back to a
+  // safe division-based round-up.
+  unsigned stride;
+  if (alignment != 0 && (alignment & (alignment - 1)) == 0)
+    stride = (byte_size + alignment - 1) & ~(alignment - 1);
+  else if (alignment != 0)
+    stride = ((byte_size + alignment - 1) / alignment) * alignment;
+  else
+    // The alignment is unknown, so the stride is too; don't synthesize one.
+    stride = 0;
 
   auto num_extra_inhabitants = die.GetAttributeValueAsUnsigned(
       llvm::dwarf::DW_AT_LLVM_num_extra_inhabitants, 0);
