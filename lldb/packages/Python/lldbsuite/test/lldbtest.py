@@ -804,6 +804,15 @@ class Base(unittest.TestCase):
                 % dwarf_validate_level
             )
 
+        # Report-mode journal: when a journal directory is provided, the
+        # differential validation appends records instead of asserting.
+        dwarf_validate_journal = os.environ.get("LLDB_SWIFT_VALIDATE_DWARF_JOURNAL")
+        if dwarf_validate_journal:
+            commands.append(
+                "settings set -- symbols.swift-validate-typesystem-dwarf-journal %s"
+                % dwarf_validate_journal
+            )
+
         # Set any user-overridden settings.
         for setting, value in configuration.settings:
             commands.append("setting set %s %s" % (setting, value))
@@ -2258,6 +2267,11 @@ class TestBase(Base, metaclass=LLDBTestCaseFactory):
         # Works with the test driver to conditionally skip tests via
         # decorators.
         Base.setUp(self)
+
+        # Report-mode journal provenance: stamp this test's build directory so
+        # each divergence record names the inferior binary to inspect.
+        if os.environ.get("LLDB_SWIFT_VALIDATE_DWARF_JOURNAL"):
+            os.environ["LLDB_SWIFT_VALIDATE_DWARF_TEST_BUILDDIR"] = self.getBuildDir()
 
         for s in self.setUpCommands():
             self.runCmd(s)
