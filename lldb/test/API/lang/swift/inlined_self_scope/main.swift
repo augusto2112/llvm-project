@@ -11,7 +11,8 @@ func freeFunction() {
   blackhole(42) // break here in free function
 }
 
-class Tester {
+// `final` matters for embedded Swift.
+final class Tester {
   var count = 41
 
   // An inlined *method* with its own `self`.

@@ -18,7 +18,6 @@ class TestSwiftInlinedSelfScope(TestBase):
         )
         return frame
 
-    @skipEmbeddedSwift
     @swiftTest
     def test_self_scope_in_inlined_frames(self):
         self.build()
