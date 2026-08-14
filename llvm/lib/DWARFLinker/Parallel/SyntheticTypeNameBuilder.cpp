@@ -746,6 +746,14 @@ std::optional<size_t> OrderedChildrenIndexAssigner::tagToArrayIndex(
   case dwarf::DW_TAG_namelist_item:
     return 6;
   case dwarf::DW_TAG_member:
+    // Whether an in-class static data member declaration occupies a sibling
+    // position varies between units, since producers spell it either
+    // DW_TAG_member or DW_TAG_variable. Naming it by identifier stops it from
+    // shifting the names of the data members after it, which have to match
+    // across units for their types to deduplicate.
+    if (dwarf::toUnsigned(CU.find(DieEntry, dwarf::DW_AT_declaration), 0) &&
+        CU.find(DieEntry, dwarf::DW_AT_name))
+      return std::nullopt;
     return 7;
   default:
     return std::nullopt;

@@ -135,7 +135,8 @@ public:
                                const DWARFDebugInfoEntry *DieEntry);
 
   /// Returns index of the specified child and width of hexadecimal
-  /// representation.
+  /// representation, or std::nullopt for a child that is named after its
+  /// DW_AT_name instead of after its position among its siblings.
   std::optional<std::pair<size_t, size_t>>
   getChildIndex(CompileUnit &CU, const DWARFDebugInfoEntry *ChildDieEntry);
 
