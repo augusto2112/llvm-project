@@ -394,6 +394,14 @@ json::Value ArtifactReport::Render() const {
     O["truncated"] = true;
   if (!Tail.empty())
     O["tail"] = json::Array(Tail);
+
+  // A path alone leaves a reader to discover the shape by opening the file.
+  // Naming the fields is what makes the artifact greppable without reading it,
+  // which is the point of writing it out rather than inlining it.
+  if (!Path.empty()) {
+    O["format"] = "one JSON object per line";
+    O["fields"] = json::Array{"seq", "label", "t_ms", "frame", "values"};
+  }
   return O;
 }
 
@@ -869,6 +877,15 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     SOpts.ArtifactRef = formatv("$artifact#seq={0}", Seq).str();
     json::Value V = SerializeValue(Node, SOpts);
     std::string Text = Compact(V);
+
+    // A scalar serializes to {"value":"7"}, and using that document as the
+    // aggregate's key would spend three quarters of the densest part of the
+    // response on repeated punctuation. Unwrap the one-field case; anything
+    // with structure keeps it, since there the structure is the information.
+    if (const json::Object *Obj = V.getAsObject())
+      if (Obj->size() == 1)
+        if (std::optional<StringRef> Scalar = Obj->getString("value"))
+          Text = Scalar->str();
 
     // The aggregate sees every recorded hit, whatever the emission mode does
     // with the event. That invariant is the whole reason reducing the stream is
