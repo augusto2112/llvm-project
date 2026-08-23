@@ -44,9 +44,8 @@ EventArtifact::Create(uint64_t MaxEvents, uint64_t MaxBytes) {
   if (EC)
     return createFileError(Path, EC);
 
-  return std::unique_ptr<EventArtifact>(
-      new EventArtifact(std::string(Path), std::move(Stream), MaxEvents,
-                        MaxBytes));
+  return std::unique_ptr<EventArtifact>(new EventArtifact(
+      std::string(Path), std::move(Stream), MaxEvents, MaxBytes));
 }
 
 void EventArtifact::Write(const json::Object &Event) {

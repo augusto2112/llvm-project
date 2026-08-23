@@ -5,6 +5,7 @@ add_lldb_unittest(ProtocolTests
   MCPPluginTest.cpp
   MCPServerInfoTest.cpp
   MCPTransportTest.cpp
+  ObservationPlanTest.cpp
   ProtocolMCPTest.cpp
   ProtocolMCPServerTest.cpp
   SerializeValueTest.cpp
