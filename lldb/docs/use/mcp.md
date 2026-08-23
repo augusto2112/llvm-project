@@ -38,7 +38,7 @@ when it disconnects, taking any session it created with it.
 ## Tools
 
 Tools are a primitive in the Model Context Protocol that enable servers to
-expose functionality to clients. `lldb-mcp` exposes four.
+expose functionality to clients. `lldb-mcp` exposes five.
 
 ### `session_create`
 
@@ -63,6 +63,103 @@ you would see in the LLDB command interpreter. It takes:
   command runs in the first session `lldb-mcp` created.
 
 Commands run one at a time and the result comes back when the command finishes.
+
+### `observe`
+
+Runs a program under a set of tracepoints and reports what happened, rather than
+stepping through it. One call launches the program, reads the expressions named
+at each tracepoint, lets the program run to its own end, and returns a summary
+over every hit together with a JSONL file holding the full event stream.
+
+It takes:
+
+- `plan` (required): what to run and what to watch.
+- `debugger` (optional): the URI of the session to run it in.
+
+The plan is nested rather than sitting beside `debugger` because its fields are
+validated as a closed set: a field the plan does not define is an error, and the
+error lists the fields that are accepted. Admitting a non-plan field at that
+level would make that list wrong exactly when someone is relying on it.
+
+A plan describes the program:
+
+```json
+{
+  "plan": {
+    "program": "build/bin/opt",
+    "args": ["-passes=instcombine", "-S", "repro.ll"],
+    "timeout_seconds": 60,
+    "observe": [
+      {
+        "at": "InstCombinerImpl::visitAdd",
+        "capture": ["I.Ty.TypeID", "I.hasNSW"],
+        "emit": "on_change"
+      }
+    ]
+  }
+}
+```
+
+`at` is a function name, or a source location written as `file.cpp:1189`. A
+trailing colon and digits is what tells the two apart, so a qualified name like
+`Foo::bar` keeps its scope operator. An address is refused: it is only
+meaningful inside the run that produced it, so in the next run the same number
+names a different instruction or none at all.
+
+An observation may also carry `when` (a condition), `called_from` (restrict to
+hits reached from another function), `enabled_after` (hold it disabled until
+another observation has been hit), `skip_first`, `only_hit`, `backtrace`,
+`depth`, and `on` set to `entry` or `return`. `emit` is `every_hit`,
+`on_change`, or `first_and_last`.
+
+**An empty `observe` list is crash triage.** The program runs untouched and the
+result is how it ended, with a ranked backtrace, locals and source at the
+failure. That is the shortest useful plan:
+
+```json
+{"plan": {"program": "build/bin/opt", "args": ["-passes=instcombine", "repro.ll"]}}
+```
+
+#### Reading the result
+
+The response carries `outcome` — `exited`, `crashed`, `timed_out` or
+`no_progress` — a `plan_report` per observation, an `aggregate`, a `terminal`
+event, and a pointer to the artifact.
+
+Read `aggregate` first. For each captured expression it gives the distinct
+values with counts, the transitions between them, and `outliers`: the values
+seen only once or twice among many hits. That last field is usually the answer.
+One vector type among four thousand integers, with the hit number where it first
+appeared, is the bug — computed rather than left to be found. Re-run with
+`only_hit` set to that number to record that single hit in full detail; cost
+does not matter at one hit, so captures and backtrace depth can be as generous
+as you like.
+
+`plan_report` keeps four numbers apart on purpose: how many locations the name
+resolved to, how many times the tracepoint was hit, how many of those hits had a
+true condition, and how many events were emitted. A misspelled function name, a
+condition that never held, and code that never ran all produce no events, and
+these numbers are what tell them apart. A name that resolved to nothing comes
+back with the nearest names that do exist.
+
+Events themselves live in the artifact, one JSON object per line, and the
+response reports its path and field names. The last few events are included
+inline only when the program ended badly, which is when they are wanted.
+
+#### Writing a good plan
+
+Prefer a capture written as a path, `I.Ty.TypeID`, over one written as a call,
+`I->getType()`. `->` and `[]` are part of a path. A path is a debug-info lookup
+and a memory read; a call compiles an expression and runs it inside the observed
+process. On a tracepoint hit thousands of times the difference decides whether
+the run finishes, and a call that proves too expensive is measured and switched
+off partway through so the run stays inside its timeout — yielding partial data
+where the path would have yielded all of it. The report says when this happened
+and names the cheaper spelling.
+
+Capture more expressions than seems necessary. A capture costs wall clock once
+per run, not tokens per exchange, and the alternative to capturing something now
+is running the whole program again to ask one more question.
 
 ### `sessions_list`
 
