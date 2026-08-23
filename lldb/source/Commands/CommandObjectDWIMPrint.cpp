@@ -16,6 +16,7 @@
 #include "lldb/Interpreter/CommandReturnObject.h"
 #include "lldb/Interpreter/OptionGroupFormat.h"
 #include "lldb/Interpreter/OptionGroupValueObjectDisplay.h"
+#include "lldb/Target/DWIMValueResolution.h"
 #include "lldb/Target/StackFrame.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/ValueObject/ValueObject.h"
@@ -154,61 +155,46 @@ void CommandObjectDWIMPrint::DoExecute(StringRef command,
     result.SetStatus(eReturnStatusSuccessFinishResult);
   };
 
-  // First, try `expr` as a _limited_ frame variable expression path: only the
-  // dot operator (`.`) is permitted for this case.
+  // Resolve `expr` as a frame variable expression path, then as a persistent
+  // variable, then as a source expression.
   //
-  // This is limited to support only unambiguous expression paths. Of note,
-  // expression paths are not attempted if the expression contain either the
-  // arrow operator (`->`) or the subscript operator (`[]`). This is because
-  // both operators can be overloaded in C++, and could result in ambiguity in
-  // how the expression is handled. Additionally, `*` and `&` are not supported.
-  const bool try_variable_path =
-      expr.find_first_of("*&->[]") == StringRef::npos;
-  if (frame && try_variable_path) {
-    VariableSP var_sp;
-    Status status;
-    auto valobj_sp = frame->GetValueForVariableExpressionPath(
-        expr, eval_options.GetUseDynamic(),
-        StackFrame::eExpressionPathOptionsAllowDirectIVarAccess |
-            StackFrame::eExpressionPathOptionsDisallowGlobals,
-        var_sp, status, lldb::eDILModeSimple);
-    if (valobj_sp && status.Success() && valobj_sp->GetError().Success()) {
-      if (!suppress_result) {
-        if (auto persisted_valobj = valobj_sp->Persist())
-          valobj_sp = persisted_valobj;
-      }
+  // Only the dot operator (`.`) is permitted in the path, so that only
+  // unambiguous paths are taken: `->` and `[]` can be overloaded in C++, which
+  // would let the path parser and the compiler disagree on what an expression
+  // means, and `*` and `&` are ambiguous with binary operators.
+  ValueResolutionOptions resolve_options;
+  resolve_options.AllowPointerPaths = false;
+  resolve_options.TryPersistent = true;
+  resolve_options.SuppressPersistentResult = suppress_result;
+  resolve_options.UseDynamic = eval_options.GetUseDynamic();
+  resolve_options.Language = language;
+  resolve_options.ExprOptions = eval_options;
 
-      if (verbosity == eDWIMPrintVerbosityFull) {
-        StringRef flags;
-        if (args.HasArgs())
-          flags = args.GetArgString();
-        result.AppendNoteWithFormatv("ran `frame variable {0}{1}`", flags,
-                                     expr);
-      }
+  ValueResolution resolved = ResolveValueDWIM(
+      expr, frame, target, m_exe_ctx.GetBestExecutionContextScope(),
+      resolve_options);
 
-      dump_val_object(*valobj_sp);
-      return;
+  if (resolved.Tier == ValueResolutionTier::VariablePath) {
+    if (verbosity == eDWIMPrintVerbosityFull) {
+      StringRef flags;
+      if (args.HasArgs())
+        flags = args.GetArgString();
+      result.AppendNoteWithFormatv("ran `frame variable {0}{1}`", flags, expr);
     }
+
+    dump_val_object(*resolved.Value);
+    return;
   }
 
-  // Second, try `expr` as a persistent variable.
-  if (expr.starts_with("$"))
-    if (auto *state = target.GetPersistentExpressionStateForLanguage(
-            language.AsLanguageType()))
-      if (auto var_sp = state->GetVariable(expr))
-        if (auto valobj_sp = var_sp->GetValueObject()) {
-          dump_val_object(*valobj_sp);
-          return;
-        }
+  if (resolved.Tier == ValueResolutionTier::PersistentVariable) {
+    dump_val_object(*resolved.Value);
+    return;
+  }
 
-  // Third, and lastly, try `expr` as a source expression to evaluate.
+  // What is left came from the expression evaluator, successfully or not.
   {
-    auto *exe_scope = m_exe_ctx.GetBestExecutionContextScope();
-    ValueObjectSP valobj_sp;
-    std::string fixed_expression;
-
-    ExpressionResults expr_result = target.EvaluateExpression(
-        expr, exe_scope, valobj_sp, eval_options, &fixed_expression);
+    ValueObjectSP valobj_sp = resolved.Value;
+    const std::string &fixed_expression = resolved.FixedExpression;
 
     if (valobj_sp)
       result.GetValueObjectList().Append(valobj_sp);
@@ -233,7 +219,7 @@ void CommandObjectDWIMPrint::DoExecute(StringRef command,
     }
 
     // If the expression failed, return an error.
-    if (expr_result != eExpressionCompleted) {
+    if (resolved.Tier != ValueResolutionTier::Expression || !valobj_sp) {
       if (valobj_sp)
         result.SetError(valobj_sp->GetError().Clone());
       else

@@ -14,6 +14,7 @@ lldb_tablegen(TargetProperties.json -dump-json
 add_lldb_library(lldbTarget
   ABI.cpp
   AssertFrameRecognizer.cpp
+  DWIMValueResolution.cpp
   DynamicRegisterInfo.cpp
   CoreFileMemoryRanges.cpp
   ExecutionContext.cpp
