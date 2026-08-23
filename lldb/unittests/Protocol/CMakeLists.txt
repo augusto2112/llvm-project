@@ -1,4 +1,5 @@
 add_lldb_unittest(ProtocolTests
+  EventArtifactTest.cpp
   MCPClientTest.cpp
   MCPErrorTest.cpp
   MCPPluginTest.cpp
