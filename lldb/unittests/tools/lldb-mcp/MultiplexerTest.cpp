@@ -41,11 +41,13 @@ using namespace lldb_mcp;
 namespace {
 
 /// A tool that echoes a label and the debugger argument it received, so tests
-/// can verify both routing and request-path URI rewriting.
+/// can verify both routing and request-path URI rewriting. Every routed tool
+/// takes its debugger argument the same way, so one fake stands in for all of
+/// them under whichever name it is registered.
 class FakeCommandTool : public Tool {
 public:
-  FakeCommandTool(std::string label)
-      : Tool("command", "fake command"), m_label(std::move(label)) {}
+  FakeCommandTool(std::string label, std::string name = "command")
+      : Tool(std::move(name), "fake routed tool"), m_label(std::move(label)) {}
 
   llvm::Expected<CallToolResult> Call(const ToolArguments &args) override {
     std::string debugger;
@@ -173,7 +175,9 @@ public:
     auto pair = TestTransport<ProtocolDescriptor>::createConnectedPair(loop);
 
     auto server = std::make_unique<Server>("fake", "0.1.0");
-    server->AddTool(std::make_unique<FakeCommandTool>(std::move(label)));
+    server->AddTool(std::make_unique<FakeCommandTool>(label));
+    server->AddTool(
+        std::make_unique<FakeCommandTool>(std::move(label), "observe"));
     server->AddTool(std::make_unique<FakeDebuggerListTool>());
     server->AddTool(std::make_unique<FakeDebuggerCreateTool>());
     server->AddTool(std::make_unique<FakeDebuggerDeleteTool>());
@@ -328,9 +332,9 @@ TEST_F(MultiplexerTest, ToolsListIsUnifiedSurface) {
   std::vector<std::string> names;
   for (const ToolDefinition &tool : result->tools)
     names.push_back(tool.name);
-  EXPECT_THAT(names,
-              testing::UnorderedElementsAre("command", "sessions_list",
-                                            "session_create", "session_close"));
+  EXPECT_THAT(names, testing::UnorderedElementsAre(
+                         "command", "observe", "sessions_list",
+                         "session_create", "session_close"));
 }
 
 TEST_F(MultiplexerTest, SessionsListAggregatesAcrossBackends) {
@@ -360,6 +364,32 @@ TEST_F(MultiplexerTest, CommandRoutesByInstance) {
           {"debugger",
            formatv("lldb-mcp://instance/{0}/debugger/1", pid).str()}};
       client->ToolsCall(CallToolParams{"command", json::Value(std::move(args))},
+                        std::move(reply));
+    });
+  };
+
+  llvm::Expected<CallToolResult> a = run(100);
+  ASSERT_THAT_EXPECTED(a, Succeeded());
+  // Routed to backend A, and the debugger URI was rewritten to backend-local.
+  EXPECT_EQ(commandText(*a), "A debugger=lldb-mcp://debugger/1");
+
+  llvm::Expected<CallToolResult> b = run(200);
+  ASSERT_THAT_EXPECTED(b, Succeeded());
+  EXPECT_EQ(commandText(*b), "B debugger=lldb-mcp://debugger/1");
+}
+
+TEST_F(MultiplexerTest, ObserveRoutesByInstance) {
+  AddBackend(100, "A");
+  AddBackend(200, "B");
+  Start();
+
+  auto run = [&](lldb::pid_t pid) {
+    return Capture<CallToolResult>([&](Client::Reply<CallToolResult> reply) {
+      json::Object args{
+          {"plan", json::Object{{"program", "/bin/true"}}},
+          {"debugger",
+           formatv("lldb-mcp://instance/{0}/debugger/1", pid).str()}};
+      client->ToolsCall(CallToolParams{"observe", json::Value(std::move(args))},
                         std::move(reply));
     });
   };

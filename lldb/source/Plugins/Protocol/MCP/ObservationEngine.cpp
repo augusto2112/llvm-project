@@ -1056,9 +1056,15 @@ Error ObservationEngine::Launch() {
   if (!m_plan.CaptureInferiorOutput)
     Info.GetFlags().Set(lldb::eLaunchFlagDisableSTDIO);
 
-  // Stopping at entry is what puts the run under this engine's clock. Launching
-  // straight into the program hands the wait to a call with no timeout, and a
-  // program that hangs would hang the tool with it.
+  // Stopping at entry is what lets the tracepoints be installed before any of
+  // the program runs.
+  //
+  // It does not, however, bound the launch. Target::Launch waits for the first
+  // stop with WaitForProcessToStop(std::nullopt, ...) unconditionally
+  // (Target.cpp:3710), so a program that never reports in hangs here rather
+  // than being cut off by TimeoutSeconds, whose clock only covers the run
+  // itself. Bounding this needs Target::Launch to accept a timeout; until then
+  // a debuggee that cannot start is the one way this tool can hang.
   Info.GetFlags().Set(lldb::eLaunchFlagStopAtEntry);
 
   Status Err = m_target->Launch(Info, /*stream=*/nullptr);

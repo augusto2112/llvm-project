@@ -53,8 +53,8 @@ std::optional<RoutedURI> ParseGlobalURI(llvm::StringRef uri);
 ///
 /// Requests answered locally (initialize, tools/list) are handled directly.
 /// Listing requests (sessions_list, resources/list) fan out to every backend
-/// and aggregate. Targeted requests (command, resources/read) are routed by the
-/// pid parsed from an instance-qualified URI. Session management
+/// and aggregate. Targeted requests (command, observe, resources/read) are
+/// routed by the pid parsed from an instance-qualified URI. Session management
 /// (session_create/session_close) operates on the local backend. Backends only
 /// know their local `lldb-mcp://debugger/{id}` form, so URIs are rewritten in
 /// both directions.
@@ -108,8 +108,12 @@ private:
   /// @{
   void HandleToolsCall(const lldb_protocol::mcp::CallToolParams &params,
                        Reply<lldb_protocol::mcp::CallToolResult> reply);
-  void HandleCommand(const lldb_protocol::mcp::CallToolParams &params,
-                     Reply<lldb_protocol::mcp::CallToolResult> reply);
+  /// Forwards a call to the one backend named by its `debugger` argument,
+  /// rewriting that argument into the backend-local form. An absent or empty
+  /// `debugger` goes to the local backend, which picks its own.
+  void HandleRoutedCall(llvm::StringRef backend_tool,
+                        const lldb_protocol::mcp::CallToolParams &params,
+                        Reply<lldb_protocol::mcp::CallToolResult> reply);
   void HandleSessionsList(Reply<lldb_protocol::mcp::CallToolResult> reply);
   void HandleSessionCreate(Reply<lldb_protocol::mcp::CallToolResult> reply);
   void HandleSessionClose(const lldb_protocol::mcp::CallToolParams &params,

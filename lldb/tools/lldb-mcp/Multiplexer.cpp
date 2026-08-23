@@ -27,6 +27,7 @@ constexpr llvm::StringLiteral kServerName = "lldb-mcp";
 /// Client-facing tool names.
 /// @{
 constexpr llvm::StringLiteral kToolCommand = "command";
+constexpr llvm::StringLiteral kToolObserve = "observe";
 constexpr llvm::StringLiteral kToolSessionsList = "sessions_list";
 constexpr llvm::StringLiteral kToolSessionCreate = "session_create";
 constexpr llvm::StringLiteral kToolSessionClose = "session_close";
@@ -35,6 +36,7 @@ constexpr llvm::StringLiteral kToolSessionClose = "session_close";
 /// Backend tool names, as exposed by the LLDB MCP server.
 /// @{
 constexpr llvm::StringLiteral kBackendToolCommand = "command";
+constexpr llvm::StringLiteral kBackendToolObserve = "observe";
 constexpr llvm::StringLiteral kBackendToolDebuggerList = "debugger_list";
 constexpr llvm::StringLiteral kBackendToolDebuggerCreate = "debugger_create";
 constexpr llvm::StringLiteral kBackendToolDebuggerDelete = "debugger_delete";
@@ -66,6 +68,210 @@ CallToolResult makeTextResult(std::string text) {
   CallToolResult result;
   result.content.emplace_back(TextContent{{std::move(text)}});
   return result;
+}
+
+/// The description of the `observe` tool as a client reads it.
+///
+/// This and observeInputSchema below duplicate lldb_private::mcp::ObserveTool,
+/// which is what an LLDB MCP server serves for the same tool. The multiplexer
+/// owns the client-facing surface and answers tools/list itself, without
+/// reaching into the plugin, so the two copies have to be kept in step. Only
+/// the `debugger` field differs, because a client sees instance-qualified URIs
+/// and a backend does not.
+constexpr llvm::StringLiteral kObserveDescription =
+    "Run a program under a set of tracepoints and report what happened, "
+    "instead of stepping through it. One call launches the program, reads the "
+    "expressions named at each tracepoint, lets the program run to its own "
+    "end, and comes back with a summary over every hit plus a JSONL artifact "
+    "holding the full event stream.\n"
+    "\n"
+    "The plan is the \"plan\" argument. \"debugger\" sits beside it, outside "
+    "the plan, because it selects the session to run in rather than describing "
+    "the run.\n"
+    "\n"
+    "An empty \"observe\" list is crash triage: the program runs untouched, "
+    "and the result is how it ended, with a ranked backtrace, locals and "
+    "source at the failure.\n"
+    "\n"
+    "Prefer a capture that is a path, \"I.Ty.TypeID\", over one that is a "
+    "call, \"I->getType()\"; \"->\" and \"[]\" are part of a path. A path is a "
+    "debug-info lookup and a memory read, while a call compiles and runs code "
+    "inside the observed process. On a hot tracepoint a call is measured and "
+    "turned off partway through the run to keep the run inside its timeout, so "
+    "it yields partial data where the equivalent path would have yielded all "
+    "of it.\n"
+    "\n"
+    "Capture more expressions than you think you need. A capture costs wall "
+    "clock once per run, not tokens per round trip, and the alternative to "
+    "capturing it now is running the whole program again to ask one more "
+    "question.\n"
+    "\n"
+    "Read \"aggregate\" first. Its \"outliers\", the values seen once or twice "
+    "among many hits, are usually the answer. Then re-run with \"only_hit\" "
+    "set to the hit number it named, which records that one hit in full "
+    "detail.";
+
+json::Value schemaField(StringRef type, StringRef description) {
+  return json::Object{{"type", type}, {"description", description}};
+}
+
+json::Value schemaStringArray(StringRef description) {
+  return json::Object{{"type", "array"},
+                      {"items", json::Object{{"type", "string"}}},
+                      {"description", description}};
+}
+
+json::Value schemaEnum(json::Array values, StringRef fallback,
+                       StringRef description) {
+  return json::Object{{"type", "string"},
+                      {"enum", std::move(values)},
+                      {"default", fallback},
+                      {"description", description}};
+}
+
+json::Value schemaNumber(int64_t fallback, StringRef description) {
+  return json::Object{
+      {"type", "integer"}, {"default", fallback}, {"description", description}};
+}
+
+/// The schema of one entry in the plan's "observe" list.
+json::Value observationSchema() {
+  return json::Object{
+      {"type", "object"},
+      {"properties",
+       json::Object{
+           {"at",
+            schemaField("string",
+                        "What to observe: either a function name, or a source "
+                        "location written as \"file.cpp:1189\". An address is "
+                        "rejected because it cannot be carried from one run "
+                        "into the next.")},
+           {"label",
+            schemaField("string",
+                        "Identifies this observation in the report and in "
+                        "another observation's \"enabled_after\". Defaults to "
+                        "\"at\", so it is only worth setting when one function "
+                        "is observed more than once.")},
+           {"on", schemaEnum(json::Array{"entry", "return"}, "entry",
+                             "Whether state is read as the function returns "
+                             "rather than as it is entered.")},
+           {"capture",
+            schemaStringArray(
+                "Expressions to read at each hit. Empty is a bare tracepoint "
+                "recording only hit counts, which already answers whether the "
+                "code runs at all.")},
+           {"when",
+            schemaField("string",
+                        "A condition evaluated at each hit. A hit whose "
+                        "condition is false still counts as a hit, but is "
+                        "neither captured nor emitted.")},
+           {"called_from",
+            schemaField("string", "Restricts the tracepoint to hits reached "
+                                  "from this function.")},
+           {"enabled_after",
+            schemaField("string",
+                        "Holds this observation disabled until the observation "
+                        "carrying this label has been hit.")},
+           {"skip_first",
+            schemaNumber(0, "Hits to ignore before the tracepoint starts "
+                            "recording.")},
+           {"only_hit",
+            schemaField("integer",
+                        "Records a single hit, counting from one. This is the "
+                        "follow-up to an aggregate that named an interesting "
+                        "hit: that one hit comes back in full detail.")},
+           {"emit",
+            schemaEnum(json::Array{"every_hit", "on_change", "first_and_last"},
+                       "every_hit",
+                       "Which hits of this observation reach the event stream. "
+                       "Reducing the stream never loses counts: aggregation "
+                       "runs over every hit regardless of the mode.")},
+           {"backtrace",
+            schemaNumber(0, "Frames of backtrace to record per emitted "
+                            "event.")},
+           {"depth", schemaNumber(2, "Levels of children to expand in each "
+                                     "captured value.")},
+       }},
+      {"required", json::Array{"at"}},
+      {"additionalProperties", false},
+  };
+}
+
+/// The schema of the plan, which carries no MCP arguments of its own and so is
+/// nested under "plan" rather than flattened into the tool's arguments.
+json::Value planSchema() {
+  return json::Object{
+      {"type", "object"},
+      {"description", "What to run and what to observe while it runs."},
+      {"properties",
+       json::Object{
+           {"program", schemaField("string", "The path to the program to "
+                                             "run.")},
+           {"args", schemaStringArray("Arguments passed to the program.")},
+           {"env",
+            json::Object{
+                {"type", "object"},
+                {"additionalProperties", json::Object{{"type", "string"}}},
+                {"description",
+                 "Environment variables set for the program, added to the "
+                 "environment it would otherwise inherit. Values must be "
+                 "strings; a number or boolean is not converted to one."}}},
+           {"cwd", schemaField("string", "The directory to run the program "
+                                         "in.")},
+           {"stdin",
+            schemaField("string", "A path whose contents are fed to the "
+                                  "program's standard input.")},
+           {"capture_inferior_output",
+            json::Object{
+                {"type", "boolean"},
+                {"default", true},
+                {"description",
+                 "Whether the program's own standard output and error are "
+                 "recorded. A program's last line of output is often the only "
+                 "evidence of how far it got, so this is on unless it is "
+                 "turned off."}}},
+           {"timeout_seconds",
+            schemaNumber(30, "Wall-clock ceiling on the whole run. A run that "
+                             "never terminates is a result rather than a "
+                             "failure, so there is always a limit.")},
+           {"no_progress_seconds",
+            schemaField("integer",
+                        "Gives up after this long with no emitted event, and "
+                        "must be shorter than \"timeout_seconds\". Absent "
+                        "leaves the check disarmed, because a plan whose "
+                        "triggers only fire near the end of a run is "
+                        "legitimate and would otherwise be cut short.")},
+           {"observe",
+            json::Object{
+                {"type", "array"},
+                {"items", observationSchema()},
+                {"description",
+                 "The tracepoints. An absent or empty list is a legal plan: it "
+                 "runs the program and reports only how it ended, which is "
+                 "crash triage."}}},
+       }},
+      {"required", json::Array{"program"}},
+      {"additionalProperties", false},
+  };
+}
+
+json::Value observeInputSchema() {
+  return json::Object{
+      {"type", "object"},
+      {"properties",
+       json::Object{
+           {"plan", planSchema()},
+           {"debugger",
+            schemaField(
+                "string",
+                "The debugger URI selecting the debug session to run in, as "
+                "reported by sessions_list, e.g. "
+                "lldb-mcp://instance/{pid}/debugger/{id}. Defaults to the "
+                "local session.")},
+       }},
+      {"required", json::Array{"plan"}},
+      {"additionalProperties", false},
+  };
 }
 
 } // namespace
@@ -237,6 +443,12 @@ Expected<ListToolsResult> Multiplexer::HandleToolsList() {
   };
   result.tools.push_back(std::move(command));
 
+  ToolDefinition observe;
+  observe.name = kToolObserve;
+  observe.description = kObserveDescription;
+  observe.inputSchema = observeInputSchema();
+  result.tools.push_back(std::move(observe));
+
   ToolDefinition sessions_list;
   sessions_list.name = kToolSessionsList;
   sessions_list.description =
@@ -274,7 +486,9 @@ Expected<ListToolsResult> Multiplexer::HandleToolsList() {
 void Multiplexer::HandleToolsCall(const CallToolParams &params,
                                   Reply<CallToolResult> reply) {
   if (params.name == kToolCommand)
-    return HandleCommand(params, std::move(reply));
+    return HandleRoutedCall(kBackendToolCommand, params, std::move(reply));
+  if (params.name == kToolObserve)
+    return HandleRoutedCall(kBackendToolObserve, params, std::move(reply));
   if (params.name == kToolSessionsList)
     return HandleSessionsList(std::move(reply));
   if (params.name == kToolSessionCreate)
@@ -284,8 +498,9 @@ void Multiplexer::HandleToolsCall(const CallToolParams &params,
   reply(createStringError(formatv("no tool \"{0}\"", params.name)));
 }
 
-void Multiplexer::HandleCommand(const CallToolParams &params,
-                                Reply<CallToolResult> reply) {
+void Multiplexer::HandleRoutedCall(StringRef backend_tool,
+                                   const CallToolParams &params,
+                                   Reply<CallToolResult> reply) {
   json::Object args;
   if (params.arguments)
     if (const json::Object *object = params.arguments->getAsObject())
@@ -314,7 +529,7 @@ void Multiplexer::HandleCommand(const CallToolParams &params,
     return reply(createStringError("no debug session available"));
 
   CallToolParams backend_params;
-  backend_params.name = kBackendToolCommand;
+  backend_params.name = backend_tool;
   backend_params.arguments = json::Value(std::move(args));
   backend->ToolsCall(backend_params, std::move(reply));
 }
