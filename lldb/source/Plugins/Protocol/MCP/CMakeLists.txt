@@ -1,6 +1,7 @@
 add_lldb_library(lldbPluginProtocolServerMCP PLUGIN
   Aggregate.cpp
   EventArtifact.cpp
+  ObservationEngine.cpp
   ObservationPlan.cpp
   ProtocolServerMCP.cpp
   Resource.cpp

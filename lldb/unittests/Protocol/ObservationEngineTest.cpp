@@ -1,0 +1,394 @@
+//===-- ObservationEngineTest.cpp -----------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "Plugins/Protocol/MCP/ObservationEngine.h"
+#include "Plugins/Protocol/MCP/ObservationPlan.h"
+#include "lldb/Target/DWIMValueResolution.h"
+#include "llvm/Support/JSON.h"
+#include "gtest/gtest.h"
+#include <chrono>
+#include <optional>
+#include <string>
+#include <vector>
+
+using namespace lldb_private;
+using namespace lldb_private::mcp;
+
+namespace {
+
+using Ms = std::chrono::milliseconds;
+
+EmitDecisionInput Hit(EmitMode Mode, std::optional<std::string> Previous,
+                      std::string Current, uint64_t HitIndex) {
+  EmitDecisionInput In;
+  In.Mode = Mode;
+  In.Previous = std::move(Previous);
+  In.Current = std::move(Current);
+  In.HitIndex = HitIndex;
+  return In;
+}
+
+/// Runs a whole value sequence through the decision, so that a mode is judged
+/// by the stream it produces rather than by one hit in isolation.
+std::vector<EmitDecision>
+Replay(EmitMode Mode, llvm::ArrayRef<std::string> Values,
+       uint32_t SkipFirst = 0, std::optional<uint32_t> OnlyHit = std::nullopt) {
+  std::vector<EmitDecision> Decisions;
+  std::optional<std::string> Previous;
+  for (size_t I = 0; I < Values.size(); ++I) {
+    EmitDecisionInput In = Hit(Mode, Previous, Values[I], I + 1);
+    In.SkipFirst = SkipFirst;
+    In.OnlyHit = OnlyHit;
+    Decisions.push_back(DecideEmit(In));
+    Previous = Values[I];
+  }
+  return Decisions;
+}
+
+CaptureCostInput Cost(Ms Spent, uint64_t ObservedHits, Ms Remaining) {
+  CaptureCostInput In;
+  In.Tier = ValueResolutionTier::Expression;
+  In.Spent = Spent;
+  In.ObservedHits = ObservedHits;
+  In.TotalHits = ObservedHits;
+  In.Remaining = Remaining;
+  In.Expr = "I->getName()";
+  return In;
+}
+
+RawFrame Frame(std::string Function, std::string File, uint32_t Line = 1) {
+  return RawFrame{std::move(Function), std::move(File), Line};
+}
+
+} // namespace
+
+//===----------------------------------------------------------------------===//
+// Emission
+//===----------------------------------------------------------------------===//
+
+TEST(ObservationEngineTest, EveryHitEmitsEveryHit) {
+  EXPECT_EQ(Replay(EmitMode::EveryHit, {"1", "1", "2"}),
+            std::vector<EmitDecision>(
+                {EmitDecision::Emit, EmitDecision::Emit, EmitDecision::Emit}));
+}
+
+TEST(ObservationEngineTest, OnChangeEmitsOnlyTransitions) {
+  // The first hit is a change from nothing having been seen, or a capture that
+  // never varies would look identical to a location that never ran.
+  EXPECT_EQ(Replay(EmitMode::OnChange, {"1", "1", "2", "2", "1"}),
+            std::vector<EmitDecision>({EmitDecision::Emit, EmitDecision::Skip,
+                                       EmitDecision::Emit, EmitDecision::Skip,
+                                       EmitDecision::Emit}));
+}
+
+TEST(ObservationEngineTest, OnChangeEmitsOnceForAConstantCapture) {
+  EXPECT_EQ(Replay(EmitMode::OnChange, {"false", "false", "false"}),
+            std::vector<EmitDecision>(
+                {EmitDecision::Emit, EmitDecision::Skip, EmitDecision::Skip}));
+}
+
+TEST(ObservationEngineTest, FirstAndLastHoldsTheTailWhenNothingChanged) {
+  // The value never changes, and the last hit must still be emitted: a held
+  // decision is what makes "last" reachable, since no hit knows it is the last
+  // one. Every hit past the first holds, so whichever held most recently is the
+  // one flushed when the run ends.
+  std::vector<EmitDecision> Decisions =
+      Replay(EmitMode::FirstAndLast, {"7", "7", "7", "7"});
+  EXPECT_EQ(Decisions, std::vector<EmitDecision>(
+                           {EmitDecision::Emit, EmitDecision::Hold,
+                            EmitDecision::Hold, EmitDecision::Hold}));
+  EXPECT_EQ(Decisions.back(), EmitDecision::Hold);
+}
+
+TEST(ObservationEngineTest, FirstAndLastEmitsTheOnlyHitOnce) {
+  // One hit is both the first and the last, and must not be emitted twice.
+  EXPECT_EQ(Replay(EmitMode::FirstAndLast, {"7"}),
+            std::vector<EmitDecision>({EmitDecision::Emit}));
+}
+
+TEST(ObservationEngineTest, OnlyHitSelectsOneHitAndOverridesTheMode) {
+  EXPECT_EQ(
+      Replay(EmitMode::OnChange, {"1", "1", "1", "1"}, /*SkipFirst=*/0,
+             /*OnlyHit=*/3),
+      std::vector<EmitDecision>({EmitDecision::Skip, EmitDecision::Skip,
+                                 EmitDecision::Emit, EmitDecision::Skip}));
+}
+
+TEST(ObservationEngineTest, OnlyHitIsNumberedPastTheSkippedHits) {
+  // A hit number is one the caller counted in the program, so skipping shifts
+  // which recorded hit carries it rather than renumbering from the first
+  // survivor.
+  EXPECT_EQ(Replay(EmitMode::EveryHit, {"a", "b", "c"}, /*SkipFirst=*/2,
+                   /*OnlyHit=*/3),
+            std::vector<EmitDecision>(
+                {EmitDecision::Emit, EmitDecision::Skip, EmitDecision::Skip}));
+}
+
+TEST(ObservationEngineTest, OnlyHitBeyondTheHitsEmitsNothing) {
+  EXPECT_EQ(
+      Replay(EmitMode::EveryHit, {"a", "b"}, /*SkipFirst=*/0,
+             /*OnlyHit=*/9),
+      std::vector<EmitDecision>({EmitDecision::Skip, EmitDecision::Skip}));
+}
+
+//===----------------------------------------------------------------------===//
+// Expression cost control
+//===----------------------------------------------------------------------===//
+
+TEST(ObservationEngineTest, CostControlKeepsACaptureInsideItsShare) {
+  // Spending exactly a quarter of what is left is inside the budget; the
+  // boundary belongs to the capture.
+  CaptureCostDecision Kept = AssessCaptureCost(Cost(Ms(250), 10, Ms(1000)));
+  EXPECT_FALSE(Kept.Disable);
+  EXPECT_TRUE(Kept.Note.empty());
+  EXPECT_DOUBLE_EQ(Kept.PerHitMs, 25.0);
+}
+
+TEST(ObservationEngineTest, CostControlDisablesACaptureOverItsShare) {
+  CaptureCostDecision Off = AssessCaptureCost(Cost(Ms(251), 10, Ms(1000)));
+  EXPECT_TRUE(Off.Disable);
+  EXPECT_EQ(Off.ObservedHits, 10u);
+  EXPECT_EQ(Off.TotalHits, 10u);
+  EXPECT_DOUBLE_EQ(Off.ProjectedMs, 251.0);
+  EXPECT_FALSE(Off.Note.empty());
+}
+
+TEST(ObservationEngineTest, CostControlNamesTheCheaperPathForm) {
+  CaptureCostDecision Off = AssessCaptureCost(Cost(Ms(900), 3, Ms(1000)));
+  ASSERT_TRUE(Off.Disable);
+  // A note that says only "too slow" leaves the caller to guess the fix.
+  EXPECT_NE(Off.Note.find("I->Name"), std::string::npos);
+}
+
+TEST(ObservationEngineTest, CostControlNeverDisablesAPath) {
+  // A path is a debug-info lookup and a memory read; no measurement makes
+  // turning it off a saving worth the data.
+  CaptureCostInput In = Cost(Ms(10000), 5, Ms(10));
+  In.Tier = ValueResolutionTier::VariablePath;
+  CaptureCostDecision Kept = AssessCaptureCost(In);
+  EXPECT_FALSE(Kept.Disable);
+  EXPECT_TRUE(Kept.Note.empty());
+  // The measurement is still reported, so an expensive path is visible.
+  EXPECT_DOUBLE_EQ(Kept.PerHitMs, 2000.0);
+}
+
+TEST(ObservationEngineTest, CostControlSurvivesAnExhaustedBudget) {
+  CaptureCostDecision Off = AssessCaptureCost(Cost(Ms(1), 1, Ms(0)));
+  EXPECT_TRUE(Off.Disable);
+  EXPECT_DOUBLE_EQ(Off.RemainingMs, 0.0);
+}
+
+TEST(ObservationEngineTest, CostControlSaysNothingWithoutAMeasurement) {
+  CaptureCostDecision Unknown = AssessCaptureCost(Cost(Ms(0), 0, Ms(0)));
+  EXPECT_FALSE(Unknown.Disable);
+  EXPECT_DOUBLE_EQ(Unknown.PerHitMs, 0.0);
+}
+
+TEST(ObservationEngineTest, PathFormOfAGetter) {
+  EXPECT_EQ(SuggestPathForm("I->getName()"),
+            std::optional<std::string>("I->Name"));
+  EXPECT_EQ(SuggestPathForm("a.b.getFoo()"),
+            std::optional<std::string>("a.b.Foo"));
+  EXPECT_EQ(SuggestPathForm("getCount()"), std::optional<std::string>("Count"));
+}
+
+TEST(ObservationEngineTest, PathFormRejectsWhatIsNotAGetter) {
+  // A call with arguments is computing something no member holds, and a bare
+  // `get` names nothing.
+  EXPECT_FALSE(SuggestPathForm("I->getOperand(0)"));
+  EXPECT_FALSE(SuggestPathForm("f()"));
+  EXPECT_FALSE(SuggestPathForm("p->get()"));
+  EXPECT_FALSE(SuggestPathForm("I->getname()"));
+  EXPECT_FALSE(SuggestPathForm("count"));
+  EXPECT_FALSE(SuggestPathForm(""));
+}
+
+//===----------------------------------------------------------------------===//
+// Frame ranking
+//===----------------------------------------------------------------------===//
+
+TEST(ObservationEngineTest, RankingCollapsesRecursion) {
+  // A runaway recursion arrives as one frame repeated until the unwinder gives
+  // up; the count is the information, the repetition is not.
+  std::vector<RawFrame> Raw;
+  for (int I = 0; I < 200; ++I)
+    Raw.push_back(Frame("descend", "/src/tree.cpp", 42));
+  Raw.push_back(Frame("main", "/src/main.cpp", 7));
+
+  std::vector<RankedFrame> Ranked = RankFrames(Raw);
+  ASSERT_EQ(Ranked.size(), 2u);
+  EXPECT_EQ(Ranked[0].Function, "descend");
+  EXPECT_EQ(Ranked[0].Repeats, 200u);
+  EXPECT_EQ(Ranked[1].Function, "main");
+  EXPECT_EQ(Ranked[1].Repeats, 1u);
+}
+
+TEST(ObservationEngineTest, RankingOnlyCollapsesAdjacentFrames) {
+  // Mutual recursion is not one frame repeated, and folding it would claim a
+  // depth the stack does not have.
+  std::vector<RankedFrame> Ranked =
+      RankFrames({Frame("f", "/src/a.cpp"), Frame("g", "/src/a.cpp"),
+                  Frame("f", "/src/a.cpp")});
+  ASSERT_EQ(Ranked.size(), 3u);
+  EXPECT_EQ(Ranked[0].Repeats, 1u);
+  EXPECT_EQ(Ranked[1].Function, "g");
+  EXPECT_EQ(Ranked[2].Function, "f");
+}
+
+TEST(ObservationEngineTest, RankingDemotesSystemFrames) {
+  std::vector<RankedFrame> Ranked = RankFrames(
+      {Frame("__pthread_kill", "/usr/lib/system/libsystem_kernel.dylib.c"),
+       Frame("abort", "/usr/lib/libc.c"),
+       Frame("llvm::report_fatal_error", "/src/llvm/lib/Support/Error.cpp", 12),
+       Frame("MyPass::run", "/src/mypass/Pass.cpp", 88)});
+
+  ASSERT_EQ(Ranked.size(), 4u);
+  // The program's own frames come first and keep their innermost-first order.
+  EXPECT_EQ(Ranked[0].Function, "llvm::report_fatal_error");
+  EXPECT_EQ(Ranked[1].Function, "MyPass::run");
+  EXPECT_FALSE(Ranked[0].IsSystem);
+  EXPECT_TRUE(Ranked[2].IsSystem);
+  EXPECT_TRUE(Ranked[3].IsSystem);
+  // Demotion preserves order within the system frames too.
+  EXPECT_EQ(Ranked[2].Function, "__pthread_kill");
+}
+
+TEST(ObservationEngineTest, RankingDropsFramesWithNoSource) {
+  std::vector<RankedFrame> Ranked =
+      RankFrames({Frame("stub", ""), Frame("MyPass::run", "/src/Pass.cpp", 3),
+                  Frame("thunk", "")});
+  ASSERT_EQ(Ranked.size(), 1u);
+  EXPECT_EQ(Ranked[0].Function, "MyPass::run");
+}
+
+TEST(ObservationEngineTest, RankingKeepsSourcelessFramesWhenThatIsAllThereIs) {
+  // Dropping every frame would report no location at all for a stripped binary,
+  // which is the empty result the design exists to avoid.
+  std::vector<RankedFrame> Ranked =
+      RankFrames({Frame("stub", ""), Frame("thunk", "")});
+  ASSERT_EQ(Ranked.size(), 2u);
+  EXPECT_EQ(Ranked[0].Function, "stub");
+}
+
+TEST(ObservationEngineTest, RankingOfNothingIsNothing) {
+  EXPECT_TRUE(RankFrames({}).empty());
+}
+
+TEST(ObservationEngineTest, SystemPathsAreJudgedByRoot) {
+  EXPECT_TRUE(IsSystemSourcePath("/usr/include/stdio.h"));
+  EXPECT_TRUE(IsSystemSourcePath("/opt/homebrew/include/foo.h"));
+  EXPECT_TRUE(IsSystemSourcePath("/tmp/tc/lib/gcc/x86_64/14/include/x.h"));
+  EXPECT_FALSE(IsSystemSourcePath("/Users/me/src/llvm/lib/IR/Function.cpp"));
+  // A user's own Library directory is not the system one.
+  EXPECT_FALSE(IsSystemSourcePath("/Users/me/Library/proj/main.cpp"));
+  EXPECT_FALSE(IsSystemSourcePath(""));
+}
+
+//===----------------------------------------------------------------------===//
+// Result rendering
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+std::string Render(const llvm::json::Value &V) {
+  std::string S;
+  llvm::raw_string_ostream OS(S);
+  OS << V;
+  return S;
+}
+
+} // namespace
+
+TEST(ObservationEngineTest, ResultAlwaysCarriesAnOutcomeAndATerminalEvent) {
+  // A run with no observations is crash triage, and must not render as an empty
+  // document.
+  ObservationResult Result;
+  Result.Result = Outcome::Crashed;
+  Result.Terminal.Description = "signal SIGSEGV";
+  Result.Terminal.Function = "MyPass::run";
+
+  std::string S = Render(Result.Render());
+  EXPECT_NE(S.find("\"outcome\":\"crashed\""), std::string::npos);
+  EXPECT_NE(S.find("signal SIGSEGV"), std::string::npos);
+  EXPECT_NE(S.find("MyPass::run"), std::string::npos);
+}
+
+TEST(ObservationEngineTest, ReportKeepsTheThreeHitCountsApart) {
+  ObservationReport Report;
+  Report.Label = "visit";
+  Report.At = "visit";
+  Report.ResolvedLocations = 1;
+  Report.Hits = 4012;
+  Report.HasCondition = true;
+  Report.ConditionTrue = 0;
+  Report.ConditionErrors = 4012;
+
+  // "the code never ran", "my condition never fired" and "my condition is not
+  // valid" have to be three different readings of the report.
+  std::string S = Render(Report.Render());
+  EXPECT_NE(S.find("\"hits\":4012"), std::string::npos);
+  EXPECT_NE(S.find("\"condition_true\":0"), std::string::npos);
+  EXPECT_NE(S.find("\"condition_errors\":4012"), std::string::npos);
+}
+
+TEST(ObservationEngineTest, ReportOmitsConditionCountsWithoutACondition) {
+  ObservationReport Report;
+  Report.Hits = 12;
+  std::string S = Render(Report.Render());
+  EXPECT_EQ(S.find("condition_true"), std::string::npos);
+}
+
+TEST(ObservationEngineTest, ReportKeepsAnUnresolvedLocationVisible) {
+  ObservationReport Report;
+  Report.At = "vist";
+  Report.ResolvedLocations = 0;
+  Report.ResolutionError = "no code matched \"vist\". Did you mean \"visit\"?";
+
+  std::string S = Render(Report.Render());
+  EXPECT_NE(S.find("\"resolved_locations\":0"), std::string::npos);
+  EXPECT_NE(S.find("Did you mean"), std::string::npos);
+}
+
+TEST(ObservationEngineTest, PathCaptureCollapsesToItsTier) {
+  CaptureReport Capture;
+  Capture.Expr = "i";
+  Capture.Tier = ValueResolutionTier::VariablePath;
+  Capture.Evaluations = 4012;
+  EXPECT_EQ(Render(Capture.Render()), "\"path\"");
+}
+
+TEST(ObservationEngineTest, DisabledCaptureCarriesItsNumbersAndTheFix) {
+  CaptureReport Capture;
+  Capture.Expr = "I->getName()";
+  Capture.Tier = ValueResolutionTier::Expression;
+  Capture.Evaluations = 10;
+  Capture.TotalMs = 900.0;
+  Capture.Disabled = AssessCaptureCost(Cost(Ms(900), 10, Ms(1000)));
+
+  std::string S = Render(Capture.Render());
+  EXPECT_NE(S.find("\"observed_hits\":10"), std::string::npos);
+  EXPECT_NE(S.find("\"per_hit_ms\":90"), std::string::npos);
+  EXPECT_NE(S.find("I->Name"), std::string::npos);
+}
+
+TEST(ObservationEngineTest, CycleIsReportedWhenOneWasFound) {
+  ObservationResult Result;
+  Result.Result = Outcome::TimedOut;
+  Result.Cycle = CycleReport{2, 40, {"parse", "emit"}};
+
+  std::string S = Render(Result.Render());
+  EXPECT_NE(S.find("\"period\":2"), std::string::npos);
+  EXPECT_NE(S.find("\"repeats\":40"), std::string::npos);
+}
+
+TEST(ObservationEngineTest, TailIsInlinedOnlyWhenTheProgramEndedBadly) {
+  EXPECT_FALSE(IsAbnormal(Outcome::Exited));
+  EXPECT_TRUE(IsAbnormal(Outcome::Crashed));
+  EXPECT_TRUE(IsAbnormal(Outcome::TimedOut));
+  EXPECT_TRUE(IsAbnormal(Outcome::NoProgress));
+}

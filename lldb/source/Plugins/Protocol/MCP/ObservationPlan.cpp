@@ -13,6 +13,7 @@
 #include "lldb/Symbol/SymbolContext.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/ConstString.h"
+#include "lldb/Utility/FileSpec.h"
 #include "lldb/Utility/RegularExpression.h"
 #include "lldb/lldb-enumerations.h"
 #include "lldb/lldb-forward.h"
@@ -657,19 +658,40 @@ lldb_private::mcp::ResolveObservationLocations(ObservationPlan &Plan,
     // Both trigger points resolve to the function's entry. A return
     // observation is derived from the entry hit, which keeps it independent of
     // where a compiler chose to put the epilogue.
-    Resolution.Breakpoint = Tgt.CreateBreakpoint(
-        /*containingModules=*/nullptr, /*containingSourceFiles=*/nullptr,
-        Obs.At.c_str(), lldb::eFunctionNameTypeAuto, lldb::eLanguageTypeUnknown,
-        /*offset=*/0, /*offset_is_insn_count=*/false, eLazyBoolCalculate,
-        /*internal=*/false, /*request_hardware=*/false);
+    if (Obs.AtLine) {
+      Resolution.Breakpoint = Tgt.CreateBreakpoint(
+          /*containingModules=*/nullptr, FileSpec(Obs.At), *Obs.AtLine,
+          /*column=*/0, /*offset=*/0, /*check_inlines=*/eLazyBoolCalculate,
+          eLazyBoolCalculate, /*internal=*/false, /*request_hardware=*/false,
+          /*move_to_nearest_code=*/eLazyBoolCalculate);
+    } else {
+      Resolution.Breakpoint = Tgt.CreateBreakpoint(
+          /*containingModules=*/nullptr, /*containingSourceFiles=*/nullptr,
+          Obs.At.c_str(), lldb::eFunctionNameTypeAuto,
+          lldb::eLanguageTypeUnknown,
+          /*offset=*/0, /*offset_is_insn_count=*/false, eLazyBoolCalculate,
+          /*internal=*/false, /*request_hardware=*/false);
+    }
     if (Resolution.Breakpoint)
       Resolution.ResolvedLocations =
           static_cast<uint32_t>(Resolution.Breakpoint->GetNumLocations());
 
     if (Resolution.ResolvedLocations == 0) {
-      if (!Names)
-        Names = CollectFunctionNames(Tgt);
-      Resolution.Error = DescribeUnresolved(Obs.At, *Names);
+      if (Obs.AtLine) {
+        // Suggesting a similarly-spelled function explains nothing about a
+        // source location, so say what actually goes wrong with one.
+        Resolution.Error =
+            formatv("\"{0}:{1}\" matched no code. Either no line table covers "
+                    "that line, or the file is not part of this program. Check "
+                    "the path as the compiler saw it, or name the enclosing "
+                    "function instead, which does not depend on line numbers.",
+                    Obs.At, *Obs.AtLine)
+                .str();
+      } else {
+        if (!Names)
+          Names = CollectFunctionNames(Tgt);
+        Resolution.Error = DescribeUnresolved(Obs.At, *Names);
+      }
     }
 
     Resolutions.push_back(std::move(Resolution));
