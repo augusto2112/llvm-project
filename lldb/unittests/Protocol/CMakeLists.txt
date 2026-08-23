@@ -6,6 +6,7 @@ add_lldb_unittest(ProtocolTests
   MCPTransportTest.cpp
   ProtocolMCPTest.cpp
   ProtocolMCPServerTest.cpp
+  SerializeValueTest.cpp
 
   LINK_COMPONENTS
     Support
