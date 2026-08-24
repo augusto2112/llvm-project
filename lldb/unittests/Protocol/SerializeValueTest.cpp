@@ -203,3 +203,18 @@ TEST(SerializeValueTest, DistinguishesUnavailabilityKinds) {
   EXPECT_EQ(ToString(SerializeValue(RefB, {})),
             R"({"unavailable":"no_debug_info"})");
 }
+
+TEST(SerializeValueTest, NodeWithChildrenKeepsItsOwnValue) {
+  // A pointer's value is the address and its child is the pointee. For a null
+  // pointer the address is the answer and the child is unreadable because of
+  // it, so reporting only the child loses the more important half.
+  auto Pointee = MakeLeaf("*p", "");
+  Pointee->Avail = Availability::Error;
+  auto Root = MakeLeaf("p", "0x0");
+  Root->Children.push_back(Pointee);
+
+  FakeNodeRef Ref(Root);
+  std::string S = ToString(SerializeValue(Ref, {}));
+  EXPECT_NE(S.find("\"value\":\"0x0\""), std::string::npos) << S;
+  EXPECT_NE(S.find("\"*p\""), std::string::npos) << S;
+}

@@ -108,8 +108,14 @@ constexpr llvm::StringLiteral kObserveDescription =
     "\n"
     "Read \"aggregate\" first. Its \"outliers\", the values seen once or twice "
     "among many hits, are usually the answer. Then re-run with \"only_hit\" "
-    "set to the hit number it named, which records that one hit in full "
-    "detail.";
+    "set to that outlier's \"first_hit\", which records that one hit in full "
+    "detail.\n"
+    "\n"
+    "An outlier carries two numbers because they count different things. "
+    "\"first_hit\" counts that observation's own hits and is what \"only_hit\" "
+    "takes. \"first_seq\" numbers the whole event stream and is what matches a "
+    "line in the artifact. They are equal only when a plan holds a single "
+    "observation.";
 
 json::Value schemaField(StringRef type, StringRef description) {
   return json::Object{{"type", type}, {"description", description}};

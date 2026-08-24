@@ -106,6 +106,15 @@ struct Serializer {
     }
 
     json::Object Out;
+
+    // A node with children may still hold a value of its own: a pointer's value
+    // is the address, and its child is whatever that address points at. Dropping
+    // it in favour of the child loses the more important half — for a null
+    // pointer the address is the whole answer, and the child is unreadable
+    // precisely because of it.
+    if (std::optional<std::string> V = N.GetValueString())
+      Out["value"] = Truncate(std::move(*V), Opts.MaxStringLength);
+
     size_t Emit = std::min<size_t>(NumChildren, Opts.MaxChildren);
     for (size_t I = 0; I < Emit; ++I) {
       std::unique_ptr<ValueNode> Child = N.GetChildAtIndex(I);

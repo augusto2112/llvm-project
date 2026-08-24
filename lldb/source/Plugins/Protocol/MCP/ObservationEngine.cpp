@@ -847,7 +847,8 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
           SOpts.MaxDepth = Obs.Depth;
           json::Value V = SerializeValue(Node, SOpts);
           std::string Text = Compact(V);
-          m_aggregator.Record(Obs.Label, ReturnValueCapture, Text, Seq);
+          m_aggregator.Record(Obs.Label, ReturnValueCapture, Text, Seq,
+                              Site.Recorded);
           Rendered += Text;
           Rendered += CaptureSeparator;
           Values[ReturnValueCapture] = std::move(V);
@@ -890,7 +891,8 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     // The aggregate sees every recorded hit, whatever the emission mode does
     // with the event. That invariant is the whole reason reducing the stream is
     // a saving rather than a loss.
-    m_aggregator.Record(Obs.Label, Capture.Expr, Text, Seq);
+    m_aggregator.Record(Obs.Label, Capture.Expr, Text, Seq,
+                        Site.Recorded);
 
     Rendered += Text;
     Rendered += CaptureSeparator;
@@ -1352,7 +1354,11 @@ Expected<ObservationResult> ObservationEngine::Run() {
                 "reported; the earlier output was dropped.",
                 MaxInferiorOutput)
             .str());
-  m_result.Cycle = DetectCycle(m_tail_labels);
+  // Only for a run that did not finish. A loop is how programs are written, so
+  // reporting one for a program that ran to completion says a normal loop was
+  // the reason it got stuck, which it was not.
+  if (IsAbnormal(m_result.Result))
+    m_result.Cycle = DetectCycle(m_tail_labels);
 
   uint64_t Emitted = 0;
   for (const std::unique_ptr<ObservationSite> &Site : m_sites) {

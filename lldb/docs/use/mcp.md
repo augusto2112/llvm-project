@@ -129,11 +129,16 @@ event, and a pointer to the artifact.
 Read `aggregate` first. For each captured expression it gives the distinct
 values with counts, the transitions between them, and `outliers`: the values
 seen only once or twice among many hits. That last field is usually the answer.
-One vector type among four thousand integers, with the hit number where it first
+One vector type among four thousand integers, with the hit where it first
 appeared, is the bug — computed rather than left to be found. Re-run with
-`only_hit` set to that number to record that single hit in full detail; cost
-does not matter at one hit, so captures and backtrace depth can be as generous
-as you like.
+`only_hit` set to that `first_hit` to record that single hit in full detail;
+cost does not matter at one hit, so captures and backtrace depth can be as
+generous as you like.
+
+An outlier carries two numbers because they count different things.
+`first_hit` counts that observation's own hits and is what `only_hit` takes.
+`first_seq` numbers the whole event stream and is what matches a line in the
+artifact. They are equal only when a plan holds a single observation.
 
 `plan_report` keeps four numbers apart on purpose: how many locations the name
 resolved to, how many times the tracepoint was hit, how many of those hits had a

@@ -25,7 +25,7 @@ using namespace lldb_private::mcp;
 using namespace llvm;
 
 void Aggregator::Record(StringRef Label, StringRef Capture,
-                        StringRef RenderedValue, uint64_t Seq) {
+                        StringRef RenderedValue, uint64_t Seq, uint64_t Hit) {
   CaptureSummary &Summary = m_labels[Label.str()][Capture.str()];
   std::string Rendered = RenderedValue.str();
 
@@ -34,8 +34,10 @@ void Aggregator::Record(StringRef Label, StringRef Capture,
 
   ++Summary.Total;
   ValueStats &Stats = Summary.Values[Rendered];
-  if (Stats.Count == 0)
+  if (Stats.Count == 0) {
     Stats.FirstSeq = Seq;
+    Stats.FirstHit = Hit;
+  }
   ++Stats.Count;
   Summary.Last = std::move(Rendered);
 }
@@ -88,11 +90,13 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
       std::string Rendered;
       uint64_t Count;
       uint64_t FirstSeq;
+      uint64_t FirstHit;
     };
     std::vector<Outlier> Rare;
     for (const auto &[Rendered, Stats] : Summary.Values)
       if (Stats.Count <= MaxOutlierCount)
-        Rare.push_back({Rendered, Stats.Count, Stats.FirstSeq});
+        Rare.push_back(
+            {Rendered, Stats.Count, Stats.FirstSeq, Stats.FirstHit});
 
     // Rarest first, and ties broken by where the value was first seen, so the
     // array never depends on the order the values happen to be stored in.
@@ -106,6 +110,7 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
       for (const Outlier &Value : Rare)
         Outliers.push_back(json::Object{{"value", Value.Rendered},
                                         {"count", Value.Count},
+                                        {"first_hit", Value.FirstHit},
                                         {"first_seq", Value.FirstSeq}});
       Out["outliers"] = std::move(Outliers);
     }

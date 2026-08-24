@@ -33,8 +33,13 @@ public:
   /// rendering decides what counts as a change: one carrying an address or a
   /// timestamp makes every hit a transition. Hits are expected in run order,
   /// since transitions chain consecutive calls.
+  /// \p Seq numbers the whole event stream, which is how a transition is
+  /// matched to a line in the artifact. \p Hit numbers this observation's own
+  /// hits, which is what only_hit takes: the two differ as soon as a plan holds
+  /// more than one observation, and an outlier reports the hit so that acting
+  /// on it lands on the hit it named.
   void Record(llvm::StringRef Label, llvm::StringRef Capture,
-              llvm::StringRef RenderedValue, uint64_t Seq);
+              llvm::StringRef RenderedValue, uint64_t Seq, uint64_t Hit);
 
   /// Renders an object of labels, each an object of captures.
   ///
@@ -71,6 +76,7 @@ private:
     /// The sequence number of the hit that first showed this value, which is
     /// where a reader goes to see a rare one in context.
     uint64_t FirstSeq = 0;
+    uint64_t FirstHit = 0;
   };
 
   /// A change of value, attributed to the hit that first showed the new one.
