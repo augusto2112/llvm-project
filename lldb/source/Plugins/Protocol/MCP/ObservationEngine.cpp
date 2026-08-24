@@ -967,6 +967,12 @@ constexpr StringLiteral VoidValue = "(void)";
 /// one.
 constexpr size_t MaxTerminalFrames = 16;
 
+/// Per-hit capture tuples kept for a comparison. A tuple is the run's own record
+/// of what a hit saw, and four thousand of them is enough to find where two runs
+/// diverge in every case observed; past that the count of what was not kept is
+/// what stops "identical" from overclaiming.
+constexpr size_t MaxComparedHits = 4096;
+
 /// Locals the terminal event reports.
 constexpr size_t MaxTerminalLocals = 32;
 
@@ -1026,10 +1032,6 @@ constexpr size_t MaxTailLabels = MaxCyclePeriod * 8;
 /// here, so the slice bounds how late a hang is reported.
 constexpr Micros WaitSlice = std::chrono::milliseconds(200);
 
-/// Separates one capture's rendering from the next in the tuple an emission
-/// mode compares. A control character cannot occur inside a rendered value, so
-/// two different tuples cannot join into one identical string.
-constexpr char CaptureSeparator = '\x1f';
 
 
 bool TracepointHit(void *Baton, StoppointCallbackContext *Ctx, lldb::user_id_t,
@@ -1427,7 +1429,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
           std::string Text = AggregateKey(V);
           m_aggregator.Record(Obs.Label, ReturnValueCapture, Text, Seq, Hit);
           Rendered += Text;
-          Rendered += CaptureSeparator;
+          Rendered += CaptureTupleSeparator;
           Values[ReturnValueCapture] = std::move(V);
         }
       }
@@ -1501,7 +1503,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     m_aggregator.Record(Obs.Label, Capture.Expr, Text, Seq, Hit);
 
     Rendered += Text;
-    Rendered += CaptureSeparator;
+    Rendered += CaptureTupleSeparator;
     Values[Capture.Expr] = std::move(V);
 
     CaptureCostInput Cost;
@@ -1521,6 +1523,18 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
   m_tail_labels.push_back(Obs.Label);
   if (m_tail_labels.size() > MaxTailLabels)
     m_tail_labels.erase(m_tail_labels.begin());
+
+  // Kept per hit so that two runs of one plan can be compared hit by hit, which
+  // is where the answer is: the hit at which they stopped agreeing. Bounded,
+  // because a run of millions of hits would otherwise hold all of them, and the
+  // bound is reported rather than assumed so that "they agreed" cannot mean "they
+  // agreed as far as anyone looked".
+  if (ObservationReport *Report = ReportFor(Obs.Label)) {
+    if (Report->HitTuples.size() < MaxComparedHits)
+      Report->HitTuples.push_back(Rendered);
+    else
+      ++Report->HitTuplesDropped;
+  }
 
   EmitDecisionInput Decision;
   Decision.Mode = Obs.Emit;
@@ -1843,6 +1857,13 @@ void ObservationEngine::SampleStacks(Process &P) {
     }
     m_profile.Record(T->GetID(), Frames);
   }
+}
+
+ObservationReport *ObservationEngine::ReportFor(StringRef Label) {
+  for (ObservationReport &Report : m_result.Observations)
+    if (Report.Label == Label)
+      return &Report;
+  return nullptr;
 }
 
 void ObservationEngine::DrainInferiorOutput() {

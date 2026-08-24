@@ -23,6 +23,7 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSet.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
@@ -57,6 +58,13 @@ constexpr StringRef PlanFields[] = {
     "observe",
     "timeout_seconds",
     "no_progress_seconds",
+    "compare",
+};
+
+/// The fields one entry of `compare` may carry: a label and the parts of a plan
+/// that may differ between runs. The tracepoints are deliberately not among them.
+constexpr StringRef VariantFields[] = {
+    "label", "program", "args", "env", "cwd", "stdin",
 };
 
 constexpr StringRef ObservationFields[] = {
@@ -676,6 +684,69 @@ StringRef lldb_private::mcp::ToString(EmitMode Mode) {
   llvm_unreachable("unhandled EmitMode");
 }
 
+namespace {
+
+/// Parses one entry of `compare`.
+Expected<RunVariant> ParseRunVariant(const json::Value &Value, size_t Index) {
+  const json::Object *Obj = Value.getAsObject();
+  const std::string Where = formatv("plan: compare[{0}]", Index).str();
+  if (!Obj)
+    return createStringError(
+        formatv("{0} must be an object carrying \"label\" and the plan fields "
+                "that differ in this run.",
+                Where));
+  if (Error E = UnrecognizedFields(*Obj, VariantFields, Where))
+    return std::move(E);
+
+  RunVariant Result;
+  Expected<std::optional<std::string>> Label =
+      GetNonEmptyString(*Obj, "label", Where);
+  if (!Label)
+    return Label.takeError();
+  if (!*Label)
+    return createStringError(
+        formatv("{0}: \"label\" is required, because every result of a "
+                "comparison is keyed on it.",
+                Where));
+  Result.Label = std::move(**Label);
+
+  Expected<std::optional<std::string>> Program =
+      GetNonEmptyString(*Obj, "program", Where);
+  if (!Program)
+    return Program.takeError();
+  Result.Program = std::move(*Program);
+
+  if (Obj->get("args")) {
+    Expected<std::vector<std::string>> Args =
+        GetStringArray(*Obj, "args", Where);
+    if (!Args)
+      return Args.takeError();
+    Result.Args = std::move(*Args);
+  }
+
+  if (Obj->get("env")) {
+    Expected<StringMap<std::string>> Env = GetEnv(*Obj, Where);
+    if (!Env)
+      return Env.takeError();
+    Result.Env = std::move(*Env);
+  }
+
+  Expected<std::optional<std::string>> Cwd =
+      GetNonEmptyString(*Obj, "cwd", Where);
+  if (!Cwd)
+    return Cwd.takeError();
+  Result.Cwd = std::move(*Cwd);
+
+  Expected<std::optional<std::string>> Stdin =
+      GetNonEmptyString(*Obj, "stdin", Where);
+  if (!Stdin)
+    return Stdin.takeError();
+  Result.Stdin = std::move(*Stdin);
+  return Result;
+}
+
+} // namespace
+
 Expected<ObservationPlan>
 lldb_private::mcp::ParseObservationPlan(const json::Value &Plan) {
   const json::Object *Obj = Plan.getAsObject();
@@ -770,7 +841,60 @@ lldb_private::mcp::ParseObservationPlan(const json::Value &Plan) {
   if (Error E = CheckLabels(Result.Observations))
     return std::move(E);
 
+  if (const json::Value *Compare = Obj->get("compare")) {
+    const json::Array *Array = Compare->getAsArray();
+    if (!Array)
+      return createStringError(
+          "plan: \"compare\" must be an array of runs, each a label and the "
+          "fields of the plan that differ in it: [{\"label\": \"fixed\"}, "
+          "{\"label\": \"before\", \"program\": \"/tmp/opt.before\"}]. Leave it "
+          "out to make the single run the plan describes.");
+    if (Array->size() == 1)
+      return createStringError(
+          "plan: \"compare\" holds one run, so there is nothing to compare it "
+          "with. Leave it out for a single run, or name the run to compare "
+          "against.");
+    if (Array->size() > MaxComparedRuns)
+      return createStringError(
+          formatv("plan: \"compare\" holds {0} runs and at most {1} are made in "
+                  "one call. Each is a launch and a debug-info read under the "
+                  "plan's timeout, so a longer series is a series of calls whose "
+                  "results are read one at a time.",
+                  Array->size(), MaxComparedRuns));
+
+    StringSet<> Labels;
+    for (size_t I = 0; I < Array->size(); ++I) {
+      Expected<RunVariant> Variant = ParseRunVariant((*Array)[I], I);
+      if (!Variant)
+        return Variant.takeError();
+      if (!Labels.insert(Variant->Label).second)
+        return createStringError(
+            formatv("plan: two runs in \"compare\" are labelled \"{0}\". Every "
+                    "result is keyed on the label, so they have to differ.",
+                    Variant->Label));
+      Result.Compare.push_back(std::move(*Variant));
+    }
+  }
+
   return Result;
+}
+
+ObservationPlan
+lldb_private::mcp::ObservationPlan::WithVariant(const RunVariant &Variant) const {
+  ObservationPlan Out = *this;
+  if (Variant.Program)
+    Out.Program = *Variant.Program;
+  if (Variant.Args)
+    Out.Args = *Variant.Args;
+  if (Variant.Env)
+    Out.Env = *Variant.Env;
+  if (Variant.Cwd)
+    Out.Cwd = Variant.Cwd;
+  if (Variant.Stdin)
+    Out.Stdin = Variant.Stdin;
+  // Each run is made on its own, so the variants do not carry over into it.
+  Out.Compare.clear();
+  return Out;
 }
 
 std::vector<LocationResolution>

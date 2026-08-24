@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Tool.h"
+#include "Comparison.h"
 #include "ObservationEngine.h"
 #include "ObservationPlan.h"
 #include "lldb/Core/Debugger.h"
@@ -35,6 +36,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include <vector>
 
 using namespace lldb_private;
 using namespace lldb_protocol;
@@ -397,16 +399,43 @@ ObserveTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   if (!debugger_sp)
     return debugger_sp.takeError();
 
-  ObservationEngine engine(**debugger_sp, std::move(*plan));
-  Expected<ObservationResult> result = engine.Run();
-  if (!result)
-    return result.takeError();
-
-  // A run that crashed, hung or observed nothing is the answer rather than a
-  // failure, so the outcome is reported in the document and not as an error.
   std::string output;
   raw_string_ostream os(output);
-  os << result->Render();
+
+  if (plan->Compare.empty()) {
+    ObservationEngine engine(**debugger_sp, std::move(*plan));
+    Expected<ObservationResult> result = engine.Run();
+    if (!result)
+      return result.takeError();
+
+    // A run that crashed, hung or observed nothing is the answer rather than a
+    // failure, so the outcome is reported in the document and not as an error.
+    os << result->Render();
+    return createTextResult(std::move(output));
+  }
+
+  // Sequentially, because one debugger drives one process at a time, and because
+  // runs made at once would compete for the machine and perturb the timings a
+  // profile and a timeout are read against.
+  std::vector<ComparedRun> runs;
+  runs.reserve(plan->Compare.size());
+  for (const RunVariant &variant : plan->Compare) {
+    ComparedRun run;
+    run.Label = variant.Label;
+    ObservationEngine engine(**debugger_sp, plan->WithVariant(variant));
+    Expected<ObservationResult> result = engine.Run();
+    if (result) {
+      run.Result = std::move(*result);
+    } else {
+      // A run that could not be made is a row in the comparison rather than the
+      // end of the call: the others still answer, and a change that stops the
+      // program from starting is itself the difference being looked for.
+      run.Error = toString(result.takeError());
+    }
+    runs.push_back(std::move(run));
+  }
+
+  os << CompareRuns(runs);
   return createTextResult(std::move(output));
 }
 

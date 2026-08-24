@@ -384,3 +384,74 @@ TEST(ObservationPlanTest, SourceLineCountsFromOne) {
   EXPECT_NE(llvm::toString(Plan.takeError()).find("count from 1"),
             std::string::npos);
 }
+
+//===----------------------------------------------------------------------===//
+// Comparing runs
+//===----------------------------------------------------------------------===//
+
+TEST(ObservationPlanTest, CompareCarriesTheRunsAndTheirOverrides) {
+  llvm::Expected<ObservationPlan> Plan = Parse(R"({
+      "program": "/bin/opt",
+      "args": ["-S", "in.ll"],
+      "compare": [{"label": "fixed"},
+                  {"label": "before", "program": "/tmp/opt.before",
+                   "args": ["-S", "other.ll"]}]
+  })");
+  ASSERT_TRUE(static_cast<bool>(Plan)) << llvm::toString(Plan.takeError());
+  ASSERT_EQ(Plan->Compare.size(), 2u);
+  EXPECT_EQ(Plan->Compare[0].Label, "fixed");
+  EXPECT_FALSE(Plan->Compare[0].Program.has_value());
+
+  // A variant is the plan with fields replaced, so what it does not name it
+  // inherits -- which is what keeps the tracepoints and the timeout the same
+  // across the runs being compared.
+  const ObservationPlan Fixed = Plan->WithVariant(Plan->Compare[0]);
+  EXPECT_EQ(Fixed.Program, "/bin/opt");
+  EXPECT_EQ(Fixed.Args, std::vector<std::string>({"-S", "in.ll"}));
+  EXPECT_TRUE(Fixed.Compare.empty());
+
+  const ObservationPlan Before = Plan->WithVariant(Plan->Compare[1]);
+  EXPECT_EQ(Before.Program, "/tmp/opt.before");
+  EXPECT_EQ(Before.Args, std::vector<std::string>({"-S", "other.ll"}));
+}
+
+TEST(ObservationPlanTest, OneRunIsNotAComparison) {
+  EXPECT_THAT(
+      Rejection(R"({"program": "/bin/opt", "compare": [{"label": "only"}]})"),
+      HasSubstr("nothing to compare it with"));
+}
+
+TEST(ObservationPlanTest, RunsNeedLabelsAndTheyHaveToDiffer) {
+  EXPECT_THAT(Rejection(R"({"program": "/bin/opt",
+      "compare": [{"label": "a"}, {"program": "/tmp/b"}]})"),
+              HasSubstr("\"label\" is required"));
+
+  EXPECT_THAT(Rejection(R"({"program": "/bin/opt",
+      "compare": [{"label": "a"}, {"label": "a", "program": "/tmp/b"}]})"),
+              HasSubstr("labelled \"a\""));
+}
+
+TEST(ObservationPlanTest, AVariantMayNotCarryTracepointsOrATimeout) {
+  // Varying the observations would produce reports with nothing to line up, and
+  // varying the timeout would make the runs incomparable in the dimension a
+  // comparison is most often about.
+  EXPECT_THAT(Rejection(R"({"program": "/bin/opt",
+      "compare": [{"label": "a"}, {"label": "b", "observe": [{"at": "f"}]}]})"),
+              HasSubstr("observe"));
+
+  EXPECT_THAT(Rejection(R"({"program": "/bin/opt",
+      "compare": [{"label": "a"}, {"label": "b", "timeout_seconds": 90}]})"),
+              HasSubstr("timeout_seconds"));
+}
+
+TEST(ObservationPlanTest, TooManyRunsIsRefusedWithTheReason) {
+  std::string Runs;
+  for (size_t I = 0; I <= MaxComparedRuns; ++I) {
+    if (I)
+      Runs += ",";
+    Runs += "{\"label\": \"r" + std::to_string(I) + "\"}";
+  }
+  EXPECT_THAT(Rejection("{\"program\": \"/bin/opt\", \"compare\": [" + Runs +
+                        "]}"),
+              HasSubstr("at most"));
+}

@@ -56,6 +56,12 @@ llvm::StringRef ToString(Outcome O);
 /// is read through its aggregate.
 bool IsAbnormal(Outcome O);
 
+/// Separates one capture's rendering from the next in the tuple a hit is recorded
+/// as. A control character cannot occur inside a rendered value, so two different
+/// tuples cannot join into one identical string -- which is what lets an emission
+/// mode and a comparison both decide "the same hit" by comparing text.
+constexpr char CaptureTupleSeparator = '\x1f';
+
 /// Events inlined in the response when the program ended abnormally. Enough to
 /// show what the program was doing as it died, few enough to leave the response
 /// dominated by the aggregate.
@@ -501,6 +507,18 @@ struct ObservationReport {
 
   std::vector<CaptureReport> Captures;
 
+  /// What each hit saw, in order: the captures of that hit rendered as one
+  /// string, which is the same tuple an emission mode compares against the
+  /// previous hit.
+  ///
+  /// Kept for comparing two runs of one plan, where the answer is the hit at
+  /// which they stopped agreeing, and never rendered on its own: a run's own
+  /// report already says everything these hold, in the aggregate. Bounded, with
+  /// the overflow counted, because "the runs agreed" must not be able to mean
+  /// "they agreed as far as anything was kept".
+  std::vector<std::string> HitTuples;
+  uint64_t HitTuplesDropped = 0;
+
   llvm::json::Value Render() const;
 };
 
@@ -691,6 +709,9 @@ private:
   /// left behind holds this run's breakpoints, and in a session somebody else
   /// is using it also outlives the call that made it.
   void Teardown();
+
+  /// The report for \p Label, or null when the plan holds no such observation.
+  ObservationReport *ReportFor(llvm::StringRef Label);
 
   /// Records that the plan saw the program move. The stall ceiling is measured
   /// against this rather than against the event stream, because a mode that

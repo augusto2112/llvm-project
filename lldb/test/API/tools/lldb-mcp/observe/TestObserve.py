@@ -859,6 +859,80 @@ class ObserveTestCase(TestBase):
         # every long run as a crash.
         self.assertEqual(document["outcome"], "timed_out", str(document))
 
+    def test_two_identical_runs_report_nothing_diverged(self):
+        """The answer to "did anything move" is a list of what did not."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "record_value", "capture": ["value"]}],
+                "compare": [{"label": "left"}, {"label": "right"}],
+            }
+        )
+
+        # One document rather than one per run: a caller handed two reports has to
+        # diff them itself, which is the work this exists to do.
+        self.assertEqual(len(document["runs"]), 2, str(document))
+        self.assertNotIn("diverged", document, str(document))
+        self.assertNotIn("first_divergent_hit", document, str(document))
+        self.assertIn("record_value.hits", document["agreed"], str(document))
+        self.assertIn("outcome", document["agreed"], str(document))
+
+    def test_runs_that_differ_report_what_differed_and_name_the_rest(self):
+        """A tracepoint hit in one run and not the other is the commonest
+        difference there is, and silence about it would read as agreement."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "record_value", "capture": ["value"]}],
+                # `churn` returns before the loop that calls record_value, so the
+                # tracepoint resolves in both runs and fires in only one.
+                "compare": [{"label": "traced"}, {"label": "churned",
+                                                  "args": ["churn"]}],
+            }
+        )
+
+        hits = document["diverged"]["record_value.hits"]
+        self.assertEqual(hits["traced"], "100", str(document))
+        self.assertEqual(hits["churned"], "0", str(document))
+
+        # The name resolved in both, so that is not what differs -- and saying so
+        # is what tells a reader the difference is the code path and not the build.
+        self.assertIn("record_value.resolved_locations", document["agreed"],
+                      str(document))
+
+        rows = {run["label"]: run for run in document["runs"]}
+        self.assertEqual(rows["traced"]["hits"]["record_value"], 100)
+        self.assertEqual(rows["churned"]["hits"]["record_value"], 0)
+
+    def test_a_run_that_cannot_be_made_is_a_row_in_the_comparison(self):
+        """A change that stops the program from starting is the difference being
+        looked for, so the runs that did work still have to answer."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "record_value"}],
+                "compare": [
+                    {"label": "there"},
+                    {"label": "gone", "program": self.getBuildArtifact("no.out")},
+                ],
+            }
+        )
+
+        rows = {run["label"]: run for run in document["runs"]}
+        self.assertEqual(rows["there"]["outcome"], "exited", str(document))
+        self.assertIn("error", rows["gone"], str(document))
+        # Nothing is called agreed when one side said nothing at all.
+        self.assertNotIn("agreed", document, str(document))
+
     def test_a_program_that_ends_before_a_sample_is_due_has_no_profile(self):
         """A section that says nothing is worse than no section."""
         self.build()

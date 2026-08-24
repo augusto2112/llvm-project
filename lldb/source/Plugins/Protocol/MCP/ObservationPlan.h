@@ -81,6 +81,26 @@ struct Observation {
   uint32_t Depth = 2;
 };
 
+/// One run of a plan, as a set of overrides on it.
+///
+/// A comparison holds the tracepoints still and varies what is run under them,
+/// because that is the shape of every question worth asking twice: the same input
+/// under the binary before and after a change, or the same binary over the input
+/// that fails and the one that does not. Varying the observations instead would
+/// produce two reports with nothing to line up.
+struct RunVariant {
+  /// Names this run in the report. Required, because the whole output is keyed on
+  /// it and a positional index would be unreadable.
+  std::string Label;
+
+  /// Each unset field is taken from the plan.
+  std::optional<std::string> Program;
+  std::optional<std::vector<std::string>> Args;
+  std::optional<llvm::StringMap<std::string>> Env;
+  std::optional<std::string> Cwd;
+  std::optional<std::string> Stdin;
+};
+
 struct ObservationPlan {
   std::string Program;
   std::vector<std::string> Args;
@@ -109,7 +129,21 @@ struct ObservationPlan {
   /// An empty list is a legal plan: it runs the program and reports how it
   /// ended, which is crash triage.
   std::vector<Observation> Observations;
+
+  /// Runs to make and compare, or empty for the single run the plan describes.
+  ///
+  /// Bounded because each entry is a whole run: the debug info of a binary that
+  /// has not been read yet, then the program, under the timeout the plan gives.
+  std::vector<RunVariant> Compare;
+
+  /// Applies \p Variant to a copy of this plan.
+  ObservationPlan WithVariant(const RunVariant &Variant) const;
 };
+
+/// Runs one `compare` may ask for. Each is a launch and a debug-info read, so a
+/// list of them is a multiple of a call's cost, and a caller that wants a scaling
+/// series of twenty wants twenty calls it can read one at a time.
+constexpr size_t MaxComparedRuns = 4;
 
 /// Parses and validates a plan. A field the schema does not define is an error
 /// rather than a default: a silently ignored field is indistinguishable in the

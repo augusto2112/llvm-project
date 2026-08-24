@@ -160,6 +160,45 @@ whether a particular function is. A `cycle`, on the other hand, needs tracepoint
 to emit the events it is found in, so run it again with an observation on each
 function the profile or the backtrace named to get the repeating block.
 
+#### Comparing two runs
+
+`compare` holds the runs to make, each one the plan with a few fields replaced:
+
+```json
+{"plan": {"program": "build/bin/opt",
+          "args": ["-passes=vector-combine", "-S", "in.ll"],
+          "observe": [{"at": "foldShuffleToIdentity", "capture": ["I->Name"]}],
+          "compare": [{"label": "fixed"},
+                      {"label": "before", "program": "/tmp/opt.before"}]}}
+```
+
+The tracepoints are held still and what runs under them varies, because that is the
+shape of every question worth asking twice: the same input under the binary before
+and after a change, or the same binary over the input that fails and the one that
+does not. A variant may replace `program`, `args`, `env`, `cwd` and `stdin`, and
+nothing else — varying the observations would produce reports with nothing to line
+up, and varying the timeout would make the runs incomparable in the dimension a
+comparison is most often about. Runs are made one at a time, since one debugger
+drives one process, and at most four in a call: each is a launch and a debug-info
+read, so a longer series is a series of calls whose answers are read one at a time.
+
+The response is the differences rather than one report per run. `runs` is a row per
+run — how it ended, how long it took, its hit counts — and then:
+
+- `diverged` names each thing that differed and what each run said about it.
+- `first_divergent_hit` is the hit at which two runs stopped agreeing, with what
+  each saw there keyed by capture. For a miscompile that is the answer: everything
+  before it is the same computation and everything after is a consequence. When one
+  run simply got further, that is not a disagreement about any hit and it says
+  `identical_through` instead. The comparison is over the hits each run kept, and
+  says when there were more than that.
+- `agreed` is a list of **names**, not values: the answer to "did my change affect
+  anything else" is a line rather than a diffing exercise.
+
+A run that could not be made at all is a row carrying its error, and the other runs
+still answer — a change that stops the program from starting is the difference being
+looked for, not a reason to fail the call.
+
 #### Sampled stacks
 
 `profile` appears for a run long enough for a sample to be due and sampled at least

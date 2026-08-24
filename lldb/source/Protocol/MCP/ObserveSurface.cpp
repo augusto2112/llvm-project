@@ -170,6 +170,46 @@ json::Value lldb_protocol::mcp::ObservationPlanSchema() {
                  "The tracepoints. An absent or empty list is a legal plan: it "
                  "runs the program and reports only how it ended, which is "
                  "crash triage."}}},
+           {"compare",
+            json::Object{
+                {"type", "array"},
+                {"items",
+                 json::Object{
+                     {"type", "object"},
+                     {"properties",
+                      json::Object{
+                          {"label",
+                           schemaField("string",
+                                       "Names this run in the report. Every "
+                                       "result is keyed on it.")},
+                          {"program", schemaField("string", "Overrides the "
+                                                            "plan's program.")},
+                          {"args", schemaStringArray("Overrides the plan's "
+                                                     "arguments.")},
+                          {"env",
+                           json::Object{
+                               {"type", "object"},
+                               {"additionalProperties",
+                                json::Object{{"type", "string"}}},
+                               {"description", "Overrides the plan's "
+                                               "environment."}}},
+                          {"cwd", schemaField("string", "Overrides the plan's "
+                                                        "directory.")},
+                          {"stdin", schemaField("string", "Overrides the plan's "
+                                                          "standard input.")},
+                      }},
+                     {"required", json::Array{"label"}},
+                     {"additionalProperties", false},
+                 }},
+                {"description",
+                 "Runs to make and compare, each one this plan with these fields "
+                 "replaced: the same tracepoints over the binary before and "
+                 "after a change, or over the input that fails and the one that "
+                 "does not. The response is the differences rather than one "
+                 "report per run -- how each ended, the hits and values that "
+                 "disagreed, the first hit at which they stopped agreeing, and "
+                 "the names of everything that matched. Leave it out for a "
+                 "single run."}}},
        }},
       {"required", json::Array{"program"}},
       {"additionalProperties", false},

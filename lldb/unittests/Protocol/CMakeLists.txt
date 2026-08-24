@@ -1,5 +1,6 @@
 add_lldb_unittest(ProtocolTests
   AggregateTest.cpp
+  ComparisonTest.cpp
   EventArtifactTest.cpp
   MCPClientTest.cpp
   MCPErrorTest.cpp
