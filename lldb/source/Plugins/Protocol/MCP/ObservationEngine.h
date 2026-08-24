@@ -365,6 +365,14 @@ public:
   /// found in, and past a handful the tail is noise however long the run.
   static constexpr size_t MaxHot = 8;
 
+  /// The share of the samples the busiest place has to hold, as a reciprocal,
+  /// before naming the places individually says anything. Where self time is spread
+  /// thinner than this, one entry stands for the list: measured on a compiler
+  /// looping inside one analysis, eight accessors holding one or two samples each
+  /// of nineteen, with nine more elided, beside a covering path that named the
+  /// function responsible.
+  static constexpr uint64_t MinHotShareDivisor = 8;
+
   /// Frames of the covering path reported. The innermost are kept: a deep path in
   /// a compiler is mostly the pass manager that every stack ends in, and what
   /// distinguishes this run from any other is at the other end.

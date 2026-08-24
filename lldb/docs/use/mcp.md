@@ -165,9 +165,18 @@ free-running run that gets one.
 sample, which is self time rather than time on the stack. Frames that resolved to
 source come first: a thread parked in a wait is sampled as often as one burning a
 core and its innermost frame is the same every time, so counting alone reports the
-idle thread as the hottest place in the program. `under` is the path the top entry
-was reached by, shared across its own samples. `tid` and `threads` appear only for
-a program that had more than one thread to tell apart.
+idle thread as the hottest place in the program. Where no place holds a share of the
+run, one entry stands for the list — in an unoptimized build self time scatters over
+inlined accessors, and which of them was innermost is a fact about a getter rather
+than about the program.
+
+`under` is where the run was: the functions on the stack for at least half the
+busiest thread's samples, innermost first. That is the field to read for a program
+that is stuck. A function can be there without ever being a leaf, which is the usual
+case — measured on a compiler looping inside one analysis, the function responsible
+appeared in every sample and was the innermost frame of none. A recursive function
+counts once per sample rather than once per frame. `tid` and `threads` appear only
+for a program that had more than one thread to tell apart.
 
 Sampling means stopping the program, which costs a round trip to the debug stub
 each way — about 90 ms, measured. Left unbounded that inflates the wall clock the

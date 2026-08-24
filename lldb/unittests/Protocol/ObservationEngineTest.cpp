@@ -783,6 +783,10 @@ TEST(StackProfileTest, ARecursiveFunctionCountsOncePerSample) {
 
 TEST(StackProfileTest, HotIsBoundedAndSaysHowManyWereDropped) {
   StackProfile Profile;
+  // One place holding a share of the run, so the list is worth enumerating at all;
+  // without that the bound below is not what shortens it.
+  for (size_t I = 0; I < 40; ++I)
+    Profile.Record(1, Stack({{"hot", "p.cpp"}}));
   for (size_t I = 0; I < StackProfile::MaxHot + 5; ++I)
     Profile.Record(1, Stack({{"f" + std::to_string(I), "p.cpp"}}));
 
@@ -790,7 +794,7 @@ TEST(StackProfileTest, HotIsBoundedAndSaysHowManyWereDropped) {
   const llvm::json::Object *O = Rendered.getAsObject();
   ASSERT_NE(O, nullptr);
   EXPECT_EQ(O->getArray("hot")->size(), StackProfile::MaxHot);
-  EXPECT_EQ(O->getInteger("hot_elided"), std::optional<int64_t>(5));
+  EXPECT_EQ(O->getInteger("hot_elided"), std::optional<int64_t>(6));
 }
 
 TEST(StackProfileTest, ASingleThreadIsNotWorthNaming) {
@@ -849,4 +853,27 @@ TEST(StackProfileTest, SamplesOnlyOutsideTheProgramAreNotAProfile) {
   Profile.Record(1, Stack({{"dyld4::prepare", ""}, {"dyld_start", ""}}));
   EXPECT_EQ(Profile.Samples(), 1u);
   EXPECT_TRUE(Profile.Render().getAsNull().has_value());
+}
+
+TEST(StackProfileTest, WhereNoPlaceDominatesOneStandsForTheList) {
+  // Measured on a compiler looping inside one analysis: nineteen samples spread
+  // over seventeen accessors, none holding more than two. Naming eight of them
+  // and eliding nine describes the last instruction of an inlined getter, while
+  // the covering path names the function responsible.
+  StackProfile Profile;
+  for (int I = 0; I < 17; ++I)
+    Profile.Record(1, Stack({{"accessor" + std::to_string(I), "Casting.h"},
+                             {"foldShuffleToIdentity", "p.cpp"}}));
+
+  const llvm::json::Value Rendered = Profile.Render();
+  const llvm::json::Object *O = Rendered.getAsObject();
+  ASSERT_NE(O, nullptr);
+  EXPECT_EQ(O->getArray("hot")->size(), 1u);
+  EXPECT_EQ(O->getInteger("hot_elided"), std::optional<int64_t>(16));
+  // The place is still named concretely enough to open a file at.
+  EXPECT_EQ((*O->getArray("hot"))[0].getAsObject()->getString("file"),
+            std::optional<llvm::StringRef>("Casting.h"));
+  EXPECT_EQ(Render(llvm::json::Value(
+                llvm::json::Array(*O->getArray("under")))),
+            R"(["foldShuffleToIdentity"])");
 }

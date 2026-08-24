@@ -582,7 +582,12 @@ json::Value StackProfile::Render() const {
   });
 
   json::Array Hot;
-  const size_t Kept = std::min<size_t>(Ranked.size(), MaxHot);
+  size_t Kept = std::min<size_t>(Ranked.size(), MaxHot);
+  // Where no place holds a share of the run, which place was innermost is a fact
+  // about the last instruction of an accessor rather than about the program. One
+  // entry keeps a file and a line to look at; `under` carries the answer.
+  if (Ranked.front()->Samples * MinHotShareDivisor < m_samples)
+    Kept = 1;
   for (size_t I = 0; I < Kept; ++I) {
     const Site &S = *Ranked[I];
     json::Object Entry{{"function", S.Function}, {"samples", S.Samples}};
