@@ -432,3 +432,428 @@ class ObserveTestCase(TestBase):
         self.assertEqual(outliers[0]["count"], 1)
         # main.c passes 99 at i == 42, which is the forty-third call.
         self.assertEqual(outliers[0]["first_seq"], 43)
+        # An outlier carries two numbers because they count different things.
+        # With one observation they agree; test_outlier_numbers_are_distinct
+        # covers the case where they do not.
+        self.assertEqual(outliers[0]["first_hit"], 43)
+
+    def test_outlier_numbers_are_distinct(self):
+        """first_hit counts one observation's hits, first_seq the whole stream."""
+        self.build()
+
+        # record_bucket runs a hundred times before record_value is reached, so
+        # the two numbering schemes are a hundred apart for the same hit. Acting
+        # on first_seq here would select a hit record_value never had.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"label": "buckets", "at": "record_bucket", "capture": ["bucket"]},
+                    {"label": "values", "at": "record_value", "capture": ["value"]},
+                ],
+            }
+        )
+
+        outliers = document["aggregate"]["values"]["value"]["outliers"]
+        self.assertEqual(len(outliers), 1, str(outliers))
+        self.assertEqual(outliers[0]["first_hit"], 43)
+        self.assertEqual(outliers[0]["first_seq"], 143)
+
+    def test_process_inputs_reach_the_program(self):
+        """args, env, cwd and stdin each arrive, which the program echoes back."""
+        self.build()
+
+        working = tempfile.TemporaryDirectory()
+        self.addTearDownHook(working.cleanup)
+        open(os.path.join(working.name, "cwd_marker"), "w").close()
+        stdin_path = os.path.join(working.name, "input.txt")
+        with open(stdin_path, "w") as stream:
+            stream.write("from-file\n")
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["probe"],
+                "env": {"OBSERVE_ENV": "from-plan"},
+                "cwd": working.name,
+                "stdin": stdin_path,
+                "timeout_seconds": 300,
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        output = document["inferior_output"]
+        self.assertIn("mode=probe", output)
+        self.assertIn("env=from-plan", output)
+        # The marker is opened by a relative path, so finding it proves the
+        # working directory took effect rather than the path being absolute.
+        self.assertIn("cwd_marker=1", output)
+        self.assertIn("stdin=from-file", output)
+
+    def test_inferior_output_can_be_suppressed(self):
+        """capture_inferior_output off leaves the program's own output out."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "capture_inferior_output": False,
+                "timeout_seconds": 300,
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        self.assertNotIn("total=", document.get("inferior_output", ""))
+
+    def test_called_from_reduces_hits_not_just_events(self):
+        """Gating on a caller excludes hits, rather than filtering emission."""
+        self.build()
+
+        # leaf is reached three times through gate and twice through ungated.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"label": "all", "at": "leaf", "capture": ["n"]},
+                    {
+                        "label": "gated",
+                        "at": "leaf",
+                        "capture": ["n"],
+                        "called_from": "gate",
+                    },
+                ],
+            }
+        )
+
+        report = document["plan_report"]
+        self.assertEqual(report["all"]["hits"], 5, str(report))
+        # A hit reached through the other caller is never recorded, so the count
+        # itself is lower. Filtering emission would have left hits at five.
+        self.assertEqual(report["gated"]["hits"], 3, str(report))
+
+    def test_enabled_after_holds_an_observation_closed(self):
+        """An observation waits for its gate, and stays shut without one."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"label": "gate", "at": "gate", "capture": ["n"]},
+                    {
+                        "label": "after_gate",
+                        "at": "record_value",
+                        "capture": ["value"],
+                        "enabled_after": "gate",
+                    },
+                ],
+            }
+        )
+
+        report = document["plan_report"]
+        self.assertEqual(report["gate"]["hits"], 3, str(report))
+        # record_value runs a hundred times, but every one of them happens
+        # before gate is first reached, so the gated observation never opens.
+        self.assertEqual(report["after_gate"]["hits"], 0, str(report))
+
+    def test_return_value_is_recorded_once(self):
+        """$return carries the returned value, and only one value per hit."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "ret",
+                        "at": "returns_value",
+                        "on": "return",
+                        "capture": ["$return", "n"],
+                    }
+                ],
+            }
+        )
+
+        summary = document["aggregate"]["ret"]["$return"]
+        # Five calls return five distinct values. A sixth would mean the value
+        # was recorded twice per hit, once from the ABI and once by resolving
+        # the name as if it were a variable.
+        self.assertEqual(summary["distinct"], 5, str(summary))
+        for rendered in summary["values"]:
+            self.assertNotIn("unavailable", rendered, str(summary))
+
+        # A capture other than the return value cannot be read once the frame is
+        # gone, and the result says so rather than leaving an empty column.
+        self.assertTrue(
+            any("frame has already been popped" in note for note in document["notes"]),
+            str(document.get("notes")),
+        )
+
+    def test_nested_aggregate_is_not_a_cycle(self):
+        """A struct's first member starts at its address without being it."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"label": "deep", "at": "nested", "capture": ["o"], "depth": 4}
+                ],
+            }
+        )
+
+        rendered = document["aggregate"]["deep"]["o"]
+        # o, o->in and o->in.a all begin at one address. Identifying a value by
+        # address alone calls the innermost one a cycle and loses it.
+        self.assertNotIn("_cycle", rendered, rendered)
+        self.assertIn('"a"', rendered, rendered)
+
+    def test_depth_bounds_how_far_a_value_is_expanded(self):
+        """A deeper limit reaches further into a nested value."""
+        self.build()
+
+        plan = {
+            "program": self.getBuildArtifact("a.out"),
+            "timeout_seconds": 300,
+            "observe": [{"label": "deep", "at": "nested", "capture": ["o"]}],
+        }
+
+        plan["observe"][0]["depth"] = 1
+        shallow = self.observe(plan)["aggregate"]["deep"]["o"]
+        plan["observe"][0]["depth"] = 4
+        deep = self.observe(plan)["aggregate"]["deep"]["o"]
+
+        # Depth one reaches o's own members but not through them.
+        self.assertIn('"in"', shallow, shallow)
+        self.assertNotIn('"a"', shallow, shallow)
+        self.assertIn('"a"', deep, deep)
+
+    def test_backtrace_records_frames_and_collapses_recursion(self):
+        """Frames come back per event, with a run of one function counted."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "rec",
+                        "at": "recurse",
+                        "capture": ["n"],
+                        "backtrace": 8,
+                        "only_hit": 5,
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["rec"]
+        self.assertEqual(report["hits"], 5, str(report))
+        self.assertEqual(report["emitted"], 1, str(report))
+
+        with open(document["artifact"]["path"], "r") as stream:
+            events = [json.loads(line) for line in stream.read().splitlines() if line]
+        self.assertEqual(len(events), 1, str(events))
+        self.assertIn("backtrace", events[0], str(events[0]))
+
+    def test_empty_capture_is_a_bare_hit_counter(self):
+        """An observation with nothing to read still answers whether code ran."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"label": "reached", "at": "compute_value"},
+                    {"label": "never", "at": "spin"},
+                ],
+            }
+        )
+
+        report = document["plan_report"]
+        self.assertEqual(report["reached"]["hits"], 1, str(report))
+        # spin exists and resolves, so a zero count here means the code was not
+        # reached rather than that the name was wrong.
+        self.assertEqual(report["never"]["resolved_locations"], 1, str(report))
+        self.assertEqual(report["never"]["hits"], 0, str(report))
+        # Nothing was captured, so there is nothing to aggregate.
+        self.assertNotIn("aggregate", document)
+
+    def test_skip_first_and_only_hit_compose(self):
+        """only_hit is numbered past the hits skip_first ignored."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "late",
+                        "at": "leaf",
+                        "capture": ["n"],
+                        "skip_first": 2,
+                        "only_hit": 4,
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["late"]
+        self.assertEqual(report["hits"], 5, str(report))
+        self.assertEqual(report["emitted"], 1, str(report))
+
+    def test_condition_and_on_change_compose(self):
+        """A false condition suppresses a hit before the mode sees it."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "rare",
+                        "at": "record_value",
+                        "capture": ["value"],
+                        "when": "value == 99",
+                        "emit": "on_change",
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["rare"]
+        self.assertEqual(report["hits"], 100, str(report))
+        self.assertEqual(report["condition_true"], 1, str(report))
+        self.assertEqual(report["condition_errors"], 0, str(report))
+        self.assertEqual(report["emitted"], 1, str(report))
+
+    def test_expression_capture_reports_its_tier(self):
+        """A capture that is not a path is reported as an expression."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "computed",
+                        "at": "nested",
+                        "capture": ["o->in.a + o->in.b"],
+                    }
+                ],
+            }
+        )
+
+        captures = document["plan_report"]["computed"]["captures"]
+        tier = capture_tier(captures["o->in.a + o->in.b"])
+        # Arithmetic has no path form, so it has to reach the expression
+        # evaluator, and the report says which mechanism ran.
+        self.assertEqual(tier, "expression", str(captures))
+
+    def test_source_location_resolves_and_a_bad_line_does_not(self):
+        """A file:line observation resolves, and an uncovered line says why."""
+        self.build()
+        leaf_line = line_number("main.c", "the leaf body")
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"label": "by_line", "at": f"main.c:{leaf_line}"},
+                    {"label": "no_such_line", "at": "main.c:99999"},
+                ],
+            }
+        )
+
+        report = document["plan_report"]
+        self.assertGreaterEqual(report["by_line"]["resolved_locations"], 1, str(report))
+        self.assertEqual(report["by_line"]["hits"], 5, str(report))
+
+        missing = report["no_such_line"]
+        self.assertEqual(missing["resolved_locations"], 0, str(missing))
+        # A near-miss function name explains nothing about a line number, so the
+        # message has to talk about line tables instead.
+        self.assertIn("line table", missing["error"], missing["error"])
+
+    def test_clean_exit_carries_no_cycle(self):
+        """A loop is how programs are written, not evidence of being stuck."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"label": "loop", "at": "record_value", "capture": ["value"]}
+                ],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        self.assertNotIn("cycle", document)
+
+    def test_timeout_is_a_result_with_a_terminal_event(self):
+        """A program that never ends is reported, not left to hang."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["spin"],
+                "timeout_seconds": 10,
+            }
+        )
+
+        self.assertEqual(document["outcome"], "timed_out", str(document))
+        terminal = document["terminal"]
+        # A timeout is a terminal event and gets a crash's treatment: without a
+        # backtrace there is nothing to say about where it got stuck.
+        self.assertIn("spin", str(terminal.get("frames")), str(terminal))
+        self.assertNotIn("exit_status", terminal)
+
+    def test_no_progress_is_disarmed_by_default(self):
+        """A plan whose trigger fires late is not cut short."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"label": "late", "at": "recurse", "capture": ["n"]}],
+            }
+        )
+
+        # recurse is reached only after two hundred other calls, so a
+        # no-progress ceiling that defaulted on would end the run first.
+        self.assertEqual(document["outcome"], "exited", str(document))
+        self.assertEqual(document["plan_report"]["late"]["hits"], 5)
+
+    def test_no_progress_ends_a_stalled_run(self):
+        """Asked for, a stall with no events ends the run and says which way."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["spin"],
+                "timeout_seconds": 300,
+                "no_progress_seconds": 10,
+                "observe": [{"label": "never", "at": "recurse", "capture": ["n"]}],
+            }
+        )
+
+        # The spin is reached before recurse, so no event ever arrives and the
+        # stall ceiling is what ends the run, well inside the wall-clock one.
+        self.assertEqual(document["outcome"], "no_progress", str(document))
+        self.assertLess(document["elapsed_ms"], 300000, str(document))

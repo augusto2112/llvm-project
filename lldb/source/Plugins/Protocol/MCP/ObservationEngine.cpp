@@ -1253,8 +1253,15 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
   if (!T)
     return;
 
-  if (std::string Stop = T->GetStopDescription(); !Stop.empty())
-    Terminal.Description = std::move(Stop);
+  // The thread's own account of why it stopped is the better description of a
+  // crash, which is where it says something like EXC_BAD_ACCESS. It is the
+  // worse one for a run this engine stopped itself: there the stop reason
+  // describes the halt that was just delivered, so it would replace "still
+  // running after 10s" with "signal SIGSTOP" and leave a reader to work out
+  // that the signal was ours.
+  if (Result == Outcome::Crashed)
+    if (std::string Stop = T->GetStopDescription(); !Stop.empty())
+      Terminal.Description = std::move(Stop);
 
   std::vector<RawFrame> Raw;
   const uint32_t Depth = T->GetStackFrameCount();
