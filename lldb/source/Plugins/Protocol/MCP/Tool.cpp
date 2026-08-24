@@ -10,6 +10,10 @@
 #include "ObservationEngine.h"
 #include "ObservationPlan.h"
 #include "lldb/Core/Debugger.h"
+#include "lldb/Target/Process.h"
+#include "lldb/Target/Target.h"
+#include "lldb/Target/TargetList.h"
+#include "lldb/Utility/State.h"
 #include "lldb/Host/File.h"
 #include "lldb/Host/FileSystem.h"
 #include "lldb/Interpreter/CommandInterpreter.h"
@@ -24,6 +28,9 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/raw_ostream.h"
+#include <atomic>
+#include <chrono>
+#include <thread>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -136,6 +143,30 @@ static Expected<DebuggerSP> createManagedDebugger() {
   return debugger_sp;
 }
 
+/// How long one command may block before the session is interrupted and the
+/// caller told so.
+///
+/// A command that waits for a program to stop cannot return for a program that
+/// never does. `process launch` in a synchronous session waits for the first stop,
+/// and a program launched with no breakpoints in it has none: measured on a
+/// compiler hang reached through this tool, the call blocked until the client
+/// abandoned it after thirty minutes, and the follow-up `process interrupt` --
+/// which needs an event loop this session does not have -- blocked as well. Half of
+/// that cell's wall clock went on two calls that could never answer. A ceiling
+/// makes the answer wrong-but-honest instead of absent, and leaves the process
+/// stopped where it had got to, which is a session the caller can go on using.
+static constexpr std::chrono::seconds CommandCeiling{120};
+
+/// Whether \p debugger holds a target with a process that exists, launched or
+/// attached. Read before and after a command to tell whether it started one.
+static bool hasLiveProcess(Debugger &debugger) {
+  lldb::TargetSP target = debugger.GetTargetList().GetSelectedTarget();
+  if (!target)
+    return false;
+  lldb::ProcessSP process = target->GetProcessSP();
+  return process && process->IsAlive();
+}
+
 Expected<lldb_protocol::mcp::CallToolResult>
 CommandTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   if (!std::holds_alternative<json::Value>(args))
@@ -151,11 +182,48 @@ CommandTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   if (!debugger_sp)
     return debugger_sp.takeError();
 
+  // Whether a process existed before the command ran, so that a launch can be
+  // recognised by what it did rather than by how it was spelled. Every alias and
+  // abbreviation of `run` and `process launch` reaches this the same way, and a
+  // command that merely resumed one does not.
+  const bool had_process = hasLiveProcess(**debugger_sp);
+
   // FIXME: Disallow certain commands and their aliases.
   CommandReturnObject result(/*colors=*/false);
-  (*debugger_sp)
-      ->GetCommandInterpreter()
-      .HandleCommand(arguments.command.c_str(), eLazyBoolYes, result);
+  std::atomic<bool> interrupted{false};
+  {
+    // Interrupted from a second thread, which is where the command interpreter
+    // expects an interrupt to come from: it is what Ctrl-C is in the driver. The
+    // halt is what actually ends a wait for a stop, and the interrupt request is
+    // what ends the commands that poll instead of waiting.
+    std::atomic<bool> Finished{false};
+    Debugger &Dbg = **debugger_sp;
+    std::thread Watchdog([&] {
+      const auto Deadline = std::chrono::steady_clock::now() + CommandCeiling;
+      while (!Finished.load(std::memory_order_acquire)) {
+        if (std::chrono::steady_clock::now() >= Deadline)
+          break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+      }
+      if (Finished.load(std::memory_order_acquire))
+        return;
+      // Recorded here rather than read back from the debugger afterwards:
+      // interrupts are documented as inactive on the command-interpreter thread,
+      // which is the thread that would be asking.
+      interrupted = true;
+      Dbg.RequestInterrupt();
+      if (lldb::TargetSP Target = Dbg.GetTargetList().GetSelectedTarget())
+        if (lldb::ProcessSP Process = Target->GetProcessSP())
+          if (Process->IsAlive() && StateIsRunningState(Process->GetState()))
+            Process->Halt(/*clear_thread_plans=*/false);
+    });
+
+    Dbg.GetCommandInterpreter().HandleCommand(arguments.command.c_str(),
+                                              eLazyBoolYes, result);
+    Finished.store(true, std::memory_order_release);
+    Watchdog.join();
+    Dbg.CancelInterruptRequest();
+  }
 
   std::string output;
   StringRef output_str = result.GetOutputString();
@@ -167,6 +235,39 @@ CommandTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
     if (!output.empty())
       output += '\n';
     output += err_str;
+  }
+
+  // A command the ceiling ended is reported as one, because the alternative is a
+  // caller reading a truncated or empty result as the answer.
+  if (interrupted) {
+    if (!output.empty())
+      output += '\n';
+    output += formatv(
+        "\nnote: this command was still waiting after {0}s and the session was "
+        "interrupted; the program is stopped where it had got to, and this session "
+        "is usable. A command that waits for the program to stop cannot return for "
+        "a program that does not: to run one to its end and get a summary of what "
+        "happened while it ran, call \"trace_program\" with a plan.",
+        CommandCeiling.count());
+  }
+
+  // Said here rather than in the description, because the description does not
+  // work, and not when the note above already said more of it. Measured on an agent that had just loaded this tool's description --
+  // which says in as many words to use `trace_program` to run a program -- and
+  // then set `target.run-args` by hand, fought the quoting of them, and launched
+  // anyway. A tool that matches what the caller already believes a debugger is will
+  // be reached for over one that does not, and the only place left to say so is at
+  // the moment of the launch.
+  if (!interrupted && !had_process && hasLiveProcess(**debugger_sp)) {
+    if (!output.empty())
+      output += '\n';
+    output +=
+        "\nnote: this session now holds a launched process, which \"command\" "
+        "drives one stop at a time. To run a program to its end and get a summary "
+        "over every hit of a set of tracepoints, the values at each, where it got "
+        "stuck and where sampled stacks found it, call \"trace_program\" with a "
+        "plan instead -- it does the launch, the arguments and the collection in "
+        "one call.";
   }
 
   return createTextResult(output, !result.Succeeded());

@@ -64,7 +64,13 @@ you would see in the LLDB command interpreter. It takes:
 - `debugger` (optional): the URI of the session to run it in. When omitted, the
   command runs in the first session `lldb-mcp` created.
 
-Commands run one at a time and the result comes back when the command finishes.
+Commands run one at a time and the result comes back when the command finishes, or
+after two minutes, whichever comes first. A command that waits for the program to
+stop cannot return for a program that does not: `process launch` in a synchronous
+session waits for the first stop, and a program launched with no breakpoints in it
+has none. Reaching the ceiling interrupts the session and halts the program where it
+had got to, which leaves the session usable, and the result says so. To run a
+program to its end, use `trace_program`.
 
 ### `trace_program`
 

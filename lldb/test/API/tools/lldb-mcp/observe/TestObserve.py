@@ -350,13 +350,12 @@ class ObserveTestCase(TestBase):
         self.assertEqual(report["condition_errors"], 0)
         self.assertEqual(report["emitted"], 0)
 
-        # A hit whose condition was false is not captured either, so the
-        # capture reports no evaluations rather than a hundred failures -- and
-        # says so as "not_evaluated", not with the word a capture that was read
-        # and failed gets.
+        # A hit whose condition was false is not captured either, so the capture
+        # reports having not been evaluated rather than a hundred failures -- and
+        # says it as "not_evaluated", not with the word a capture that was read and
+        # failed gets. A word, because the numbers beside it would all be zero.
         capture = report["captures"]["value"]
-        self.assertEqual(capture_tier(capture), "not_evaluated")
-        self.assertEqual(capture["evaluations"], 0)
+        self.assertEqual(capture, "not_evaluated")
 
         # Nothing was recorded, so there is nothing to aggregate.
         self.assertNotIn("aggregate", document)
