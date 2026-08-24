@@ -847,6 +847,34 @@ class ObserveTestCase(TestBase):
         self.assertIn("spin", str(terminal.get("frames")), str(terminal))
         self.assertNotIn("exit_status", terminal)
 
+        # A plan that named nothing still says where the program was. Every other
+        # part of a plan answers a question the caller already knew to ask, and
+        # for a program pinned to a core the question is which code is running.
+        profile = document["profile"]
+        self.assertGreater(profile["samples"], 0, str(profile))
+        self.assertEqual(profile["hot"][0]["function"], "spin", str(profile))
+        self.assertIn("main", profile["under"], str(profile))
+
+        # Sampling means stopping the program, and the stop is delivered as a
+        # SIGSTOP: a run that read its own halt as the program dying would report
+        # every long run as a crash.
+        self.assertEqual(document["outcome"], "timed_out", str(document))
+
+    def test_a_program_that_ends_before_a_sample_is_due_has_no_profile(self):
+        """A section that says nothing is worse than no section."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "record_value"}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        self.assertNotIn("profile", document)
+
     def test_no_progress_is_disarmed_by_default(self):
         """A plan whose trigger fires late is not cut short."""
         self.build()

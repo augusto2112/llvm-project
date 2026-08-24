@@ -321,6 +321,68 @@ bool IsSystemSourcePath(llvm::StringRef File);
 /// exist.
 std::vector<RankedFrame> RankFrames(llvm::ArrayRef<RawFrame> Frames);
 
+/// Where a program spent its time, accumulated from stacks sampled while it ran.
+///
+/// Every other part of a plan answers a question the caller already knew to ask:
+/// a tracepoint has to name a function or a line. That makes the tool a way to
+/// confirm a hypothesis and not a way to form one, and for the case it is most
+/// wanted for -- a program pinned to a core and producing nothing -- the first
+/// thing anybody wants is the opposite: not "is this function running" but "what
+/// is running". Sampled stacks answer that without being told where to look.
+///
+/// The samples are folded as they arrive rather than kept, so a run of any length
+/// holds one entry per function seen and one running path per thread.
+class StackProfile {
+public:
+  /// Records one thread's stack, innermost frame first, as the unwinder gives
+  /// it.
+  void Record(lldb::tid_t Tid, llvm::ArrayRef<RawFrame> InnermostFirst);
+
+  uint64_t Samples() const { return m_samples; }
+
+  /// The profile, or a null value when nothing was sampled -- which is the
+  /// ordinary case for a program that finishes before the first sample is due.
+  llvm::json::Value Render() const;
+
+  /// Functions named in `hot`. The innermost frame of every sample is one
+  /// function, so this is a bound on how many distinct places the program was
+  /// found in, and past a handful the tail is noise however long the run.
+  static constexpr size_t MaxHot = 8;
+
+  /// Frames of the shared path reported. The innermost are kept: a deep shared
+  /// path in a compiler is mostly the pass manager that every stack ends in, and
+  /// what distinguishes this run from any other is at the other end.
+  static constexpr size_t MaxUnder = 8;
+private:
+  struct Site {
+    std::string Function;
+    std::string File;
+    uint32_t Line = 0;
+    lldb::tid_t Tid = 0;
+    uint64_t Samples = 0;
+
+    /// The sample this function was first found in, which breaks ties in a way
+    /// that does not depend on how the map was built.
+    uint64_t FirstSample = 0;
+
+    /// The frames every sample in this site shared, outermost first.
+    ///
+    /// Held per site rather than per thread because one stray sample ruins a
+    /// path: a run whose thread was in dyld's startup for one sample out of
+    /// twenty had nothing in common across all of them but `start`, while the
+    /// eleven samples inside the hot function shared their whole way in.
+    std::vector<std::string> Shared;
+  };
+
+  /// Keyed by thread and innermost function, because a program with one thread
+  /// spinning and eight parked has an answer, and it is which thread.
+  std::map<std::pair<lldb::tid_t, std::string>, Site> m_sites;
+
+  std::map<lldb::tid_t, uint64_t> m_per_thread;
+
+  uint64_t m_samples = 0;
+};
+
 //===----------------------------------------------------------------------===//
 // Result
 //===----------------------------------------------------------------------===//
@@ -475,6 +537,10 @@ struct ObservationResult {
   /// got.
   std::string InferiorOutput;
 
+  /// Where the program was found while it ran, null when it finished before any
+  /// sample was due.
+  llvm::json::Value Profile = nullptr;
+
   double ElapsedMs = 0.0;
 
   /// Of that, what was spent before the program started running: creating the
@@ -556,6 +622,21 @@ private:
   llvm::Error InstallObservations();
   llvm::Error Launch();
   Outcome WaitForEnd();
+
+  /// Whether the run can afford to stop the program to sample it again.
+  ///
+  /// Bounded as a share of the run rather than as a fixed interval, for the same
+  /// reason an expensive capture is: what a stop costs is a property of the
+  /// platform and the program, not something a caller can be asked to know. A
+  /// long run is sampled often enough to name a hot function, a short one barely
+  /// at all, and neither is slowed by more than the share.
+  bool SamplingIsAffordable() const;
+
+  /// Records where every thread of \p P is stopped, for the profile. Called at a
+  /// stop the plan did not ask for, which is where the program is under no
+  /// obligation to be anywhere in particular -- the property a sample needs.
+  void SampleStacks(Process &P);
+
   void CollectTerminalEvent(Outcome Result);
   void DrainInferiorOutput();
   void FlushHeldEvents();
@@ -591,6 +672,25 @@ private:
   std::vector<std::unique_ptr<ObservationSite>> m_sites;
 
   Aggregator m_aggregator;
+  StackProfile m_profile;
+
+  /// Whether the stop being handled is one this engine asked for in order to
+  /// sample. A halt is delivered as a SIGSTOP, which is indistinguishable by stop
+  /// reason from a program that died on a signal, so a run that sampled itself
+  /// would report itself as crashed on its first sample.
+  bool m_halt_for_sample = false;
+
+  /// Wall time this engine has spent stopping the program to sample it, and when
+  /// the sample in flight began.
+  ///
+  /// A halt and a resume are a round trip to the stub each: measured at about
+  /// 90 ms per sample on macOS, which on a program that runs freely is time the
+  /// program is not running. Left unbounded that inflates the wall clock a run is
+  /// judged against, and a program that needed 24 s of a 30 s ceiling would be
+  /// reported as having hung -- a false result, which is worse than a coarse
+  /// profile.
+  std::chrono::microseconds m_sample_cost{0};
+  std::chrono::steady_clock::time_point m_sample_started;
   std::unique_ptr<EventArtifact> m_artifact;
 
   /// Locations of the hits most recently recorded, which is what a cycle is

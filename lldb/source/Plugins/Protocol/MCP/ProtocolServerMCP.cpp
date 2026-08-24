@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ProtocolServerMCP.h"
+#include "lldb/Protocol/MCP/ObserveSurface.h"
 #include "Resource.h"
 #include "Tool.h"
 #include "lldb/Core/PluginManager.h"

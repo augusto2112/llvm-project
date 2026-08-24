@@ -42,11 +42,6 @@ public:
   std::optional<llvm::json::Value> GetSchema() const override;
 };
 
-/// What the `observe` tool is for, in the terms a caller cannot infer from the
-/// schema. Out of line because it is far too long to read at the registration
-/// site, where it would bury the list of tools.
-extern const llvm::StringLiteral ObserveToolDescription;
-
 class DebuggerListTool : public lldb_protocol::mcp::Tool {
 public:
   using lldb_protocol::mcp::Tool::Tool;

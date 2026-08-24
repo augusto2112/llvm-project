@@ -12,6 +12,9 @@
 #include "llvm/Support/JSON.h"
 #include "gtest/gtest.h"
 #include <chrono>
+#include "llvm/ADT/StringRef.h"
+#include <utility>
+#include <initializer_list>
 #include <optional>
 #include <string>
 #include <vector>
@@ -603,4 +606,133 @@ TEST(ObservationEngineTest, TailIsInlinedOnlyWhenTheProgramEndedBadly) {
   EXPECT_TRUE(IsAbnormal(Outcome::Crashed));
   EXPECT_TRUE(IsAbnormal(Outcome::TimedOut));
   EXPECT_TRUE(IsAbnormal(Outcome::NoProgress));
+}
+
+//===----------------------------------------------------------------------===//
+// Stack profile
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// A stack, innermost first, from names paired with the file each resolved to.
+/// A frame with no file is one whose definition the caller cannot see, which is
+/// what separates a thread doing work from a thread waiting in a library.
+std::vector<RawFrame> Stack(
+    std::initializer_list<std::pair<llvm::StringRef, llvm::StringRef>> Frames) {
+  std::vector<RawFrame> Out;
+  for (const auto &[Function, File] : Frames) {
+    RawFrame Frame;
+    Frame.Function = Function.str();
+    Frame.File = File.str();
+    Frame.Line = File.empty() ? 0 : 10;
+    Out.push_back(std::move(Frame));
+  }
+  return Out;
+}
+
+} // namespace
+
+TEST(StackProfileTest, NothingSampledRendersNothing) {
+  // A program that finishes before the first sample is due is the ordinary case,
+  // and it must not grow an empty section for the sake of a uniform shape.
+  StackProfile Profile;
+  EXPECT_EQ(Profile.Samples(), 0u);
+  EXPECT_TRUE(Profile.Render().getAsNull().has_value());
+}
+
+TEST(StackProfileTest, InnermostFrameIsWhatIsCounted) {
+  StackProfile Profile;
+  for (int I = 0; I < 7; ++I)
+    Profile.Record(1, Stack({{"mix", "p.cpp"}, {"loop", "p.cpp"}}));
+  for (int I = 0; I < 2; ++I)
+    Profile.Record(1, Stack({{"loop", "p.cpp"}}));
+
+  const std::string S = Render(Profile.Render());
+  EXPECT_NE(S.find(R"("samples":9)"), std::string::npos) << S;
+  // Self time: `loop` was on the stack for every sample and is where the program
+  // was for two of them.
+  EXPECT_NE(S.find(R"({"file":"p.cpp","function":"mix","line":10,"samples":7})"),
+            std::string::npos)
+      << S;
+}
+
+TEST(StackProfileTest, AWaitingThreadDoesNotOutrankAWorkingOne) {
+  // Measured on a program with one thread spinning and one asleep: the sleeping
+  // thread is sampled as often, and its innermost frame is the same every time
+  // while the working thread's moves, so counting alone reported the idle thread
+  // as the hottest place in the program.
+  StackProfile Profile;
+  for (int I = 0; I < 19; ++I)
+    Profile.Record(2, Stack({{"__semwait_signal", ""}, {"parked", "p.cpp"}}));
+  for (int I = 0; I < 11; ++I)
+    Profile.Record(1, Stack({{"mix", "p.cpp"}, {"loop", "p.cpp"}}));
+
+  const llvm::json::Value Rendered = Profile.Render();
+  const llvm::json::Array *Hot = Rendered.getAsObject()->getArray("hot");
+  ASSERT_NE(Hot, nullptr);
+  ASSERT_EQ(Hot->size(), 2u);
+  EXPECT_EQ((*Hot)[0].getAsObject()->getString("function"),
+            std::optional<llvm::StringRef>("mix"));
+  // Withheld from the front, not dropped: a thread waiting on something that
+  // never arrives is the answer often enough to keep.
+  EXPECT_EQ((*Hot)[1].getAsObject()->getString("function"),
+            std::optional<llvm::StringRef>("__semwait_signal"));
+  EXPECT_EQ(Rendered.getAsObject()->getInteger("threads"),
+            std::optional<int64_t>(2));
+}
+
+TEST(StackProfileTest, SharedPathIsPerSiteSoOneStraySampleDoesNotRuinIt) {
+  // A run whose thread was in the dynamic loader for one sample out of twenty
+  // had nothing in common across all of them but the outermost frame, while the
+  // samples inside the hot function shared their whole way in. Keeping the path
+  // per site is what makes it survive.
+  StackProfile Profile;
+  Profile.Record(1, Stack({{"dyld_start", ""}}));
+  for (int I = 0; I < 9; ++I)
+    Profile.Record(1, Stack({{"mix", "p.cpp"},
+                             {"loop", "p.cpp"},
+                             {"middle", "p.cpp"},
+                             {"main", "p.cpp"}}));
+
+  const llvm::json::Value Rendered = Profile.Render();
+  const llvm::json::Array *Under = Rendered.getAsObject()->getArray("under");
+  ASSERT_NE(Under, nullptr);
+  // Innermost first, and without the site's own function, which `hot` names.
+  EXPECT_EQ(Render(llvm::json::Value(llvm::json::Array(*Under))),
+            R"(["loop","middle","main"])");
+}
+
+TEST(StackProfileTest, DivergingCallersLeaveOnlyWhatTheyShare) {
+  StackProfile Profile;
+  Profile.Record(1, Stack({{"mix", "p.cpp"}, {"left", "p.cpp"}, {"main", "p.cpp"}}));
+  Profile.Record(1, Stack({{"mix", "p.cpp"}, {"right", "p.cpp"}, {"main", "p.cpp"}}));
+
+  const llvm::json::Value Rendered = Profile.Render();
+  const llvm::json::Array *Under = Rendered.getAsObject()->getArray("under");
+  ASSERT_NE(Under, nullptr);
+  EXPECT_EQ(Render(llvm::json::Value(llvm::json::Array(*Under))),
+            R"(["main"])");
+}
+
+TEST(StackProfileTest, HotIsBoundedAndSaysHowManyWereDropped) {
+  StackProfile Profile;
+  for (size_t I = 0; I < StackProfile::MaxHot + 5; ++I)
+    Profile.Record(1, Stack({{"f" + std::to_string(I), "p.cpp"}}));
+
+  const llvm::json::Value Rendered = Profile.Render();
+  const llvm::json::Object *O = Rendered.getAsObject();
+  ASSERT_NE(O, nullptr);
+  EXPECT_EQ(O->getArray("hot")->size(), StackProfile::MaxHot);
+  EXPECT_EQ(O->getInteger("hot_elided"), std::optional<int64_t>(5));
+}
+
+TEST(StackProfileTest, ASingleThreadIsNotWorthNaming) {
+  // The thread id is what tells two threads apart, and there is nothing to tell
+  // apart in a program that has one.
+  StackProfile Profile;
+  Profile.Record(7, Stack({{"mix", "p.cpp"}}));
+
+  const std::string S = Render(Profile.Render());
+  EXPECT_EQ(S.find("tid"), std::string::npos) << S;
+  EXPECT_EQ(S.find("threads"), std::string::npos) << S;
 }

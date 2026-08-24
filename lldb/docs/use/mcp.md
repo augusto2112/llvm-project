@@ -141,16 +141,43 @@ failure. That is the shortest useful plan:
 ```
 
 For a program that hangs rather than crashes this is the first step and not the
-last: it reports the stack where the run was stopped, which names the functions
-involved, but a `cycle` needs tracepoints to emit the events it is found in. Run
-it again with an observation on each function the backtrace named to get the
-repeating block.
+last. Alongside the stack where the run was stopped it reports `profile`: where
+stacks sampled during the run found the program, ranked, with the path it was
+reached by. Every other part of a plan answers a question the caller already knew
+to ask — a tracepoint has to name a function or a line — and this one does not, so
+it is what to reach for when the question is which code is running rather than
+whether a particular function is. A `cycle`, on the other hand, needs tracepoints
+to emit the events it is found in, so run it again with an observation on each
+function the profile or the backtrace named to get the repeating block.
+
+#### Sampled stacks
+
+`profile` appears for a run long enough for a sample to be due, whether or not the
+plan had tracepoints — though a plan whose tracepoints are being hit constantly
+leaves no moment at which the program is running freely, so in practice it is a
+free-running run that gets one.
+
+`hot` ranks the places the program was found, keyed on the innermost frame of each
+sample, which is self time rather than time on the stack. Frames that resolved to
+source come first: a thread parked in a wait is sampled as often as one burning a
+core and its innermost frame is the same every time, so counting alone reports the
+idle thread as the hottest place in the program. `under` is the path the top entry
+was reached by, shared across its own samples. `tid` and `threads` appear only for
+a program that had more than one thread to tell apart.
+
+Sampling means stopping the program, which costs a round trip to the debug stub
+each way — about 90 ms, measured. Left unbounded that inflates the wall clock the
+run is judged against, and a program that needed most of its ceiling would be
+reported as having hung because it was being profiled. The engine spends at most a
+tenth of a run on it and stops sampling when that is used up, so a long run is
+sampled tens of times and a short one barely at all.
 
 #### Reading the result
 
 The response carries `outcome` — `exited`, `crashed`, `timed_out` or
 `no_progress` — a `plan_report` per observation, an `aggregate`, a `terminal`
-event, and a pointer to the artifact. `elapsed_ms` covers the whole call, and
+event, a `profile` where one was sampled, and a pointer to the artifact.
+`elapsed_ms` covers the whole call, and
 `setup_ms` appears beside it when most of that went on creating the target,
 reading its debug info and resolving the tracepoints. That cost is charged once
 per binary image rather than per hit — measured at 9.1 s for the first run against

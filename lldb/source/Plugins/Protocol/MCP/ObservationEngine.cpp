@@ -31,6 +31,9 @@
 #include "lldb/Target/Target.h"
 #include "lldb/Target/TargetList.h"
 #include "lldb/Target/Thread.h"
+#include "lldb/Target/ThreadList.h"
+#include "lldb/Target/UnixSignals.h"
+#include "lldb/Target/StopInfo.h"
 #include "lldb/Utility/Environment.h"
 #include "lldb/Utility/FileSpec.h"
 #include "lldb/Utility/Listener.h"
@@ -455,6 +458,115 @@ json::Value RankedFrame::Render() const {
 }
 
 //===----------------------------------------------------------------------===//
+// Stack profile
+//===----------------------------------------------------------------------===//
+
+void StackProfile::Record(lldb::tid_t Tid, ArrayRef<RawFrame> InnermostFirst) {
+  if (InnermostFirst.empty())
+    return;
+
+  ++m_samples;
+  ++m_per_thread[Tid];
+
+  const RawFrame &Innermost = InnermostFirst.front();
+  Site &S = m_sites[{Tid, Innermost.Function}];
+  const bool First = S.Samples == 0;
+  if (First) {
+    S.Function = Innermost.Function;
+    S.File = Innermost.File;
+    S.Line = Innermost.Line;
+    S.Tid = Tid;
+    S.FirstSample = m_samples;
+  }
+  ++S.Samples;
+
+  // The callers, outermost first, so that intersecting is taking a common
+  // prefix: the frames a stack shares with another are the ones nearest the
+  // bottom, since two stacks agree about how the program got here and disagree
+  // about where here is. The innermost frame is left out because it is the site
+  // itself, which `hot` names -- and because after an intersection it may not be
+  // there to recognise, two paths into one function sharing only `main`.
+  std::vector<std::string> Outermost;
+  Outermost.reserve(InnermostFirst.size());
+  for (const RawFrame &Frame : reverse(InnermostFirst.drop_front()))
+    Outermost.push_back(Frame.Function);
+
+  if (First) {
+    S.Shared = std::move(Outermost);
+    return;
+  }
+  size_t Common = 0;
+  while (Common < S.Shared.size() && Common < Outermost.size() &&
+         S.Shared[Common] == Outermost[Common])
+    ++Common;
+  S.Shared.resize(Common);
+}
+
+json::Value StackProfile::Render() const {
+  if (m_samples == 0)
+    return nullptr;
+
+  const bool Threaded = m_per_thread.size() > 1;
+
+  std::vector<const Site *> Ranked;
+  Ranked.reserve(m_sites.size());
+  for (const auto &[Key, S] : m_sites)
+    Ranked.push_back(&S);
+
+  // A thread parked in a wait is sampled as often as one burning a core, and its
+  // innermost frame is the same one every time while a working thread's varies,
+  // so ranking on samples alone puts the idle thread first: measured on a program
+  // with one spinning thread and one asleep, 19 samples in `__semwait_signal`
+  // against 11 in the hot function. Whether the frame resolved to source is what
+  // separates them, and it is the same partition a backtrace is ranked by, for
+  // the same reason: a frame whose definition the caller cannot see is not where
+  // the caller's problem is.
+  llvm::stable_sort(Ranked, [](const Site *LHS, const Site *RHS) {
+    const bool LSys = LHS->File.empty();
+    const bool RSys = RHS->File.empty();
+    if (LSys != RSys)
+      return RSys;
+    return std::tie(RHS->Samples, LHS->FirstSample) <
+           std::tie(LHS->Samples, RHS->FirstSample);
+  });
+
+  json::Array Hot;
+  const size_t Kept = std::min<size_t>(Ranked.size(), MaxHot);
+  for (size_t I = 0; I < Kept; ++I) {
+    const Site &S = *Ranked[I];
+    json::Object Entry{{"function", S.Function}, {"samples", S.Samples}};
+    if (!S.File.empty()) {
+      Entry["file"] = S.File;
+      if (S.Line != 0)
+        Entry["line"] = static_cast<int64_t>(S.Line);
+    }
+    if (Threaded)
+      Entry["tid"] = static_cast<int64_t>(S.Tid);
+    Hot.push_back(std::move(Entry));
+  }
+
+  json::Object O{{"samples", m_samples}, {"hot", std::move(Hot)}};
+  if (Kept < Ranked.size())
+    O["hot_elided"] = static_cast<int64_t>(Ranked.size() - Kept);
+  if (Threaded)
+    O["threads"] = static_cast<int64_t>(m_per_thread.size());
+
+  // How the program reached the place it was found in most often. One path, for
+  // the first entry above, because the entries under it are mostly its callers
+  // and callees and would repeat most of it.
+  ArrayRef<std::string> Shared(Ranked.front()->Shared);
+  // Innermost first, matching the order a backtrace is reported in, and keeping
+  // that end when the bound cuts.
+  Shared = Shared.take_back(std::min<size_t>(Shared.size(), MaxUnder));
+  json::Array Under;
+  for (const std::string &Function : reverse(Shared))
+    Under.push_back(Function);
+  if (!Under.empty())
+    O["under"] = std::move(Under);
+  return O;
+}
+
+//===----------------------------------------------------------------------===//
 // Result rendering
 //===----------------------------------------------------------------------===//
 
@@ -597,6 +709,9 @@ json::Value ObservationResult::Render() const {
   if (const json::Object *Agg = Aggregate.getAsObject(); Agg && !Agg->empty())
     O["aggregate"] = Aggregate;
 
+  if (!Profile.getAsNull())
+    O["profile"] = Profile;
+
   if (Cycle) {
     json::Array Sequence;
     for (const std::string &Label : Cycle->Sequence)
@@ -735,6 +850,35 @@ constexpr size_t MaxTerminalLocals = 32;
 /// that a frame of scalars and small structs comes back whole, while one local
 /// that reaches an arbitrarily large object cannot crowd out the rest.
 constexpr unsigned MaxTerminalLocalNodes = 96;
+
+/// The reciprocal of the share of a run that may be spent stopping the program
+/// to sample it. Ten per cent: enough that a run long enough to be worth
+/// profiling gets tens of samples, and little enough that a program which needed
+/// most of its ceiling is not reported as having hung because of the profiling.
+constexpr int64_t SampleCostBudgetDivisor = 10;
+
+/// Threads sampled per sample, and frames walked per thread. Both are paid at
+/// every sample of a run that may last minutes, and a program with hundreds of
+/// threads is one where the profile is a shape rather than a list.
+constexpr uint32_t MaxSampledThreads = 8;
+constexpr uint32_t MaxSampledFrames = 64;
+
+/// Whether a stop looks like the debugger interrupting the program rather than
+/// the program failing. A halt arrives as a SIGSTOP, so the signal has to be
+/// identified rather than the kind of stop: every other way a program stops on a
+/// signal is a way it went wrong.
+bool IsInterruption(Process &P, Thread *T, lldb::StopReason Reason) {
+  if (Reason == lldb::eStopReasonNone)
+    return true;
+  if (Reason != lldb::eStopReasonSignal || !T)
+    return false;
+  lldb::StopInfoSP Info = T->GetStopInfo();
+  if (!Info)
+    return false;
+  const lldb::UnixSignalsSP Signals = P.GetUnixSignals();
+  return Signals && static_cast<int32_t>(Info->GetValue()) ==
+                        Signals->GetSignalNumberFromName("SIGSTOP");
+}
 
 /// Source lines either side of the terminal line.
 constexpr uint32_t TerminalSourceContext = 4;
@@ -1464,11 +1608,24 @@ Outcome ObservationEngine::WaitForEnd() {
       break;
     }
 
-    if (State != lldb::eStateStopped && State != lldb::eStateCrashed)
+    if (State != lldb::eStateStopped && State != lldb::eStateCrashed) {
       // The wait expired, which says nothing about the program beyond that it
       // is still running. The clock at the top of the loop decides what that
       // means.
+      //
+      // It also means the program is running free rather than busy hitting
+      // tracepoints, which is when a sample is both cheap and worth taking.
+      // Asking for the stop here and reading it on the next pass is what keeps
+      // the sampling out of the stop handling: the halt arrives as a stop
+      // nothing in the plan owns, which the loop already knows how to resume
+      // from.
+      if (StateIsRunningState(P.GetState()) && SamplingIsAffordable()) {
+        m_halt_for_sample = true;
+        m_sample_started = Clock::now();
+        P.Halt(/*clear_thread_plans=*/false);
+      }
       continue;
+    }
 
     // A callback that found the run's time was up is the only place a program
     // busy hitting tracepoints can be noticed to have overrun.
@@ -1480,16 +1637,31 @@ Outcome ObservationEngine::WaitForEnd() {
     lldb::ThreadSP T = P.GetThreadList().GetSelectedThread();
     const lldb::StopReason Reason =
         T ? T->GetStopReason() : lldb::eStopReasonNone;
-    if (State == lldb::eStateCrashed || Reason == lldb::eStopReasonSignal ||
-        Reason == lldb::eStopReasonException ||
-        Reason == lldb::eStopReasonInstrumentation) {
+    // Claimed only for the stop that follows the halt, and only if it looks like
+    // an interruption: a program that really died on a signal in the window
+    // between asking and stopping still reports as having died.
+    const bool OurHalt = std::exchange(m_halt_for_sample, false) &&
+                         IsInterruption(P, T.get(), Reason);
+    if (!OurHalt &&
+        (State == lldb::eStateCrashed || Reason == lldb::eStopReasonSignal ||
+         Reason == lldb::eStopReasonException ||
+         Reason == lldb::eStopReasonInstrumentation)) {
       Result = Outcome::Crashed;
       break;
     }
 
     // Any other stop is one the plan did not ask for. Resuming is what keeps a
     // stop nobody owns from being reported as the program's end.
-    if (P.Resume().Fail()) {
+    //
+    // It is also where a sample is taken: a stop nobody owns is either the halt
+    // the pass above asked for or something equally incidental, and in both cases
+    // the stack is what the program was doing when it was interrupted.
+    SampleStacks(P);
+    const Status Resumed = P.Resume();
+    if (OurHalt)
+      m_sample_cost +=
+          std::chrono::duration_cast<Micros>(Clock::now() - m_sample_started);
+    if (Resumed.Fail()) {
       Result = Outcome::Crashed;
       break;
     }
@@ -1497,6 +1669,36 @@ Outcome ObservationEngine::WaitForEnd() {
 
   P.RestoreProcessEvents();
   return Result;
+}
+
+bool ObservationEngine::SamplingIsAffordable() const {
+  const Micros Elapsed =
+      std::chrono::duration_cast<Micros>(Clock::now() - m_start);
+  return m_sample_cost * SampleCostBudgetDivisor <= Elapsed;
+}
+
+void ObservationEngine::SampleStacks(Process &P) {
+  ThreadList &Threads = P.GetThreadList();
+  const uint32_t Count = std::min<uint32_t>(
+      static_cast<uint32_t>(Threads.GetSize()), MaxSampledThreads);
+  for (uint32_t I = 0; I < Count; ++I) {
+    lldb::ThreadSP T = Threads.GetThreadAtIndex(I);
+    if (!T)
+      continue;
+
+    // Bounded because the walk is paid at every sample, and because the frames
+    // past this depth are the ones a shared path would have elided anyway.
+    std::vector<RawFrame> Frames;
+    const uint32_t Depth =
+        std::min<uint32_t>(T->GetStackFrameCount(), MaxSampledFrames);
+    for (uint32_t F = 0; F < Depth; ++F) {
+      lldb::StackFrameSP Frame = T->GetStackFrameAtIndex(F);
+      if (!Frame)
+        break;
+      Frames.push_back(DescribeFrame(*Frame));
+    }
+    m_profile.Record(T->GetID(), Frames);
+  }
 }
 
 void ObservationEngine::DrainInferiorOutput() {
@@ -1722,6 +1924,7 @@ Expected<ObservationResult> ObservationEngine::Run() {
   m_result.ElapsedMs =
       ToMs(std::chrono::duration_cast<Micros>(Clock::now() - m_start));
   m_result.Aggregate = m_aggregator.Render();
+  m_result.Profile = m_profile.Render();
   if (m_output_truncated)
     m_result.Notes.push_back(
         formatv("only the last {0} bytes of the program's own output are "

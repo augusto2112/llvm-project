@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "Plugins/Protocol/MCP/Tool.h"
+#include "lldb/Protocol/MCP/ObserveSurface.h"
 #include "lldb/Protocol/MCP/Protocol.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
