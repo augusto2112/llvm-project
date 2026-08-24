@@ -69,6 +69,11 @@ public:
   /// dropped.
   static constexpr size_t MaxHistogramValues = 32;
 
+  /// Transitions kept. A capture that changes on nearly every hit would
+  /// otherwise render one transition per hit, making the summary as large as
+  /// the stream it stands in for.
+  static constexpr size_t MaxTransitions = 32;
+
 private:
   struct ValueStats {
     uint64_t Count = 0;

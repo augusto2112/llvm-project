@@ -67,16 +67,22 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   const size_t Kept = std::min<size_t>(ByCount.size(), MaxHistogramValues);
   for (size_t I = 0; I < Kept; ++I)
     Histogram[ByCount[I].first] = ByCount[I].second;
-  if (Kept < ByCount.size())
-    Histogram["_elided"] =
-        formatv("{0} rarer values", ByCount.size() - Kept).str();
 
   // Transitions arrive in run order, and the order is part of what they say.
   std::vector<Transition> Ordered = Summary.Transitions;
   llvm::stable_sort(Ordered, [](const Transition &LHS, const Transition &RHS) {
     return LHS.Seq < RHS.Seq;
   });
+  // A capture that changes on nearly every hit produces a transition per hit,
+  // which would leave the summary as large as the stream it summarises -- the
+  // same unboundedness the histogram cap exists to prevent. The earliest are
+  // kept, since the first change is usually where the story starts.
   json::Array Transitions;
+  size_t Dropped = 0;
+  if (Ordered.size() > MaxTransitions) {
+    Dropped = Ordered.size() - MaxTransitions;
+    Ordered.resize(MaxTransitions);
+  }
   for (const Transition &Change : Ordered)
     Transitions.push_back(json::Object{
         {"seq", Change.Seq}, {"from", Change.From}, {"to", Change.To}});
@@ -84,6 +90,15 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   json::Object Out{{"distinct", Summary.Values.size()},
                    {"values", std::move(Histogram)},
                    {"transitions", std::move(Transitions)}};
+
+  // Reported beside the histogram rather than inside it. A note living among
+  // the values shares their namespace, so a capture that rendered the note's
+  // own key would have its count overwritten and lost with nothing to show
+  // that it had been. A count is also more use to a reader than prose.
+  if (Kept < ByCount.size())
+    Out["values_elided"] = ByCount.size() - Kept;
+  if (Dropped != 0)
+    Out["transitions_elided"] = Dropped;
 
   if (Summary.Total >= MinObservationsForOutliers) {
     struct Outlier {
@@ -95,8 +110,7 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
     std::vector<Outlier> Rare;
     for (const auto &[Rendered, Stats] : Summary.Values)
       if (Stats.Count <= MaxOutlierCount)
-        Rare.push_back(
-            {Rendered, Stats.Count, Stats.FirstSeq, Stats.FirstHit});
+        Rare.push_back({Rendered, Stats.Count, Stats.FirstSeq, Stats.FirstHit});
 
     // Rarest first, and ties broken by where the value was first seen, so the
     // array never depends on the order the values happen to be stored in.

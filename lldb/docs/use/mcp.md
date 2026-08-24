@@ -140,6 +140,12 @@ An outlier carries two numbers because they count different things.
 `first_seq` numbers the whole event stream and is what matches a line in the
 artifact. They are equal only when a plan holds a single observation.
 
+Both `values` and `transitions` are bounded, and report `values_elided` and
+`transitions_elided` beside themselves when they drop anything. `distinct`
+always counts every value, so a shortened histogram cannot be mistaken for the
+real cardinality, and outliers are chosen before the bound applies, so the rare
+value that is usually the answer is never the one dropped.
+
 `plan_report` keeps four numbers apart on purpose: how many locations the name
 resolved to, how many times the tracepoint was hit, how many of those hits had a
 true condition, and how many events were emitted. A misspelled function name, a
