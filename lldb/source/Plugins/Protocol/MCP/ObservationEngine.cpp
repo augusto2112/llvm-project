@@ -183,6 +183,49 @@ lldb_private::mcp::AssessCaptureCost(const CaptureCostInput &In) {
   if (In.ObservedHits != 0)
     D.PerHitMs = ToMs(In.Spent) / static_cast<double>(In.ObservedHits);
 
+  // A capture that has never once produced a value is not expensive, it is
+  // wrong: the name resolves nowhere the observation is taken. Left to the cost
+  // test below it pays a full expression compile at every hit -- 90 ms each,
+  // measured on a name that was simply out of scope -- and is then turned off
+  // with advice about cheaper spelling that cannot apply, since a bare
+  // identifier is already as cheap as a name gets. Eight such captures in one
+  // measured run burned 30 s of a 25 s budget and returned nothing, so stopping
+  // early is worth more than the chance that the name would have resolved later.
+  if (In.Tier == ValueResolutionTier::Unresolved &&
+      In.Errors >= UnresolvableCaptureAttempts && In.Errors == In.ObservedHits) {
+    D.Disable = true;
+    // A return observation has a known cause, and naming the scope instead would
+    // send the caller hunting a declaration that is in the right place. Measured
+    // on a live run: eight captures of a predicate's own locals, taken at its
+    // return, were reported as too expensive with advice to spell them more
+    // cheaply -- which a bare identifier cannot be. The remedy differs by what
+    // the name is, and "on": "entry" is only right for a parameter: a local is
+    // not assigned yet at entry, where it reads as uninitialised stack or as the
+    // previous call's leftover value, which is plausible and wrong.
+    D.Note =
+        In.AtReturn
+            ? formatv("stopped evaluating \"{0}\": it produced no value at any "
+                      "of its {1} hits. This observation is taken as the "
+                      "function returns, where its frame has already been "
+                      "popped, so its parameters and locals cannot be read "
+                      "there. Capture \"{2}\" for what it produced; read a "
+                      "parameter with \"on\": \"entry\", and a local at a source "
+                      "location after it is assigned, \"at\": "
+                      "\"file.cpp:LINE\", since at entry it holds whatever was "
+                      "on the stack.",
+                      In.Expr, In.Errors, "$return")
+                  .str()
+            : formatv("stopped evaluating \"{0}\": it produced no value at any "
+                      "of its {1} hits, so the name does not resolve where this "
+                      "observation is taken. Check that it is in scope there -- "
+                      "a local declared further down the function, or a member "
+                      "of another object, resolves nowhere at this line -- "
+                      "rather than spelling it more cheaply.",
+                      In.Expr, In.Errors)
+                  .str();
+    return D;
+  }
+
   // A path is a debug-info lookup and a memory read. It cannot be why a run
   // misses its deadline, so turning it off would trade data for nothing.
   if (In.Tier == ValueResolutionTier::VariablePath ||
@@ -390,12 +433,29 @@ json::Value RankedFrame::Render() const {
 //===----------------------------------------------------------------------===//
 
 json::Value CaptureReport::Render() const {
+  // `$return` is read out of the ABI's result location rather than resolved
+  // from a name, so it has no tier and costs no evaluation. Reporting it as an
+  // expression that was never evaluated would mark the one capture that cannot
+  // fail as the one that did.
+  if (FromABI)
+    return "abi";
+
   // A capture that resolved as a path and never failed has nothing to say
   // beyond how it resolved, and most captures are that.
   if (!Disabled && Errors == 0 && Tier == ValueResolutionTier::VariablePath)
     return ToString(Tier);
 
-  json::Object O{{"tier", ToString(Tier)},
+  // Never evaluated is not the same as could not be read: the observation may
+  // never have been hit, or its condition never held. The default tier renders
+  // "unavailable", which is the word an expression that genuinely failed gets,
+  // so reporting it here would collapse the distinction the rest of plan_report
+  // is built to keep. The counts stay beside it either way -- `evaluations: 0`
+  // is what says which of the two this is.
+  const std::string TierName = Evaluations == 0 && !Disabled
+                                   ? std::string("not_evaluated")
+                                   : ToString(Tier).str();
+
+  json::Object O{{"tier", TierName},
                  {"evaluations", static_cast<int64_t>(Evaluations)},
                  {"total_ms", Round2(TotalMs)}};
   if (Errors != 0)
@@ -476,10 +536,16 @@ json::Value ArtifactReport::Render() const {
 
   // A path alone leaves a reader to discover the shape by opening the file.
   // Naming the fields is what makes the artifact greppable without reading it,
-  // which is the point of writing it out rather than inlining it.
+  // which is the point of writing it out rather than inlining it. Every name
+  // here has to be one the lines actually carry, so `frames` appears only for a
+  // plan that asked for a backtrace.
   if (!Path.empty()) {
     O["format"] = "one JSON object per line";
-    O["fields"] = json::Array{"seq", "label", "tid", "t_ms", "frame", "values"};
+    json::Array Fields{"seq", "label", "tid", "t_ms", "frame"};
+    if (CarriesBacktrace)
+      Fields.push_back("frames");
+    Fields.push_back("values");
+    O["fields"] = std::move(Fields);
   }
   return O;
 }
@@ -999,10 +1065,21 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
   // one of them to a hit it never meant.
   const uint64_t Hit = static_cast<uint64_t>(Obs.SkipFirst) + Site.Recorded;
 
+  // `only_hit` selects one hit, and reading state at the others buys nothing:
+  // the event is going to be skipped, and the aggregate a caller would have got
+  // from them is what the run that named this hit already reported. Not skipping
+  // makes the documented follow-up loop -- re-run for the one interesting hit,
+  // where "cost does not matter at one hit, so captures can be as generous as
+  // you like" -- pay every capture at every hit instead: a 25 ms expression on a
+  // tracepoint hit four thousand times costs 100 s rather than 25 ms, and a
+  // capture that prints, which is how a compiler dumps a node, prints four
+  // thousand times over.
+  const bool ReadState = !Obs.OnlyHit || Hit == *Obs.OnlyHit;
+
   json::Object Values;
   std::string Rendered;
 
-  if (Obs.OnReturn && Site.ReturnType.IsValid() && Frame) {
+  if (ReadState && Obs.OnReturn && Site.ReturnType.IsValid() && Frame) {
     // At the return address the observed frame is already gone, so the value
     // the function produced is read from the ABI's result location rather than
     // from the frame. Captures naming the function's own locals cannot be read
@@ -1028,6 +1105,8 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
   }
 
   for (ObservationSite::CaptureState &Capture : Site.Captures) {
+    if (!ReadState)
+      break;
     if (Capture.Disabled)
       continue;
 
@@ -1038,9 +1117,27 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     if (Obs.OnReturn && Capture.Expr == ReturnValueCapture)
       continue;
 
+    // At a return site frame #0 is the *caller*: the observed frame was popped
+    // when the function returned. Resolving against it does not merely fail to
+    // read what the function owned -- for a recursive function, or any caller
+    // holding a name the callee also used, it succeeds and reports the caller's
+    // value under the callee's name. Measured on a five-deep recursion, a
+    // capture of the parameter came back shifted by exactly one frame, which in
+    // an aggregate is indistinguishable from the right answer. A missing value
+    // announces itself and a wrong one does not, so resolution is scoped to the
+    // thread: globals and memory reads keep working, and there is no frame for a
+    // local to be found in.
+    ExecutionContextScope *Scope = Frame;
+    if (Obs.OnReturn) {
+      lldb::ThreadSP T = Frame ? Frame->GetThread() : nullptr;
+      Scope = T ? static_cast<ExecutionContextScope *>(T.get())
+                : static_cast<ExecutionContextScope *>(m_target.get());
+    }
+
     const Clock::time_point Started = Clock::now();
-    ValueResolution Resolved = ResolveValueDWIM(Capture.Expr, Frame, *m_target,
-                                                Frame, CaptureOptions());
+    ValueResolution Resolved =
+        ResolveValueDWIM(Capture.Expr, Obs.OnReturn ? nullptr : Frame,
+                         *m_target, Scope, CaptureOptions());
     const Micros Elapsed =
         std::chrono::duration_cast<Micros>(Clock::now() - Started);
     Capture.Spent += Elapsed;
@@ -1080,6 +1177,8 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     Cost.ObservedHits = Capture.Evaluations;
     Cost.TotalHits = Site.Hits;
     Cost.Remaining = Remaining();
+    Cost.Errors = Capture.Errors;
+    Cost.AtReturn = Obs.OnReturn;
     Cost.Expr = Capture.Expr;
     if (CaptureCostDecision Decision = AssessCaptureCost(Cost);
         Decision.Disable)
@@ -1404,8 +1503,12 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
             .str();
     break;
   case Outcome::NoProgress:
+    // "Hit", not "emitted": progress is any arrival at a tracepoint, so a run
+    // whose condition never holds keeps making progress and never ends here.
+    // Saying "emitted" would send a reader to change an emission mode that had
+    // nothing to do with it.
     Terminal.Description =
-        formatv("no event was emitted for {0}s and the program was stopped",
+        formatv("no tracepoint was hit for {0}s and the program was stopped",
                 m_plan.NoProgressSeconds.value_or(0))
             .str();
     break;
@@ -1604,24 +1707,35 @@ Expected<ObservationResult> ObservationEngine::Run() {
       Rendered.Errors = Capture.Errors;
       Rendered.TotalMs = ToMs(Capture.Spent);
       Rendered.Disabled = Capture.Disabled;
+      Rendered.FromABI =
+          Site->Obs->OnReturn && Capture.Expr == ReturnValueCapture;
       Report.Captures.push_back(std::move(Rendered));
     }
 
     // A capture that failed at every hit of a return observation is almost
     // always one naming state the observed function owned. Saying so is the
     // difference between a fixable mistake and an unexplained empty column.
+    // Any one such capture earns the note rather than only a plan where every
+    // capture failed: one global that resolved alongside three locals that could
+    // not does not make the three self-explanatory, and naming `$return`
+    // explicitly must not buy silence either, since it never evaluates.
     if (Site->Obs->OnReturn && Site->Recorded != 0 &&
-        all_of(Site->Captures,
+        any_of(Site->Captures,
                [](const ObservationSite::CaptureState &Capture) {
-                 return Capture.Evaluations != 0 &&
+                 return Capture.Expr != ReturnValueCapture &&
+                        Capture.Evaluations != 0 &&
                         Capture.Errors == Capture.Evaluations;
-               }) &&
-        !Site->Captures.empty())
+               }))
       m_result.Notes.push_back(
           formatv("observation \"{0}\" is taken as the function returns, where "
                   "its frame has already been popped, so nothing it owned can "
-                  "still be read. The value it produced is reported as "
-                  "\"{1}\"; anything else has to be captured on entry.",
+                  "still be read -- and the caller's frame, which is what is "
+                  "current there, is deliberately not read in its place. The "
+                  "value it produced is reported as \"{1}\" and state outside "
+                  "the frame such as a global still reads. Read a parameter "
+                  "with \"on\": \"entry\"; read a local at a source location "
+                  "past its assignment, since at entry it has not been assigned "
+                  "and holds whatever the stack held.",
                   Site->Obs->Label, ReturnValueCapture)
               .str());
 
@@ -1685,6 +1799,9 @@ Expected<ObservationResult> ObservationEngine::Run() {
     // aggregate, and the events are a file away either way.
     if (IsAbnormal(Result))
       Artifact.Tail = m_tail_events;
+    Artifact.CarriesBacktrace = any_of(m_sites, [](const auto &Site) {
+      return Site->Obs->Backtrace > 0;
+    });
     m_result.Artifact = std::move(Artifact);
   }
 

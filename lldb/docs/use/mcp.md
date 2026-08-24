@@ -112,6 +112,16 @@ another observation has been hit), `skip_first`, `only_hit`, `backtrace`,
 `depth`, and `on` set to `entry` or `return`. `emit` is `every_hit`,
 `on_change`, or `first_and_last`.
 
+An `on: return` observation is taken where the function returns to, at which
+point its frame has already been popped. The value it produced is captured as
+`$return`, and state that does not live in the frame — a global, a static — still
+reads. Its own parameters and locals do not, and are reported as unavailable
+rather than being read from the caller's frame, which is the frame that is
+current there: for a recursive function that substitution would return the
+caller's value under the callee's name, shifted by exactly one frame and
+indistinguishable in the aggregate from the right answer. Capture those at
+`on: entry`.
+
 The plan itself also takes `args`, `env`, `cwd`, `stdin` (a path whose contents
 are fed to the program), `capture_inferior_output` (on unless turned off), and
 `no_progress_seconds`, which ends a run that goes that long without any
@@ -127,13 +137,22 @@ failure. That is the shortest useful plan:
 {"plan": {"program": "build/bin/opt", "args": ["-passes=instcombine", "repro.ll"]}}
 ```
 
+For a program that hangs rather than crashes this is the first step and not the
+last: it reports the stack where the run was stopped, which names the functions
+involved, but a `cycle` needs tracepoints to emit the events it is found in. Run
+it again with an observation on each function the backtrace named to get the
+repeating block.
+
 #### Reading the result
 
 The response carries `outcome` — `exited`, `crashed`, `timed_out` or
 `no_progress` — a `plan_report` per observation, an `aggregate`, a `terminal`
 event, and a pointer to the artifact. A run that got stuck also carries a
 `cycle`, the block of locations the end of the run kept traversing, which for a
-program that did not terminate is usually the answer. `inferior_output` holds
+program that did not terminate is usually the answer. The cycle is found in the
+event stream rather than on the stack, so it appears only for a plan that had
+tracepoints to emit events: a stuck run with an empty `observe` list reports
+where it was stopped and no cycle. `inferior_output` holds
 the program's own output, and `notes` holds what went wrong that no single
 observation owns.
 
@@ -144,7 +163,11 @@ One vector type among four thousand integers, with the hit where it first
 appeared, is the bug — computed rather than left to be found. Re-run with
 `only_hit` set to that `first_hit` to record that single hit in full detail;
 cost does not matter at one hit, so captures and backtrace depth can be as
-generous as you like.
+generous as you like. Captures are read at that hit alone, so the aggregate of
+such a run covers it rather than the whole run — which is what the run that named
+the hit already reported. A capture whose value is a call that prints, which is
+how a compiler dumps a node, is worth having here for the same reason: it runs
+once, and what it printed arrives in `inferior_output`.
 
 An outlier carries two numbers because they count different things.
 `first_hit` counts that observation's own hits and is what `only_hit` takes.
@@ -226,11 +249,11 @@ session_close                             -> deleted lldb-mcp://debugger/1
 ```
 
 :::{note}
-Sessions start in asynchronous mode, where `run` and `continue` return before
-the process actually stops. Commands that need a stopped process then fail with
-"Command requires a process which is currently stopped". Run
-`script lldb.debugger.SetAsync(False)` once, right after `session_create`, to
-get the synchronous behavior shown above.
+Sessions `session_create` makes run synchronously, so `run` and `continue`
+return once the process has actually stopped, as shown above. A session in an
+LLDB you started yourself keeps whatever mode that LLDB is in; if a command
+there fails with "Command requires a process which is currently stopped", run
+`script lldb.debugger.SetAsync(False)` in it.
 :::
 
 The debuggee's own output does not come back through MCP. Only debugger output
@@ -329,11 +352,14 @@ stable and may be reused when a target is removed and a new target is added.
 
 ## Troubleshooting
 
-**"no debugger found" from `command`.** There is no session to run the command
-in. Call `session_create` first, or pass the URI of an existing session.
+**"no debug session exists yet" from `command` or `observe`.** There is no
+session to run in. Call `session_create` first, or pass the URI of an existing
+session. A `debugger` URI that names a session which is not there reports "no
+debugger found" instead; `sessions_list` says which ones exist.
 
 **"Command requires a process which is currently stopped".** The session is in
-asynchronous mode. Run `script lldb.debugger.SetAsync(False)` in it.
+asynchronous mode. Sessions `lldb-mcp` creates are synchronous, so this is an
+LLDB you started yourself; run `script lldb.debugger.SetAsync(False)` in it.
 
 **"can only close sessions that lldb-mcp created".** `session_close` refuses to
 tear down an interactive LLDB. Quit that LLDB yourself.

@@ -177,6 +177,42 @@ TEST(ObservationEngineTest, CostControlNeverDisablesAPath) {
   EXPECT_DOUBLE_EQ(Kept.PerHitMs, 2000.0);
 }
 
+// A name that resolves nowhere costs an expression compile at every hit and
+// yields nothing. Measured at ~90 ms each, so waiting for the time budget to
+// notice wastes seconds of a timeout-bound run and then blames the spelling.
+TEST(ObservationEngineTest, CaptureFailingAtEveryHitIsStoppedAsUnresolvable) {
+  // Well inside the time budget: this must not depend on the cost test.
+  CaptureCostInput In = Cost(Ms(1), UnresolvableCaptureAttempts, Ms(100000));
+  In.Tier = ValueResolutionTier::Unresolved;
+  In.Errors = UnresolvableCaptureAttempts;
+  In.Expr = "Low16";
+
+  CaptureCostDecision Off = AssessCaptureCost(In);
+  ASSERT_TRUE(Off.Disable);
+  EXPECT_NE(Off.Note.find("does not resolve"), std::string::npos) << Off.Note;
+  // The cost advice would be nonsense for a bare identifier, which is already
+  // the cheapest form a name has.
+  EXPECT_EQ(Off.Note.find("cheaper"), std::string::npos) << Off.Note;
+}
+
+TEST(ObservationEngineTest, ACaptureThatSometimesResolvesIsKept) {
+  // A pointer null at the first hits and set later is worth keeping, so only a
+  // capture that failed at *every* attempt is treated as unresolvable.
+  CaptureCostInput In = Cost(Ms(1), 10, Ms(100000));
+  In.Tier = ValueResolutionTier::Expression;
+  In.Errors = 9;
+
+  EXPECT_FALSE(AssessCaptureCost(In).Disable);
+}
+
+TEST(ObservationEngineTest, OneFailureIsNotEnoughToCallANameUnresolvable) {
+  CaptureCostInput In = Cost(Ms(1), 1, Ms(100000));
+  In.Tier = ValueResolutionTier::Unresolved;
+  In.Errors = 1;
+
+  EXPECT_FALSE(AssessCaptureCost(In).Disable);
+}
+
 TEST(ObservationEngineTest, CostControlSurvivesAnExhaustedBudget) {
   CaptureCostDecision Off = AssessCaptureCost(Cost(Ms(1), 1, Ms(0)));
   EXPECT_TRUE(Off.Disable);
@@ -511,8 +547,35 @@ TEST(ObservationEngineTest, PathCaptureCollapsesToItsTier) {
   EXPECT_EQ(Render(Capture.Render()), "\"path\"");
 }
 
-TEST(ObservationEngineTest, DisabledCaptureCarriesItsNumbersAndTheFix) {
+// A capture the run never reached says nothing about whether it could be read.
+// Rendering the default tier here would label it "unavailable", which is the
+// word a capture that was evaluated and failed gets, so a plan whose tracepoint
+// never fired would read as a plan whose expressions were wrong. The counts stay
+// beside the tier, since `evaluations` is what tells the two apart.
+TEST(ObservationEngineTest, NeverEvaluatedCaptureIsNotCalledUnavailable) {
   CaptureReport Capture;
+  Capture.Expr = "I.Ty.TypeID";
+  Capture.Evaluations = 0;
+
+  std::string S = Render(Capture.Render());
+  EXPECT_NE(S.find("\"tier\":\"not_evaluated\""), std::string::npos) << S;
+  EXPECT_NE(S.find("\"evaluations\":0"), std::string::npos) << S;
+  EXPECT_EQ(S.find("unavailable"), std::string::npos) << S;
+}
+
+// `$return` is read from the ABI's result location rather than resolved from a
+// name, so it never evaluates. Falling through to the evaluation-count report
+// would mark the one capture at a return site that cannot fail as unavailable.
+TEST(ObservationEngineTest, ReturnValueCaptureReportsThatItCameFromTheABI) {
+  CaptureReport Capture;
+  Capture.Expr = "$return";
+  Capture.Evaluations = 0;
+  Capture.FromABI = true;
+
+  EXPECT_EQ(Render(Capture.Render()), "\"abi\"");
+}
+
+TEST(ObservationEngineTest, DisabledCaptureCarriesItsNumbersAndTheFix) {  CaptureReport Capture;
   Capture.Expr = "I->getName()";
   Capture.Tier = ValueResolutionTier::Expression;
   Capture.Evaluations = 10;

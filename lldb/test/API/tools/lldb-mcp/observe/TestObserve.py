@@ -345,9 +345,11 @@ class ObserveTestCase(TestBase):
         self.assertEqual(report["emitted"], 0)
 
         # A hit whose condition was false is not captured either, so the
-        # capture reports no evaluations rather than a hundred failures.
+        # capture reports no evaluations rather than a hundred failures -- and
+        # says so as "not_evaluated", not with the word a capture that was read
+        # and failed gets.
         capture = report["captures"]["value"]
-        self.assertEqual(capture_tier(capture), "unavailable")
+        self.assertEqual(capture_tier(capture), "not_evaluated")
         self.assertEqual(capture["evaluations"], 0)
 
         # Nothing was recorded, so there is nothing to aggregate.
@@ -673,7 +675,11 @@ class ObserveTestCase(TestBase):
         with open(document["artifact"]["path"], "r") as stream:
             events = [json.loads(line) for line in stream.read().splitlines() if line]
         self.assertEqual(len(events), 1, str(events))
-        self.assertIn("backtrace", events[0], str(events[0]))
+        # The per-event backtrace is written under "frames", the same key the
+        # terminal event uses for its own, and is advertised in the artifact's
+        # field list so a reader does not have to open the file to find it.
+        self.assertIn("frames", events[0], str(events[0]))
+        self.assertIn("frames", document["artifact"]["fields"], str(document))
 
     def test_empty_capture_is_a_bare_hit_counter(self):
         """An observation with nothing to read still answers whether code ran."""

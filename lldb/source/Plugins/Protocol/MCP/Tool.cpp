@@ -73,7 +73,12 @@ Expected<DebuggerSP> findDebugger(StringRef specifier) {
     for (size_t i = 0; i < Debugger::GetNumDebuggers(); i++)
       if (DebuggerSP debugger_sp = Debugger::GetDebuggerAtIndex(i))
         return debugger_sp;
-    return createStringError("no debugger found");
+    // Distinct from the message a named-but-missing debugger gets below. Here
+    // there is no session at all, and the caller has not said which one it
+    // wanted, so the fix is a step it has not taken rather than a bad argument.
+    return createStringError(
+        "no debug session exists yet: call session_create to open one, or pass "
+        "\"debugger\" with a uri from sessions_list");
   }
 
   StringRef id = specifier;
@@ -176,7 +181,8 @@ const StringLiteral lldb_private::mcp::ObserveToolDescription =
     "Read \"aggregate\" first. Its \"outliers\", the values seen once or twice "
     "among many hits, are usually the answer. Then re-run with \"only_hit\" "
     "set to that outlier's \"first_hit\", which records that one hit in full "
-    "detail.\n"
+    "detail: captures are read there alone, so a call is affordable, and what "
+    "one prints comes back in \"inferior_output\".\n"
     "\n"
     "An outlier carries two numbers because they count different things. "
     "\"first_hit\" counts that observation's own hits and is what \"only_hit\" "
@@ -233,7 +239,10 @@ json::Value observationSchema() {
                         "is observed more than once.")},
            {"on", schemaEnum(json::Array{"entry", "return"}, "entry",
                              "Whether state is read as the function returns "
-                             "rather than as it is entered.")},
+                             "rather than as it is entered. At \"return\" the "
+                             "frame is already gone: capture \"$return\", since "
+                             "the function's own parameters and locals cannot "
+                             "be read there.")},
            {"capture",
             schemaStringArray(
                 "Expressions to read at each hit. Empty is a bare tracepoint "

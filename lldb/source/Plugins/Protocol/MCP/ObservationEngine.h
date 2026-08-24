@@ -142,9 +142,28 @@ struct CaptureCostInput {
   /// Time left before the run's wall-clock ceiling.
   std::chrono::microseconds Remaining{0};
 
+  /// Evaluations that produced no value. A capture that has failed at every one
+  /// of them names something that does not resolve where the observation is
+  /// taken, which is a different fault from costing too much and wants a
+  /// different remedy.
+  uint64_t Errors = 0;
+
+  /// Whether the observation is taken as the function returns, where its frame
+  /// is already gone. That is the likeliest reason a capture resolves nowhere,
+  /// and it has a different fix from a name that is merely out of scope, so the
+  /// note has to be able to tell them apart.
+  bool AtReturn = false;
+
   /// The capture expression, so that the note can name a cheaper form of it.
   std::string Expr;
 };
+
+/// Attempts a capture gets before failing at all of them is read as a name that
+/// cannot resolve at this location rather than as bad luck. One is too few: a
+/// pointer that is null at the first hit and set at the second is worth keeping.
+/// The cost of being wrong here is bounded by the note, which says what was
+/// stopped and why, so a caller that meant it can ask again.
+constexpr uint64_t UnresolvableCaptureAttempts = 3;
 
 /// Why a capture was, or was not, turned off, in the terms the report needs.
 struct CaptureCostDecision {
@@ -322,6 +341,10 @@ struct CaptureReport {
   /// Set when cost control turned the capture off partway through the run.
   std::optional<CaptureCostDecision> Disabled;
 
+  /// Set for `$return`, which is read from the ABI's result location rather
+  /// than resolved from a name, so it has neither a tier nor a per-hit cost.
+  bool FromABI = false;
+
   llvm::json::Value Render() const;
 };
 
@@ -421,6 +444,12 @@ struct ArtifactReport {
 
   /// The last few events, inlined only when the program ended abnormally.
   std::vector<llvm::json::Value> Tail;
+
+  /// Whether any observation asked for a backtrace, which is what puts a
+  /// `frames` on an event. The field list is checked against what a line
+  /// actually carries, so advertising it unconditionally would send a reader
+  /// looking for a field that is not there on a plan that never asked for one.
+  bool CarriesBacktrace = false;
 
   llvm::json::Value Render() const;
 };
