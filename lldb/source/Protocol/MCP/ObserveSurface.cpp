@@ -142,12 +142,14 @@ json::Value lldb_protocol::mcp::ObservationPlanSchema() {
                  "turned off."}}},
            {"timeout_seconds",
             schemaNumber(30,
-                         "Wall-clock ceiling on the whole run, covering the "
-                         "debug info read before the program starts as well as "
-                         "the program itself. Reaching it is a result and not "
-                         "an error: the run comes back with \"outcome\": "
-                         "\"timed_out\", everything observed up to that point, "
-                         "and where the program was stopped.")},
+                         "Wall-clock ceiling on the program, measured from the "
+                         "launch: reading its debug info happens first and is "
+                         "reported separately as \"setup_ms\", so a large binary "
+                         "does not spend the budget for running it. Reaching the "
+                         "ceiling is a result and not an error: the run comes "
+                         "back with \"outcome\": \"timed_out\", everything "
+                         "observed up to that point, and where the program was "
+                         "stopped.")},
            {"no_progress_seconds",
             schemaField(
                 "integer",

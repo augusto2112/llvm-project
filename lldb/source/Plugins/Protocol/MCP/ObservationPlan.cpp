@@ -33,6 +33,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <chrono>
 #include <optional>
 #include <string>
 #include <utility>
@@ -458,51 +459,157 @@ Error CheckLabels(ArrayRef<Observation> Observations) {
   return Error::success();
 }
 
-/// Every function name in the modules loaded into \p Tgt, sorted and
-/// deduplicated. Worth building only once a name has failed to resolve, since
-/// at that point the whole set has to be ranked: a misspelling shares no
-/// dependable substring with the name that was meant.
-std::vector<std::string> CollectFunctionNames(Target &Tgt) {
-  ModuleFunctionSearchOptions Options;
-  Options.include_symbols = true;
-  Options.include_inlines = false;
+/// Names collected for a suggestion, and how long collecting them may take.
+///
+/// The time is a real bound and is reached: a spelling is tested by asking for the
+/// breakpoint it would resolve to, measured at about 7 ms against a 238 MB debug
+/// build, and a long name has a few thousand spellings one character away from it.
+/// Two seconds buys the likeliest few hundred of them, is charged only where a
+/// name has already failed to resolve, and is what the search it replaced spent
+/// every 14 names -- that one cost 332 seconds and took them from the run.
+constexpr size_t MaxSuggestionCandidates = 4096;
+constexpr std::chrono::milliseconds MaxSuggestionTime{2000};
 
-  SymbolContextList Found;
-  RegularExpression AnyName(".");
-  Tgt.GetImages().FindFunctions(AnyName, Options, Found);
+/// How far off a name may be and still be worth suggesting. Tolerance grows with
+/// length: one slip in a short name makes a different name, while a long name
+/// stays recognisable through a couple of them.
+unsigned NameTolerance(StringRef Name) {
+  return std::max<unsigned>(2, static_cast<unsigned>(Name.size() / 3));
+}
 
-  // Without the argument list, because that is the form a caller writes. A
-  // demangled C++ name carries its parameters -- "leaf(Big*, int)" -- which puts
-  // every C++ function in the program eleven or more edits away from the bare
-  // name that was asked for, while a C function's symbol is its name and matches.
-  // The result was that a misspelling of a C++ function was answered with
-  // whichever libc functions happened to be spelled similarly: "lief" was met
-  // with "link", "logf" and "sinf", and not with the "leaf" it was one
-  // transposition away from in the same file.
+/// The last component of \p At, which is the part a misspelling is in: a caller
+/// writing "llvm::VectorCombine::foldBitcastShufle" has the scope right and the
+/// name wrong, because the scope is what they copied.
+StringRef BaseName(StringRef At) {
+  const size_t Scope = At.rfind("::");
+  return Scope == StringRef::npos ? At : At.drop_front(Scope + 2);
+}
+
+/// Names one edit away from \p At, found by looking each spelling up rather than
+/// by searching the program for names resembling it.
+///
+/// Searching is the obvious way and it cannot be made cheap. A regex over every
+/// function has to walk the debug information of every compile unit, since a
+/// pattern cannot use the name index: measured on a 238 MB debug build of a
+/// compiler, 332 seconds with the symbol table included and 99 without -- charged
+/// to a caller who had made a typo, whose run then reported the program as having
+/// hung inside the dynamic loader because the wall clock had gone on the
+/// suggestion.
+///
+/// Looking up is the other direction. An exact name goes through the accelerated
+/// index, which is a hash probe and is already warm from the failed resolution
+/// that got us here, so the cost is one probe per spelling rather than one
+/// comparison per function in the program. The spellings are the classic single
+/// edits -- a character dropped, two transposed, one replaced, one inserted --
+/// which is what a typo is.
+///
+/// Only the last component is varied, and each spelling is looked up unqualified.
+/// A caller who has the scope wrong is answered anyway: "VectorCombine" that is
+/// really in an anonymous namespace resolves by base name.
+struct Suggestions {
   std::vector<std::string> Names;
-  Names.reserve(Found.GetSize());
-  for (const SymbolContext &SC : Found)
-    if (ConstString Name =
-            SC.GetFunctionName(Mangled::ePreferDemangledWithoutArguments))
-      Names.push_back(Name.GetStringRef().str());
+
+  /// Whether the search stopped before it had tried every spelling. What the
+  /// message may claim depends on it: "nothing is close" is a statement about the
+  /// program, and a search that was cut short did not establish it.
+  bool Partial = false;
+};
+
+Suggestions CollectCandidateNames(Target &Tgt, StringRef At) {
+  const StringRef Wanted = BaseName(At);
+  if (Wanted.size() < 2)
+    return {};
+  Suggestions Result;
+
+  std::vector<std::string> &Names = Result.Names;
+  const auto Started = std::chrono::steady_clock::now();
+  bool &OutOfTime = Result.Partial;
+
+  // Tested by asking for the breakpoint the observation would have asked for.
+  // Looking the name up directly is cheaper and does not agree: a bare
+  // `visitAdd` finds nothing through `FindFunctions` under any name-type mask
+  // that also works for a free function, while the resolver finds the 27
+  // locations of the method by that name. Agreeing with the resolver is also what
+  // makes the suggestion worth printing -- every name suggested is one that would
+  // have resolved, rather than one that merely exists somewhere in the program.
+  auto Probe = [&](const std::string &Spelling) {
+    if (OutOfTime || Names.size() >= MaxSuggestionCandidates)
+      return;
+    // Read per probe rather than around the whole loop: what has to be bounded is
+    // the time a suggestion costs the run, and a program whose index is slower
+    // than expected is exactly the case a fixed count would not catch.
+    if (std::chrono::steady_clock::now() - Started > MaxSuggestionTime) {
+      OutOfTime = true;
+      return;
+    }
+    lldb::BreakpointSP BP = Tgt.CreateBreakpoint(
+        /*containingModules=*/nullptr, /*containingSourceFiles=*/nullptr,
+        Spelling.c_str(), lldb::eFunctionNameTypeAuto, lldb::eLanguageTypeUnknown,
+        /*offset=*/0, /*offset_is_insn_count=*/false, eLazyBoolCalculate,
+        /*internal=*/false, /*request_hardware=*/false);
+    if (!BP)
+      return;
+    if (BP->GetNumLocations() != 0)
+      Names.push_back(Spelling);
+    // Internal breakpoints stay out of the caller's list, but not out of the
+    // target's: a run that left two thousand of them behind would install every
+    // one of them.
+    Tgt.RemoveBreakpointByID(BP->GetID());
+  };
+
+  static constexpr StringLiteral Alphabet =
+      "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
+
+  // Ordered by class rather than by position, so that a budget spent before the
+  // end has been spent on the likelier mistakes. A dropped character and two
+  // transposed are a handful of spellings between them; replacing and inserting
+  // are sixty-three each per position, and they are the classes a bound reaches.
+  const std::string Base = Wanted.str();
+  for (size_t I = 0; I < Base.size(); ++I) {
+    std::string Dropped = Base;
+    Dropped.erase(I, 1);
+    Probe(Dropped);
+  }
+  for (size_t I = 0; I + 1 < Base.size(); ++I) {
+    if (Base[I] == Base[I + 1])
+      continue;
+    std::string Swapped = Base;
+    std::swap(Swapped[I], Swapped[I + 1]);
+    Probe(Swapped);
+  }
+  for (size_t I = 0; I < Base.size(); ++I)
+    for (char C : Alphabet)
+      if (C != Base[I]) {
+        std::string Replaced = Base;
+        Replaced[I] = C;
+        Probe(Replaced);
+      }
+  for (size_t I = 0; I <= Base.size(); ++I)
+    for (char C : Alphabet) {
+      std::string Inserted = Base;
+      Inserted.insert(I, 1, C);
+      Probe(Inserted);
+    }
 
   llvm::sort(Names);
   Names.erase(std::unique(Names.begin(), Names.end()), Names.end());
-  return Names;
+  return Result;
 }
 
 /// The names closest to \p Wanted, nearest first, at most \p Limit of them.
+///
+/// Compared on the last component alone and reported whole, so that a caller who
+/// wrote a bare name is answered with the qualified one it belongs to rather than
+/// with nothing: a scope the caller never wrote is not a mistake they made.
 std::vector<StringRef> NearestNames(StringRef Wanted,
                                     ArrayRef<std::string> Names, size_t Limit) {
-  // Tolerance grows with length: one slip in a short name makes a different
-  // name, while a long name stays recognisable through a couple of them.
-  const unsigned Tolerance =
-      std::max<unsigned>(2, static_cast<unsigned>(Wanted.size() / 3));
+  const StringRef WantedBase = BaseName(Wanted);
+  const unsigned Tolerance = NameTolerance(WantedBase);
 
   SmallVector<std::pair<unsigned, StringRef>, 8> Ranked;
   for (StringRef Name : Names) {
-    unsigned Distance =
-        Wanted.edit_distance(Name, /*AllowReplacements=*/true, Tolerance);
+    unsigned Distance = WantedBase.edit_distance(
+        BaseName(Name), /*AllowReplacements=*/true, Tolerance);
     // An exact match is not a suggestion: repeating the name back says nothing
     // about why it did not resolve.
     if (Distance != 0 && Distance <= Tolerance)
@@ -525,17 +632,29 @@ std::vector<StringRef> NearestNames(StringRef Wanted,
   return Nearest;
 }
 
-std::string DescribeUnresolved(StringRef At, ArrayRef<std::string> Names) {
-  std::vector<StringRef> Nearest = NearestNames(At, Names, /*Limit=*/3);
+std::string DescribeUnresolved(StringRef At, const Suggestions &Found) {
+  std::vector<StringRef> Nearest = NearestNames(At, Found.Names, /*Limit=*/3);
 
   std::string Message;
   raw_string_ostream OS(Message);
   OS << formatv("no code matched \"{0}\", so this observation cannot fire.",
                 At);
   if (Nearest.empty())
-    OS << " No similar name is present in the loaded modules either. A "
-          "function in a library that has not been loaded yet resolves when "
-          "the library loads; otherwise the name is not in this program.";
+    // Precisely what was looked for, because a suggestion is drawn by trying the
+    // spellings one character away from this one rather than by comparing against
+    // every name in the program: a name two characters wrong gets no suggestion,
+    // and saying "nothing similar exists" would be a claim about the program that
+    // was never tested. Where the search ran out of time it is less than that
+    // again, and says so.
+    OS << (Found.Partial
+               ? " The spellings one character away from it were being tried "
+                 "and the search ran out of time, so there may be a near one it "
+                 "did not reach."
+               : " No name one character away from it exists in the loaded "
+                 "modules either.")
+       << " A function in a library that has not been loaded yet resolves when "
+          "the library loads; otherwise check the spelling against the source, "
+          "or name the enclosing file and line instead.";
   else
     OS << formatv(" Did you mean {0}? Names are matched exactly, so a name "
                   "that is close is still a name that never fires.",
@@ -660,7 +779,6 @@ lldb_private::mcp::ResolveObservationLocations(ObservationPlan &Plan,
   std::vector<LocationResolution> Resolutions;
   Resolutions.reserve(Plan.Observations.size());
 
-  std::optional<std::vector<std::string>> Names;
 
   for (const Observation &Obs : Plan.Observations) {
     LocationResolution Resolution;
@@ -698,9 +816,11 @@ lldb_private::mcp::ResolveObservationLocations(ObservationPlan &Plan,
                     Obs.At, *Obs.AtLine)
                 .str();
       } else {
-        if (!Names)
-          Names = CollectFunctionNames(Tgt);
-        Resolution.Error = DescribeUnresolved(Obs.At, *Names);
+        // Drawn per name rather than once for the target: the shortlist is of
+        // names that could be misspellings of this one, so it cannot be shared
+        // with another.
+        Resolution.Error =
+            DescribeUnresolved(Obs.At, CollectCandidateNames(Tgt, Obs.At));
       }
     }
 

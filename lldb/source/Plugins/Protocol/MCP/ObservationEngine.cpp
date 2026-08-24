@@ -1218,8 +1218,15 @@ ValueResolutionOptions ObservationEngine::CaptureOptions() const {
 
 Micros ObservationEngine::Remaining() const {
   const Micros Budget = std::chrono::seconds(m_plan.TimeoutSeconds);
+  // Measured from the launch rather than from the call, so that reading a
+  // program's debug info does not spend the budget for running it. Measured on a
+  // 238 MB debug build: a misspelled function name took five minutes to answer,
+  // and a plan asking for sixty seconds came back saying the program was still
+  // running after sixty -- while it was still inside the dynamic loader, having
+  // had none. A ceiling that the setup can exhaust does not bound what the caller
+  // asked to bound, and it turns a slow answer into a false one.
   const Micros Spent =
-      std::chrono::duration_cast<Micros>(Clock::now() - m_start);
+      std::chrono::duration_cast<Micros>(Clock::now() - m_running_since);
   return Spent >= Budget ? Micros::zero() : Budget - Spent;
 }
 
@@ -1967,6 +1974,7 @@ void ObservationEngine::Teardown() {
 
 Expected<ObservationResult> ObservationEngine::Run() {
   m_start = Clock::now();
+  m_running_since = m_start;
   m_last_progress = m_start;
 
   lldb::TargetSP Target;
@@ -2002,8 +2010,10 @@ Expected<ObservationResult> ObservationEngine::Run() {
   if (Error E = Launch())
     return std::move(E);
 
+  m_running_since = Clock::now();
+  m_last_progress = m_running_since;
   m_result.SetupMs =
-      ToMs(std::chrono::duration_cast<Micros>(Clock::now() - m_start));
+      ToMs(std::chrono::duration_cast<Micros>(m_running_since - m_start));
 
   const Outcome Result = WaitForEnd();
   FlushHeldEvents();

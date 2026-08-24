@@ -128,7 +128,9 @@ indistinguishable in the aggregate from the right answer. Capture those at
 The plan itself also takes `args`, `env`, `cwd`, `stdin` (a path whose contents
 are fed to the program), `capture_inferior_output` (on unless turned off), and
 `no_progress_seconds`, which ends a run that goes that long without any
-tracepoint in the plan being hit. That last one is off unless asked for,
+tracepoint in the plan being hit. `timeout_seconds` is measured from the launch
+rather than from the call, so reading a large binary's debug info -- reported
+separately as `setup_ms` -- does not spend the budget for running it. That last one is off unless asked for,
 because a plan whose triggers only fire near the end of a long run is
 legitimate.
 
@@ -255,9 +257,12 @@ resolved to, how many times the tracepoint was hit, how many of those hits had a
 true condition, and how many events were emitted. A misspelled function name, a
 condition that never held, and code that never ran all produce no events, and
 these numbers are what tell them apart. A name that resolved to nothing comes
-back with the nearest names that do exist, matched without their argument lists so
-that a misspelled C++ function is answered with the function and not with whichever
-C library symbols happen to be spelled similarly; a name that resolved when its library
+back with the nearest names that do resolve, found by asking for each spelling one
+character away from it rather than by comparing against every name in the program:
+searching that way has to walk the debug information of every compile unit, which
+on a 238 MB debug build of a compiler took 332 seconds and spent the run's whole
+wall clock answering a typo. The search is bounded in time and says so when it was
+cut short, and every name it suggests is one that would have resolved; a name that resolved when its library
 loaded partway through the run comes back resolved, since the count is read after
 the run rather than before it.
 

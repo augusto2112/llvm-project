@@ -723,6 +723,11 @@ private:
 
   std::chrono::steady_clock::time_point m_start;
 
+  /// When the program started running, which is what its wall-clock ceiling is
+  /// measured from. Equal to \ref m_start until the launch returns, so a failure
+  /// before then is still bounded.
+  std::chrono::steady_clock::time_point m_running_since;
+
   /// When the plan last saw the program move, which is the last hit any
   /// observation took rather than the last event written.
   std::chrono::steady_clock::time_point m_last_progress;
