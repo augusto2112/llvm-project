@@ -42,9 +42,11 @@ expose functionality to clients. `lldb-mcp` exposes five.
 
 ### `session_create`
 
-Creates a new debug session and returns its URI. This is equivalent to
-launching a new instance of `lldb` on the command line. Sessions look like
-this:
+Creates a new debug session and returns its URI. This is equivalent to launching
+a new instance of `lldb` on the command line: a bare debugger with no program in
+it, since what to run is named per call, so one session serves any number of
+programs. Only `command` needs one — `trace_program` opens a session when there is
+none. Sessions look like this:
 
 ```
 lldb-mcp://instance/{pid}/debugger/{id}
@@ -311,7 +313,9 @@ elsewhere on the machine (see [Attaching to a Running LLDB](#attaching-to-a-runn
 ### `session_close`
 
 Closes a session and frees its resources. It takes a single required `session`
-argument, the URI to close. Only sessions that `lldb-mcp` created can be closed
+argument, the URI to close. Closing is optional: a session and everything in it
+goes away when the `lldb-mcp` process exits, which is when the client
+disconnects. It is worth doing to drop a large target early. Only sessions that `lldb-mcp` created can be closed
 this way. An interactive LLDB that a person is using belongs to that person, so
 closing it is refused.
 

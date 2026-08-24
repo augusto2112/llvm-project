@@ -279,14 +279,19 @@ Expected<ListToolsResult> Multiplexer::HandleToolsList() {
   ToolDefinition session_create;
   session_create.name = kToolSessionCreate;
   session_create.description =
-      "Create a new in-process debug session and return its URI.";
+      "Create a new in-process debug session and return its URI. A session is a "
+      "bare debugger with no program in it: what to run is named per call, so one "
+      "session serves any number of programs. Needed only for \"command\", since "
+      "\"trace_program\" opens one when there is none.";
   session_create.inputSchema = json::Object{{"type", "object"}};
   result.tools.push_back(std::move(session_create));
 
   ToolDefinition session_close;
   session_close.name = kToolSessionClose;
   session_close.description =
-      "Close a debug session previously created with session_create.";
+      "Close a debug session previously created with session_create. Optional: a "
+      "session and everything in it goes away when this server exits, which is "
+      "when the client disconnects. Worth doing to drop a large target early.";
   session_close.inputSchema = json::Object{
       {"type", "object"},
       {"properties",
