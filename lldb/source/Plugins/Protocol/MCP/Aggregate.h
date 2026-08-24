@@ -51,6 +51,11 @@ public:
   /// `values`, `transitions`, and `outliers` where a value is rare enough among
   /// enough hits to be worth naming.
   ///
+  /// Every field is a summary of all the hits rather than a prefix of them.
+  /// A prefix is the wrong shape for what a caller asks a summary: the first
+  /// thirty-two changes of a value that changes constantly describe the start
+  /// of the run, and the question is almost always about the whole of it.
+  ///
   /// The same recorded hits always render the same text: json::Object sorts its
   /// keys when printed, and every array is ordered by an explicit key.
   llvm::json::Value Render() const;
@@ -63,18 +68,36 @@ public:
   /// The most times a value can be seen and still be rare.
   static constexpr uint64_t MaxOutlierCount = 2;
 
+  /// A value repeats often enough for a rare one to stand out against it only
+  /// when values repeat at all. Measured on a capture of a compiler's node ids
+  /// over 1808 hits, all 1808 distinct: every value qualified as rare, and the
+  /// bound below rendered 32 of them plus a count of 1776 more -- three
+  /// kilobytes saying nothing except that the ids differ, which `distinct`
+  /// already said. Outliers are withheld unless each value is seen twice on
+  /// average, because "rare" among values that are all unique is not a fact
+  /// about the run.
+  static constexpr uint64_t MinRepeatsForOutliers = 2;
+
   /// Histogram keys kept in `values`. A capture that renders a distinct string
   /// on every hit would otherwise put one key per hit into the response, so the
   /// most frequent are kept and the remainder is reported as a count. Outliers
   /// are unaffected: they are selected before this bound applies, which is what
   /// keeps the rare value that is usually the answer from being the one
   /// dropped.
-  static constexpr size_t MaxHistogramValues = 32;
+  ///
+  /// Small, because the values worth naming individually are the frequent few
+  /// and the rare few, and `outliers` covers the second group. Past the first
+  /// handful a histogram of a high-cardinality capture is a list of equally
+  /// common values whose only content is their number.
+  static constexpr size_t MaxHistogramValues = 8;
 
-  /// Transitions kept. A capture that changes on nearly every hit would
-  /// otherwise render one transition per hit, making the summary as large as
-  /// the stream it stands in for.
-  static constexpr size_t MaxTransitions = 32;
+  /// Distinct transitions kept, ranked by how often each occurred. Recording
+  /// every change in order and keeping the first N of them summarised an
+  /// oscillation as N copies of the same two edges: measured on a capture that
+  /// cycled through four values, 32 entries reading 3->2, 2->1, 1->0, 0->3 over
+  /// and over, with 7959 more elided. The distinct edges with their counts say
+  /// the same thing in four.
+  static constexpr size_t MaxTransitions = 8;
 
   /// Outliers kept. A capture that renders a distinct value at every hit -- an
   /// address, a pointer -- makes every one of those values rare, so an
@@ -83,7 +106,7 @@ public:
   /// equally rare values the earliest, which is the order they are already
   /// ranked in: a bound that dropped the first sighting would defeat the point
   /// of reporting one.
-  static constexpr size_t MaxOutliers = 32;
+  static constexpr size_t MaxOutliers = 8;
 
 private:
   struct ValueStats {
@@ -95,11 +118,16 @@ private:
     uint64_t FirstHit = 0;
   };
 
-  /// A change of value, attributed to the hit that first showed the new one.
-  struct Transition {
-    uint64_t Seq = 0;
-    std::string From;
-    std::string To;
+  /// A change of value, counted over the run. The pair is what the reader acts
+  /// on -- "this went from legal to custom, 900 times" -- and counting the
+  /// distinct pairs rather than listing every change also bounds what a run of
+  /// millions of hits holds in memory.
+  struct EdgeStats {
+    uint64_t Count = 0;
+
+    /// The sequence number of the first hit that made this change, which is the
+    /// line of the artifact a reader goes to for it.
+    uint64_t FirstSeq = 0;
   };
 
   struct CaptureSummary {
@@ -109,7 +137,8 @@ private:
     /// Counts keyed by the rendered value.
     std::map<std::string, ValueStats> Values;
 
-    std::vector<Transition> Transitions;
+    /// Counts keyed by the pair moved between.
+    std::map<std::pair<std::string, std::string>, EdgeStats> Transitions;
 
     /// The value at the most recent hit, against which the next one is
     /// compared.

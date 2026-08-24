@@ -27,7 +27,7 @@ namespace {
 /// A hand-built value tree, so serialization can be tested without a process.
 class FakeNode : public ValueNode {
 public:
-  std::string Name, TypeName, Summary, Value;
+  std::string Name, TypeName, Summary, Value, Reason;
   Availability Avail = Availability::Available;
   uint64_t Identity = 0;
   std::vector<std::shared_ptr<FakeNode>> Children;
@@ -45,6 +45,7 @@ public:
     return Value;
   }
   Availability GetAvailability() override { return Avail; }
+  std::string GetUnavailableReason() override { return Reason; }
   uint64_t GetIdentity() override { return Identity; }
   size_t GetNumChildren() override { return Children.size(); }
   std::unique_ptr<ValueNode> GetChildAtIndex(size_t Idx) override;
@@ -61,6 +62,7 @@ public:
     return N->GetValueString();
   }
   Availability GetAvailability() override { return N->Avail; }
+  std::string GetUnavailableReason() override { return N->Reason; }
   uint64_t GetIdentity() override { return N->Identity; }
   size_t GetNumChildren() override { return N->Children.size(); }
   std::unique_ptr<ValueNode> GetChildAtIndex(size_t Idx) override {
@@ -217,4 +219,110 @@ TEST(SerializeValueTest, NodeWithChildrenKeepsItsOwnValue) {
   std::string S = ToString(SerializeValue(Ref, {}));
   EXPECT_NE(S.find("\"value\":\"0x0\""), std::string::npos) << S;
   EXPECT_NE(S.find("\"*p\""), std::string::npos) << S;
+}
+
+TEST(SerializeValueTest, UnavailableValueCarriesItsReason) {
+  // The kind groups the failure and the reason names it. Without the reason a
+  // reader cannot tell a misspelled capture from one that is out of scope from
+  // one whose symbol the binary does not hold, and all three are spelled
+  // "error".
+  auto A = MakeLeaf("a", "");
+  A->Avail = Availability::Error;
+  A->Reason = "use of undeclared identifier 'nosuch'";
+  FakeNodeRef Ref(A);
+  EXPECT_EQ(ToString(SerializeValue(Ref, {})),
+            R"({"reason":"use of undeclared identifier 'nosuch'",)"
+            R"("unavailable":"error"})");
+}
+
+TEST(SerializeValueTest, UnavailableValueWithNoReasonReportsOnlyTheKind) {
+  // A value the debugger has nothing to say about must not grow an empty field
+  // for the sake of a uniform shape.
+  auto A = MakeLeaf("a", "");
+  A->Avail = Availability::OptimizedOut;
+  FakeNodeRef Ref(A);
+  EXPECT_EQ(ToString(SerializeValue(Ref, {})),
+            R"({"unavailable":"optimized_out"})");
+}
+
+TEST(SerializeValueTest, ReasonIsTruncatedLikeAnyOtherString) {
+  auto A = MakeLeaf("a", "");
+  A->Avail = Availability::Error;
+  A->Reason = std::string(500, 'z');
+  SerializeValueOptions Opts;
+  Opts.MaxStringLength = 8;
+  FakeNodeRef Ref(A);
+  // A capture that fails at every hit of a hot tracepoint must not be able to
+  // spend the response on one repeated diagnostic.
+  EXPECT_EQ(ToString(SerializeValue(Ref, Opts)),
+            R"({"reason":"zzzzzzzz...","unavailable":"error"})");
+}
+
+TEST(SerializeValueTest, SharedBudgetIsSpentAcrossSeveralValues) {
+  // Every local of a frame goes into one response, so the response is what has
+  // to be bounded. Given a budget of its own, one local that reaches a large
+  // object spends as much as all the others put together.
+  auto Wide = std::make_shared<FakeNode>();
+  Wide->Name = "wide";
+  for (int I = 0; I < 20; ++I)
+    Wide->Children.push_back(MakeLeaf("c" + std::to_string(I), "0"));
+  auto Scalar = MakeLeaf("n", "42");
+
+  unsigned Budget = 6;
+  SerializeValueOptions Opts;
+  Opts.SharedBudget = &Budget;
+
+  FakeNodeRef WideRef(Wide);
+  const std::string First = ToString(SerializeValue(WideRef, Opts));
+  EXPECT_NE(First.find("_elided"), std::string::npos) << First;
+  EXPECT_EQ(Budget, 0u);
+
+  // The second value arrives after the budget is gone, and says so rather than
+  // being dropped without a trace.
+  FakeNodeRef ScalarRef(Scalar);
+  EXPECT_NE(ToString(SerializeValue(ScalarRef, Opts)).find("_elided"),
+            std::string::npos);
+
+  // Without sharing, the same scalar renders in full: the bound is the shared
+  // budget and not a property of the value.
+  EXPECT_EQ(ToString(SerializeValue(ScalarRef, {})), R"({"value":"42"})");
+}
+
+TEST(CondenseDiagnosticTest, ExpressionDiagnosticKeepsOnlyTheErrorLine) {
+  // The evaluator opens with what language it chose, which is true of every
+  // expression, and closes with clang's caret art, which is laid out for a
+  // terminal. Neither survives.
+  const std::string Message = "Ran expression as 'C++14'.\n"
+                              "error: <user expression 1>:1:1: use of "
+                              "undeclared identifier 'nosuch'\n"
+                              "    1 | nosuch(n)\n"
+                              "      | ^~~~~~\n";
+  EXPECT_EQ(CondenseDiagnostic(Message, 200),
+            "use of undeclared identifier 'nosuch'");
+}
+
+TEST(CondenseDiagnosticTest, HintAfterTheDiagnosticIsKept) {
+  // The hint follows the diagnostic, and for this failure it is the half that
+  // says what to do: the function is not in the binary, so no spelling of the
+  // call will work.
+  const std::string Message =
+      "Couldn't look up symbols:\n"
+      "  $__lldb_func::0x1:0xbef:_ZNK4Node8describeEv\n"
+      "Hint: The expression tried to call a function that is not present in "
+      "the target.\n";
+  EXPECT_EQ(CondenseDiagnostic(Message, 200),
+            "Couldn't look up symbols: The expression tried to call a function "
+            "that is not present in the target.");
+}
+
+TEST(CondenseDiagnosticTest, MessageWithNothingToStripIsKeptWhole) {
+  EXPECT_EQ(CondenseDiagnostic("parent is NULL", 200), "parent is NULL");
+  EXPECT_EQ(CondenseDiagnostic("", 200), "");
+}
+
+TEST(CondenseDiagnosticTest, BracketedWordIsNotMistakenForAPositionPrefix) {
+  // Only a bracket followed by line:column is a position, so a diagnostic that
+  // merely opens with a bracketed word keeps all of itself.
+  EXPECT_EQ(CondenseDiagnostic("error: <invalid> is not a type", 200),
+            "<invalid> is not a type");
 }

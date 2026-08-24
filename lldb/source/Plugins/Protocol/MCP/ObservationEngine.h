@@ -477,6 +477,18 @@ struct ObservationResult {
 
   double ElapsedMs = 0.0;
 
+  /// Of that, what was spent before the program started running: creating the
+  /// target, reading its debug info, and resolving the tracepoints.
+  ///
+  /// Reported separately because the two scale with different things and a
+  /// caller decides whether to run again on which one dominates. Measured on a
+  /// 238 MB debug build of a compiler, the first run in a session took 9.1 s and
+  /// the second, identical, 0.23 s: the cost is indexing that binary, it is
+  /// charged once per image rather than per hit, and a caller told only the total
+  /// concluded that tracepoints cost 250x and stopped using them for
+  /// measurement.
+  double SetupMs = 0.0;
+
   /// What went wrong that no single observation owns.
   std::vector<std::string> Notes;
 

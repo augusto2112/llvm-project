@@ -9,6 +9,7 @@
 #include "SerializeValue.h"
 #include "ValueNode.h"
 #include "llvm/ADT/SmallSet.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -56,6 +57,16 @@ std::string Truncate(std::string S, unsigned Max) {
   return S;
 }
 
+/// Whether \p Line is one of the two lines clang prints under a diagnostic to
+/// point at the offending column: the echoed source, `    1 | nosuch(n)`, and
+/// the carets under it. Both are laid out for a reader looking at a terminal and
+/// carry nothing a reader of one line needs.
+bool IsCaretArt(StringRef Line) {
+  if (Line.contains(" | "))
+    return true;
+  return Line.find_first_not_of("^~| \t") == StringRef::npos;
+}
+
 struct Serializer {
   const SerializeValueOptions &Opts;
   unsigned Budget;
@@ -66,7 +77,7 @@ struct Serializer {
   SmallSet<uint64_t, 32> Seen;
 
   explicit Serializer(const SerializeValueOptions &O)
-      : Opts(O), Budget(O.MaxNodes) {}
+      : Opts(O), Budget(O.SharedBudget ? *O.SharedBudget : O.MaxNodes) {}
 
   json::Value Elided(std::string Why) {
     json::Object O{{"_elided", std::move(Why)}};
@@ -81,8 +92,16 @@ struct Serializer {
     --Budget;
 
     Availability A = N.GetAvailability();
-    if (A != Availability::Available)
-      return json::Object{{"unavailable", AvailabilityName(A)}};
+    if (A != Availability::Available) {
+      json::Object Out{{"unavailable", AvailabilityName(A)}};
+      // The kind says which group the failure is in and the reason says which
+      // failure it is, which is what decides what the reader does next. It costs
+      // nothing per hit: identical renderings collapse in the aggregate, and a
+      // capture that keeps failing is switched off after a few hits.
+      if (std::string Why = N.GetUnavailableReason(); !Why.empty())
+        Out["reason"] = Truncate(std::move(Why), Opts.MaxStringLength);
+      return Out;
+    }
 
     // A formatter summary is the dense rendering, so it stands in for the
     // subtree: expanding children past a good summary costs tokens and adds
@@ -134,9 +153,81 @@ struct Serializer {
 
 } // namespace
 
+std::string lldb_private::mcp::CondenseDiagnostic(StringRef Message,
+                                                  unsigned MaxLength) {
+  SmallVector<StringRef, 8> Lines;
+  Message.split(Lines, '\n');
+
+  StringRef Head, Error, Hint;
+  for (StringRef Line : Lines) {
+    Line = Line.trim();
+    if (Line.empty() || IsCaretArt(Line))
+      continue;
+
+    // Kept whichever line it appears on, and looked for over the whole message
+    // rather than until the diagnostic is found: for a call into a symbol the
+    // target does not hold, the hint follows the diagnostic and is the half that
+    // names what to do about it.
+    if (Line.starts_with("Hint:")) {
+      if (Hint.empty())
+        Hint = Line.drop_front(5).ltrim();
+      continue;
+    }
+
+    // An `error:` line is preferred wherever it appears, because the lines
+    // before it are the evaluator describing itself: an expression diagnostic
+    // opens with "Ran expression as 'C++14'.", which is true of every expression
+    // and says nothing about the one that failed. A message with no such line --
+    // "Couldn't look up symbols:" -- is itself the diagnostic, so the first line
+    // stands in.
+    if (Line.consume_front("error:")) {
+      if (Error.empty())
+        Error = Line.ltrim();
+      continue;
+    }
+    if (Head.empty())
+      Head = Line;
+  }
+  if (!Error.empty())
+    Head = Error;
+
+  // A `<user expression 1>:1:17:` prefix locates the error inside an expression
+  // the caller never sees a listing of, so the position is unusable and the text
+  // after it is the whole content.
+  if (Head.starts_with("<")) {
+    if (size_t Close = Head.find('>'); Close != StringRef::npos) {
+      StringRef After = Head.drop_front(Close + 1);
+      // Consumed only as far as a line:column actually reaches, and applied only
+      // if one was there: a diagnostic that merely opens with a bracketed word,
+      // "<invalid> is not a type", is all content and keeps its first word.
+      bool Positioned = false;
+      while (After.consume_front(":")) {
+        size_t Digits = After.find_first_not_of("0123456789");
+        if (Digits == 0)
+          break;
+        Positioned = true;
+        After = Digits == StringRef::npos ? StringRef() : After.substr(Digits);
+      }
+      if (Positioned)
+        Head = After.ltrim();
+    }
+  }
+
+  std::string Out = Head.str();
+  if (!Hint.empty()) {
+    if (!Out.empty())
+      Out += ' ';
+    Out += Hint.str();
+  }
+  return Truncate(std::move(Out), MaxLength);
+}
+
 json::Value
 lldb_private::mcp::SerializeValue(ValueNode &Root,
                                   const SerializeValueOptions &Opts) {
   Serializer S(Opts);
-  return S.Run(Root, 0);
+  json::Value Out = S.Run(Root, 0);
+  if (Opts.SharedBudget)
+    *Opts.SharedBudget = S.Budget;
+  return Out;
 }

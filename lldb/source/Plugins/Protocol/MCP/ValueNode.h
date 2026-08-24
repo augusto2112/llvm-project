@@ -47,6 +47,18 @@ public:
   virtual std::optional<std::string> GetValueString() = 0;
   virtual Availability GetAvailability() = 0;
 
+  /// Why this value could not be read, in one line, or empty when there is
+  /// nothing to say beyond the kind.
+  ///
+  /// The kind alone is a classification of a message, and a classification of a
+  /// message that is thrown away cannot be checked: measured on a capture
+  /// calling a function whose symbol the binary did not contain, the error read
+  /// "Couldn't look up symbols ... perhaps because it was optimized out by the
+  /// compiler", which classified as `optimized_out` and sent the reader to
+  /// rebuild without optimization for a program that was already unoptimized.
+  /// The message names the fix; the kind only groups it.
+  virtual std::string GetUnavailableReason() = 0;
+
   /// A stable identity for cycle detection, or 0 when the node has none.
   ///
   /// Two nodes sharing an identity are taken to be the same object, and the

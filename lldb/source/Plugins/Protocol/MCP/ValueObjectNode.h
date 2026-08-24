@@ -31,9 +31,15 @@ public:
   std::optional<std::string> GetSummary() override;
   std::optional<std::string> GetValueString() override;
   Availability GetAvailability() override;
+  std::string GetUnavailableReason() override;
   uint64_t GetIdentity() override;
   size_t GetNumChildren() override;
   std::unique_ptr<ValueNode> GetChildAtIndex(size_t Idx) override;
+
+  /// A diagnostic long enough to name the symbol or the identifier it is about,
+  /// and short enough that a capture failing at every hit of a hot tracepoint
+  /// cannot dominate the response it appears in.
+  static constexpr unsigned MaxReasonLength = 200;
 
 private:
   lldb::ValueObjectSP m_value;

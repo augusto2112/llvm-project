@@ -270,16 +270,22 @@ class ObserveTestCase(TestBase):
         self.assertEqual(counts, {"0": 25, "1": 25, "2": 25, "3": 25})
 
         # Aggregation runs over hits rather than over emitted events, so the
-        # transitions are numbered by hit.
+        # sequence a transition carries is numbered by hit. Each pair is counted
+        # rather than listed, so a value that cycles does not render one entry
+        # per change.
         transitions = [
             (
-                transition["seq"],
+                transition["first_seq"],
                 serialized_scalar(transition["from"]),
                 serialized_scalar(transition["to"]),
+                transition["count"],
             )
             for transition in aggregate["transitions"]
         ]
-        self.assertEqual(transitions, [(26, "0", "1"), (51, "1", "2"), (76, "2", "3")])
+        self.assertEqual(
+            transitions,
+            [(26, "0", "1", 1), (51, "1", "2", 1), (76, "2", "3", 1)],
+        )
 
         # Twenty-five of each is not rare.
         self.assertNotIn("outliers", aggregate)
@@ -902,12 +908,21 @@ class ObserveTestCase(TestBase):
         self.assertEqual(report["emitted"], 2, str(report))
 
         # Every one of those hits carried a value nothing else did, which makes
-        # every value rare. The outlier list is bounded like the histogram, so a
-        # capture shaped like this cannot put one entry per hit in the response.
+        # every value rare -- which is to say that none of them is. The claim is
+        # withheld rather than bounded, since a list of three thousand equally
+        # rare values is the stream this is supposed to stand in for.
         aggregate = document["aggregate"]["tick"]["n"]
         self.assertEqual(aggregate["distinct"], 3000, str(aggregate)[:400])
-        self.assertEqual(len(aggregate["outliers"]), 32, str(aggregate)[:400])
-        self.assertEqual(aggregate["outliers_elided"], 3000 - 32, str(aggregate)[:400])
+        self.assertNotIn("outliers", aggregate)
+        self.assertNotIn("outliers_elided", aggregate)
+
+        # Nothing dominates a population that is entirely distinct, so the
+        # histogram and the transitions each keep one example and say how many
+        # they stood for. The cardinality above is what is not elided.
+        self.assertEqual(len(aggregate["values"]), 1, str(aggregate)[:400])
+        self.assertEqual(aggregate["values_elided"], 2999, str(aggregate)[:400])
+        self.assertEqual(len(aggregate["transitions"]), 1, str(aggregate)[:400])
+        self.assertEqual(aggregate["transitions_elided"], 2998, str(aggregate)[:400])
 
     def test_a_frame_that_never_returns_is_not_a_return(self):
         """A frame left by a longjmp produces no event and is accounted for."""

@@ -140,8 +140,9 @@ TEST(AggregateTest, MultiValuedCaptureRendersAnObject) {
 
   const llvm::json::Array *Transitions = Fields->getArray("transitions");
   ASSERT_NE(Transitions, nullptr);
-  EXPECT_EQ(ToString(*Transitions), R"([{"from":"idle","seq":2,"to":"busy"},)"
-                                    R"({"from":"busy","seq":3,"to":"idle"}])");
+  EXPECT_EQ(ToString(*Transitions),
+            R"([{"count":1,"first_seq":2,"from":"idle","to":"busy"},)"
+            R"({"count":1,"first_seq":3,"from":"busy","to":"idle"}])");
 
   // Four observations are too few for a rare value to mean anything.
   EXPECT_EQ(Fields->get("outliers"), nullptr);
@@ -164,9 +165,10 @@ TEST(AggregateTest, TransitionsCoverOnlyChangesAndStayInSequenceOrder) {
 
   const llvm::json::Array *Transitions = Fields->getArray("transitions");
   ASSERT_NE(Transitions, nullptr);
-  EXPECT_EQ(ToString(*Transitions), R"([{"from":"a","seq":2,"to":"b"},)"
-                                    R"({"from":"b","seq":5,"to":"c"},)"
-                                    R"({"from":"c","seq":6,"to":"a"}])");
+  EXPECT_EQ(ToString(*Transitions),
+            R"([{"count":1,"first_seq":2,"from":"a","to":"b"},)"
+            R"({"count":1,"first_seq":5,"from":"b","to":"c"},)"
+            R"({"count":1,"first_seq":6,"from":"c","to":"a"}])");
 }
 
 TEST(AggregateTest, OutliersReportValuesSeenOnceOrTwiceAmongMany) {
@@ -465,8 +467,8 @@ TEST(AggregateTest, OneDistinctValueCollapsesAndTwoDoNot) {
 
   const llvm::json::Value TwoRendered = Two.Render();
   EXPECT_EQ(ToString(TwoRendered),
-            R"({"loop":{"v":{"distinct":2,)"
-            R"("transitions":[{"from":"same","seq":4,"to":"other"}],)"
+            R"({"loop":{"v":{"distinct":2,"transitions":)"
+            R"([{"count":1,"first_seq":4,"from":"same","to":"other"}],)"
             R"("values":{"other":1,"same":4}}}})");
 }
 
@@ -621,8 +623,8 @@ TEST(AggregateTest, TheHitAndTheSequenceAreReportedIndependently) {
   const llvm::json::Array *Transitions = Fields->getArray("transitions");
   ASSERT_NE(Transitions, nullptr);
   EXPECT_EQ(ToString(*Transitions),
-            R"([{"from":"flat","seq":1021,"to":"spike"},)"
-            R"({"from":"spike","seq":1028,"to":"flat"}])");
+            R"([{"count":1,"first_seq":1021,"from":"flat","to":"spike"},)"
+            R"({"count":1,"first_seq":1028,"from":"spike","to":"flat"}])");
 
   const llvm::json::Array *Outliers = Fields->getArray("outliers");
   ASSERT_NE(Outliers, nullptr);
@@ -728,12 +730,12 @@ TEST(AggregateTest, InterleavedLabelsAndCapturesKeepSeparateHistories) {
   Aggregate.Record("enter", "n", "1", 8, 4);
 
   EXPECT_EQ(ToString(Aggregate.Render()),
-            R"({"enter":{"n":{"distinct":2,)"
-            R"("transitions":[{"from":"1","seq":4,"to":"2"},)"
-            R"({"from":"2","seq":8,"to":"1"}],"values":{"1":2,"2":1}},)"
-            R"("tag":"x x2"},)"
-            R"("exit":{"n":"1 x2","tag":{"distinct":2,)"
-            R"("transitions":[{"from":"y","seq":7,"to":"z"}],)"
+            R"({"enter":{"n":{"distinct":2,"transitions":)"
+            R"([{"count":1,"first_seq":4,"from":"1","to":"2"},)"
+            R"({"count":1,"first_seq":8,"from":"2","to":"1"}],)"
+            R"("values":{"1":2,"2":1}},"tag":"x x2"},)"
+            R"("exit":{"n":"1 x2","tag":{"distinct":2,"transitions":)"
+            R"([{"count":1,"first_seq":7,"from":"y","to":"z"}],)"
             R"("values":{"y":1,"z":1}}}})");
 }
 
@@ -849,14 +851,47 @@ TEST(AggregateTest, ANoteKeyIsNotConfusableWithAValueOfThatName) {
   EXPECT_GT(Fields->getInteger("values_elided").value_or(0), 0);
 }
 
+TEST(AggregateTest, TransitionsCountTheDistinctChangesRatherThanListingThem) {
+  // A value that cycles is the shape this exists for. Recording every change in
+  // order and keeping the first few of them described the start of the run and
+  // repeated one pair over and over; the distinct pairs with their counts
+  // describe the whole of it, and stay the same size however long it runs.
+  Aggregator Aggregate;
+  const llvm::StringRef Cycle[] = {"legal", "custom"};
+  for (uint64_t Seq = 0; Seq < 400; ++Seq)
+    Aggregate.Record("loop", "state", Cycle[Seq % 2], Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "state");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Array *Transitions = Fields->getArray("transitions");
+  ASSERT_NE(Transitions, nullptr);
+  EXPECT_EQ(
+      ToString(*Transitions),
+      R"([{"count":200,"first_seq":1,"from":"legal","to":"custom"},)"
+      R"({"count":199,"first_seq":2,"from":"custom","to":"legal"}])");
+  EXPECT_EQ(Fields->get("transitions_elided"), nullptr);
+}
+
 TEST(AggregateTest, TransitionsAreBoundedAndSayHowManyWereDropped) {
-  // A capture that changes on nearly every hit would render one transition per
-  // hit, leaving the summary as large as the stream it stands in for -- the
-  // unboundedness the histogram cap exists to prevent, reached another way.
+  // A capture that changes to a value it has never held before, on every hit,
+  // has as many distinct changes as hits. Unbounded, that leaves the summary as
+  // large as the stream it stands in for.
   Aggregator Aggregate;
   const size_t Changes = Aggregator::MaxTransitions + 25;
-  for (size_t I = 0; I <= Changes; ++I)
-    Aggregate.Record("loop", "v", ValueName(I), I, I);
+  uint64_t Seq = 0;
+  // One pair traversed often, so the bound has something to prefer and the
+  // entries kept are not decided by a tie.
+  for (size_t I = 0; I < 30; ++I) {
+    Aggregate.Record("loop", "v", "a", Seq, Seq);
+    ++Seq;
+    Aggregate.Record("loop", "v", "b", Seq, Seq);
+    ++Seq;
+  }
+  for (size_t I = 0; I <= Changes; ++I) {
+    Aggregate.Record("loop", "v", ValueName(I), Seq, Seq);
+    ++Seq;
+  }
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "v");
@@ -865,13 +900,70 @@ TEST(AggregateTest, TransitionsAreBoundedAndSayHowManyWereDropped) {
   ASSERT_NE(Transitions, nullptr);
 
   EXPECT_EQ(Transitions->size(), Aggregator::MaxTransitions);
-  EXPECT_EQ(Fields->getInteger("transitions_elided"),
-            std::optional<int64_t>(25));
+  EXPECT_GT(Fields->getInteger("transitions_elided").value_or(0), 0);
 
-  // The earliest are kept, since the first change is where the story starts.
+  // The most travelled edge survives whatever else does, since a bound that
+  // dropped it would leave a summary of an oscillation with the oscillation
+  // missing.
   const llvm::json::Object *First = (*Transitions)[0].getAsObject();
   ASSERT_NE(First, nullptr);
-  EXPECT_EQ(First->getInteger("seq"), std::optional<int64_t>(1));
+  EXPECT_EQ(First->getInteger("count"), std::optional<int64_t>(30));
+}
+
+TEST(AggregateTest, AnUndifferentiatedListIsShortenedToOneExample) {
+  // Both lists answer "which of these dominate". Where every entry kept carries
+  // the same count and most of the population is being dropped regardless, no
+  // entry dominates and each one past the first repeats what the first said:
+  // measured on a capture of node ids over 8000 hits, eight of two thousand
+  // equally common values and eight of two thousand equally travelled edges,
+  // beside counts saying how many thousands were dropped.
+  Aggregator Aggregate;
+  const size_t Distinct = Aggregator::MaxHistogramValues * 4;
+  uint64_t Seq = 0;
+  for (unsigned Round = 0; Round < 3; ++Round)
+    for (size_t I = 0; I < Distinct; ++I, ++Seq)
+      Aggregate.Record("loop", "id", ValueName(I), Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "id");
+  ASSERT_NE(Fields, nullptr);
+
+  const llvm::json::Object *Values = Fields->getObject("values");
+  ASSERT_NE(Values, nullptr);
+  EXPECT_EQ(Values->size(), 1u);
+  EXPECT_EQ(Fields->getInteger("values_elided"),
+            std::optional<int64_t>(Distinct - 1));
+
+  const llvm::json::Array *Transitions = Fields->getArray("transitions");
+  ASSERT_NE(Transitions, nullptr);
+  EXPECT_EQ(Transitions->size(), 1u);
+  EXPECT_GT(Fields->getInteger("transitions_elided").value_or(0), 0);
+
+  // What the shortening replaces is an enumeration, not a fact: the cardinality
+  // and the count an example carries are both still there.
+  EXPECT_EQ(Fields->getInteger("distinct"),
+            std::optional<int64_t>(static_cast<int64_t>(Distinct)));
+  EXPECT_EQ(Values->begin()->second.getAsInteger(), std::optional<int64_t>(3));
+}
+
+TEST(AggregateTest, AFewEquallyCommonValuesAreStillEnumerated) {
+  // The shortening above applies only where most of the population is dropped
+  // anyway. Nine equally common values are worth naming, and a summary that
+  // showed one of them would be hiding eight names it had room for.
+  const size_t Distinct = Aggregator::MaxHistogramValues + 1;
+  Aggregator Aggregate;
+  uint64_t Seq = 0;
+  for (unsigned Round = 0; Round < 4; ++Round)
+    for (size_t I = 0; I < Distinct; ++I, ++Seq)
+      Aggregate.Record("loop", "opcode", ValueName(I), Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "opcode");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Object *Values = Fields->getObject("values");
+  ASSERT_NE(Values, nullptr);
+  EXPECT_EQ(Values->size(), Aggregator::MaxHistogramValues);
+  EXPECT_EQ(Fields->getInteger("values_elided"), std::optional<int64_t>(1));
 }
 
 TEST(AggregateTest, OutliersAreBoundedAndSayHowManyWereDropped) {
@@ -881,8 +973,13 @@ TEST(AggregateTest, OutliersAreBoundedAndSayHowManyWereDropped) {
   // prevent, reached through the door that is exempt from it.
   Aggregator Aggregate;
   const size_t Rare = Aggregator::MaxOutliers + 40;
-  for (size_t I = 0; I < Rare; ++I)
-    Aggregate.Record("loop", "p", ValueName(I), I, I);
+  size_t Seq = 0;
+  for (; Seq < Rare; ++Seq)
+    Aggregate.Record("loop", "p", ValueName(Seq), Seq, Seq);
+  // Enough repetition for rarity to mean something: among values that are all
+  // unique, none is rare.
+  for (size_t I = 0; I < Rare * Aggregator::MinRepeatsForOutliers; ++I, ++Seq)
+    Aggregate.Record("loop", "p", "common", Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "p");
@@ -904,7 +1001,51 @@ TEST(AggregateTest, OutliersAreBoundedAndSayHowManyWereDropped) {
   // Nothing about the cardinality is hidden by the bound, so a shortened list
   // cannot be read as the whole of what was rare.
   EXPECT_EQ(Fields->getInteger("distinct"),
-            std::optional<int64_t>(static_cast<int64_t>(Rare)));
+            std::optional<int64_t>(static_cast<int64_t>(Rare + 1)));
+}
+
+TEST(AggregateTest, NothingIsRareWhenEveryValueIsDistinct) {
+  // Measured on a capture of a compiler's node ids: 1808 hits, 1808 distinct
+  // values, so every value qualified as seen-once and the list rendered 32 of
+  // them plus a count of 1776 more. "Rare" is a claim about a value against the
+  // ones that repeat, and there were none.
+  Aggregator Aggregate;
+  for (uint64_t Seq = 0; Seq < 200; ++Seq)
+    Aggregate.Record("loop", "id", ValueName(Seq), Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "id");
+  ASSERT_NE(Fields, nullptr);
+  EXPECT_EQ(Fields->get("outliers"), nullptr);
+  EXPECT_EQ(Fields->get("outliers_elided"), nullptr);
+  // Withheld, not hidden: the cardinality that makes the claim meaningless is
+  // the first field of the summary.
+  EXPECT_EQ(Fields->getInteger("distinct"), std::optional<int64_t>(200));
+}
+
+TEST(AggregateTest, ARareValueSurvivesALongTailOfLessRareOnes) {
+  // The gate is on repetition over the whole run rather than on any one value,
+  // so a capture that mostly repeats still reports the odd one out even with
+  // enough varied values beside it to pull the average down. Rarity decides the
+  // order, so the value seen once outranks a tail seen twice however late it
+  // arrives -- which is what keeps a bound from dropping it.
+  Aggregator Aggregate;
+  uint64_t Seq = 0;
+  for (; Seq < 60; ++Seq)
+    Aggregate.Record("loop", "kind", "common", Seq, Seq);
+  for (unsigned I = 0; I < 20; ++I)
+    for (unsigned Twice = 0; Twice < 2; ++Twice, ++Seq)
+      Aggregate.Record("loop", "kind", ValueName(I), Seq, Seq);
+  Aggregate.Record("loop", "kind", "wedged", Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "kind");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Array *Outliers = Fields->getArray("outliers");
+  ASSERT_NE(Outliers, nullptr);
+  ASSERT_FALSE(Outliers->empty());
+  EXPECT_EQ((*Outliers)[0].getAsObject()->getString("value"),
+            std::optional<llvm::StringRef>("wedged"));
 }
 
 TEST(AggregateTest, OutliersUpToTheBoundSayNothingWasDropped) {

@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "ValueObjectNode.h"
+#include "SerializeValue.h"
 #include "ValueNode.h"
 #include "lldb/Utility/ConstString.h"
 #include "lldb/Utility/Status.h"
@@ -74,7 +75,14 @@ Availability ValueObjectNode::GetAvailability() {
   // only recoverable from the message. Optimization is tested first because a
   // gap in a location list is described as both a missing location and an
   // optimized-out value, and the former is the less useful of the two.
+  //
+  // A hint is excluded from the match. The expression evaluator's hint for a
+  // call into a symbol the target does not hold reads "perhaps because it was
+  // optimized out by the compiler", which classified a missing symbol as an
+  // optimized-out value and sent a reader to rebuild a program that was already
+  // unoptimized. Speculation about a cause must not outrank the failure itself.
   llvm::StringRef Msg = Err.AsCString("");
+  Msg = Msg.substr(0, Msg.find("Hint:"));
   if (Msg.contains("optimized out"))
     return Availability::OptimizedOut;
   if (Msg.contains("no location") || Msg.contains("not available"))
@@ -82,6 +90,16 @@ Availability ValueObjectNode::GetAvailability() {
   if (Msg.contains("no debug info") || Msg.contains("incomplete type"))
     return Availability::NoDebugInfo;
   return Availability::Error;
+}
+
+std::string ValueObjectNode::GetUnavailableReason() {
+  if (!m_value)
+    return {};
+
+  const Status &Err = m_value->GetError();
+  if (Err.Success())
+    return {};
+  return CondenseDiagnostic(Err.AsCString(""), MaxReasonLength);
 }
 
 uint64_t ValueObjectNode::GetIdentity() {

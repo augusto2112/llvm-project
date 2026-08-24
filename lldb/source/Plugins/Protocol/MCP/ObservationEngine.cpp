@@ -72,6 +72,15 @@ namespace {
 
 double ToMs(Micros D) { return static_cast<double>(D.count()) / 1000.0; }
 
+/// The share of a run that setup has to be before it is worth reporting, and
+/// before the run says where the time went. Below this the tracepoints really
+/// are the cost, and a second number would only repeat the first.
+constexpr double SetupShareWorthReporting = 0.5;
+
+/// How long setup has to take before it is worth prose as well as a number. A
+/// tenth of a second is not a decision a caller has to make.
+constexpr double SetupMsWorthANote = 2000.0;
+
 /// Rounds to hundredths, so that a measurement does not spend twelve characters
 /// asserting a precision it does not have.
 double Round2(double Value) { return std::round(Value * 100.0) / 100.0; }
@@ -81,6 +90,23 @@ std::string Compact(const json::Value &V) {
   raw_string_ostream OS(S);
   OS << V;
   return S;
+}
+
+/// The text a value is aggregated under. A scalar serializes to {"value":"7"},
+/// and using that document as the aggregate's key would spend three quarters of
+/// the densest part of the response on repeated punctuation. Anything with
+/// structure keeps it, since there the structure is the information.
+///
+/// Every capture goes through here, including `$return`: two spellings of the
+/// same number are two values to an aggregate that compares them as strings, so
+/// a run's return values would be summarised separately from the paths they came
+/// from and neither would be comparable with the other.
+std::string AggregateKey(const json::Value &V) {
+  if (const json::Object *Obj = V.getAsObject())
+    if (Obj->size() == 1)
+      if (std::optional<StringRef> Scalar = Obj->getString("value"))
+        return Scalar->str();
+  return Compact(V);
 }
 
 } // namespace
@@ -555,6 +581,12 @@ json::Value ObservationResult::Render() const {
                  {"elapsed_ms", Round2(ElapsedMs)},
                  {"terminal", Terminal.Render()}};
 
+  // Reported only when it is most of the run, which is when a caller would
+  // otherwise attribute it to the tracepoints and stop using them. Below that it
+  // is a second number saying what the first one already said.
+  if (SetupMs >= SetupShareWorthReporting * ElapsedMs)
+    O["setup_ms"] = Round2(SetupMs);
+
   if (!Observations.empty()) {
     json::Object Report;
     for (const ObservationReport &Observation : Observations)
@@ -686,6 +718,11 @@ namespace {
 /// The name a return observation reports the function's own result under.
 constexpr StringLiteral ReturnValueCapture = "$return";
 
+/// What a capture that ran and produced no value reads as. Spelled the way a
+/// type is rather than the way a value is, since no value of a program's own can
+/// render as this and be confused with it.
+constexpr StringLiteral VoidValue = "(void)";
+
 /// Frames the terminal event reports after ranking. Deep enough to cross a
 /// framework boundary, short enough that a pass-manager stack does not become
 /// the response.
@@ -693,6 +730,11 @@ constexpr size_t MaxTerminalFrames = 24;
 
 /// Locals the terminal event reports.
 constexpr size_t MaxTerminalLocals = 32;
+
+/// Value-tree nodes the terminal event's locals may spend between them. Sized so
+/// that a frame of scalars and small structs comes back whole, while one local
+/// that reaches an arbitrarily large object cannot crowd out the rest.
+constexpr unsigned MaxTerminalLocalNodes = 96;
 
 /// Source lines either side of the terminal line.
 constexpr uint32_t TerminalSourceContext = 4;
@@ -714,6 +756,7 @@ constexpr Micros WaitSlice = std::chrono::milliseconds(200);
 /// mode compares. A control character cannot occur inside a rendered value, so
 /// two different tuples cannot join into one identical string.
 constexpr char CaptureSeparator = '\x1f';
+
 
 bool TracepointHit(void *Baton, StoppointCallbackContext *Ctx, lldb::user_id_t,
                    lldb::user_id_t) {
@@ -1094,7 +1137,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
           SerializeValueOptions SOpts;
           SOpts.MaxDepth = Obs.Depth;
           json::Value V = SerializeValue(Node, SOpts);
-          std::string Text = Compact(V);
+          std::string Text = AggregateKey(V);
           m_aggregator.Record(Obs.Label, ReturnValueCapture, Text, Seq, Hit);
           Rendered += Text;
           Rendered += CaptureSeparator;
@@ -1151,16 +1194,18 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     SOpts.MaxDepth = Obs.Depth;
     SOpts.ArtifactRef = formatv("$artifact#seq={0}", Seq).str();
     json::Value V = SerializeValue(Node, SOpts);
-    std::string Text = Compact(V);
 
-    // A scalar serializes to {"value":"7"}, and using that document as the
-    // aggregate's key would spend three quarters of the densest part of the
-    // response on repeated punctuation. Unwrap the one-field case; anything
-    // with structure keeps it, since there the structure is the information.
-    if (const json::Object *Obj = V.getAsObject())
-      if (Obj->size() == 1)
-        if (std::optional<StringRef> Scalar = Obj->getString("value"))
-          Text = Scalar->str();
+    // A call returning void completes and leaves a value object with no type
+    // carrying a placeholder error, which serializes as a value that could not
+    // be read. Reporting a call that ran as a failure costs more than saying
+    // nothing: the caller re-spells a capture that was working, and stops
+    // looking in `inferior_output` for what it printed -- which is the whole
+    // point of capturing a dump.
+    if (Resolved.Tier == ValueResolutionTier::Expression && Resolved.Value &&
+        !Resolved.Value->GetCompilerType().IsValid())
+      V = json::Object{{"value", VoidValue}};
+
+    std::string Text = AggregateKey(V);
 
     // The aggregate sees every recorded hit, whatever the emission mode does
     // with the event. That invariant is the whole reason reducing the stream is
@@ -1572,6 +1617,14 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
           /*get_file_globals=*/false, /*include_synthetic_vars=*/true,
           /*error_ptr=*/nullptr)) {
     const size_t Count = std::min(Locals->GetSize(), MaxTerminalLocals);
+    // One budget for the whole set rather than one per local. A frame holding a
+    // reference to a compiler's pass manager reaches everything the compiler
+    // owns in two hops, and a per-local budget lets each of forty locals spend
+    // it: measured at 8.6 kB of interior, against 5 kB for the backtrace it was
+    // meant to annotate. Exhausting it leaves the remaining locals as elision
+    // markers, which is what the reader wants of a local it has not asked about.
+    unsigned Budget = MaxTerminalLocalNodes;
+    size_t Rendered = 0;
     for (size_t I = 0; I < Count; ++I) {
       lldb::VariableSP Var = Locals->GetVariableAtIndex(I);
       if (!Var)
@@ -1580,13 +1633,21 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
           Var, lldb::eDynamicCanRunTarget);
       if (!Value)
         continue;
+      // A local with no name cannot be named in a capture either, so reporting
+      // it costs a reader an entry keyed on the empty string and offers nothing
+      // to do with it.
+      llvm::StringRef Name = Value->GetName().GetStringRef();
+      if (Name.empty())
+        continue;
       ValueObjectNode Node(Value);
-      Terminal.Locals[Value->GetName().GetStringRef()] =
-          SerializeValue(Node, SerializeValueOptions());
+      SerializeValueOptions SOpts;
+      SOpts.SharedBudget = &Budget;
+      Terminal.Locals[Name] = SerializeValue(Node, SOpts);
+      ++Rendered;
     }
-    if (Locals->GetSize() > Count)
+    if (Locals->GetSize() > Rendered)
       Terminal.Locals["_elided"] =
-          formatv("{0} more locals", Locals->GetSize() - Count).str();
+          formatv("{0} more locals", Locals->GetSize() - Rendered).str();
   }
 
   SymbolContext SC = Frame->GetSymbolContext(lldb::eSymbolContextEverything);
@@ -1649,6 +1710,9 @@ Expected<ObservationResult> ObservationEngine::Run() {
   if (Error E = Launch())
     return std::move(E);
 
+  m_result.SetupMs =
+      ToMs(std::chrono::duration_cast<Micros>(Clock::now() - m_start));
+
   const Outcome Result = WaitForEnd();
   FlushHeldEvents();
   DrainInferiorOutput();
@@ -1663,6 +1727,20 @@ Expected<ObservationResult> ObservationEngine::Run() {
         formatv("only the last {0} bytes of the program's own output are "
                 "reported; the earlier output was dropped.",
                 MaxInferiorOutput)
+            .str());
+  // Said in words as well as in a number, because the wrong reading of the
+  // number is expensive and self-confirming: a caller that attributes a fixed
+  // per-image cost to the tracepoints concludes that observing is orders of
+  // magnitude too slow to measure with, and stops -- which is what happened.
+  if (m_result.SetupMs >= SetupMsWorthANote &&
+      m_result.SetupMs >= SetupShareWorthReporting * m_result.ElapsedMs)
+    m_result.Notes.push_back(
+        formatv("{0} of the {1} ms went on reading this program's debug info "
+                "and resolving the tracepoints, before it started running. That "
+                "is charged once per binary rather than per hit, and this "
+                "session now has it: another run of the same binary is that "
+                "much cheaper, and rebuilding it pays again.",
+                Round2(m_result.SetupMs), Round2(m_result.ElapsedMs))
             .str());
   // Only for a run that did not finish. A loop is how programs are written, so
   // reporting one for a program that ran to completion says a normal loop was

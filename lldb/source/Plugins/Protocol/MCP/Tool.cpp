@@ -96,6 +96,45 @@ Expected<DebuggerSP> findDebugger(StringRef specifier) {
 
 } // namespace
 
+/// Opens the platform null device with the given options, or nullptr on error.
+static lldb::FileSP openNull(File::OpenOptions options) {
+  llvm::Expected<lldb::FileUP> file =
+      FileSystem::Instance().Open(FileSpec(FileSystem::DEV_NULL), options);
+  if (!file) {
+    llvm::consumeError(file.takeError());
+    return nullptr;
+  }
+  return std::move(*file);
+}
+
+/// Creates a debugger for MCP to drive, with the stdio and the execution mode a
+/// client needs rather than the ones an interactive lldb needs.
+static Expected<DebuggerSP> createManagedDebugger() {
+  // Redirect the new debugger's stdio to the null device so its prompt and
+  // async output can't corrupt an MCP stream sharing the host's stdout. Command
+  // results flow through CommandReturnObject and are unaffected. Open the null
+  // files first so a failure can't leave a created debugger on the real stdio.
+  // The single write-only null file backs both stdout and stderr.
+  lldb::FileSP in = openNull(File::eOpenOptionReadOnly);
+  lldb::FileSP out = openNull(File::eOpenOptionWriteOnly);
+  if (!in || !out)
+    return createStringError(
+        "failed to open the null device for debugger stdio");
+
+  lldb::DebuggerSP debugger_sp = Debugger::CreateInstance();
+  if (!debugger_sp)
+    return createStringError("failed to create debugger");
+
+  debugger_sp->SetInputFile(in);
+  debugger_sp->SetOutputFile(out);
+  debugger_sp->SetErrorFile(out);
+
+  // A debugger driven over MCP has no event loop to service asynchronous
+  // stops, so a resume must not return before the process has stopped.
+  debugger_sp->SetAsyncExecution(false);
+  return debugger_sp;
+}
+
 Expected<lldb_protocol::mcp::CallToolResult>
 CommandTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   if (!std::holds_alternative<json::Value>(args))
@@ -416,6 +455,16 @@ ObserveTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   if (std::optional<StringRef> debugger = arguments->getString("debugger"))
     debugger_argument = debugger->str();
 
+  // A plan carries the program, its arguments and its environment, so a session
+  // adds nothing a caller has to decide: the only thing an empty one is good for
+  // is being observed in. Requiring session_create first bought a round trip and
+  // a question -- what is in a session, is it reusable, does closing it matter --
+  // for a tool whose whole shape is one call per run.
+  if (debugger_argument.empty() && Debugger::GetNumDebuggers() == 0)
+    if (Expected<DebuggerSP> created = createManagedDebugger();
+        !created)
+      return created.takeError();
+
   Expected<DebuggerSP> debugger_sp = findDebugger(debugger_argument);
   if (!debugger_sp)
     return debugger_sp.takeError();
@@ -459,43 +508,12 @@ DebuggerListTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   return createTextResult(output);
 }
 
-/// Opens the platform null device with the given options, or nullptr on error.
-static lldb::FileSP openNull(File::OpenOptions options) {
-  llvm::Expected<lldb::FileUP> file =
-      FileSystem::Instance().Open(FileSpec(FileSystem::DEV_NULL), options);
-  if (!file) {
-    llvm::consumeError(file.takeError());
-    return nullptr;
-  }
-  return std::move(*file);
-}
-
 Expected<lldb_protocol::mcp::CallToolResult>
 DebuggerCreateTool::Call(const lldb_protocol::mcp::ToolArguments &) {
-  // Redirect the new debugger's stdio to the null device so its prompt and
-  // async output can't corrupt an MCP stream sharing the host's stdout. Command
-  // results flow through CommandReturnObject and are unaffected. Open the null
-  // files first so a failure can't leave a created debugger on the real stdio.
-  // The single write-only null file backs both stdout and stderr.
-  lldb::FileSP in = openNull(File::eOpenOptionReadOnly);
-  lldb::FileSP out = openNull(File::eOpenOptionWriteOnly);
-  if (!in || !out)
-    return createStringError(
-        "failed to open the null device for debugger stdio");
-
-  lldb::DebuggerSP debugger_sp = Debugger::CreateInstance();
+  Expected<DebuggerSP> debugger_sp = createManagedDebugger();
   if (!debugger_sp)
-    return createStringError("failed to create debugger");
-
-  debugger_sp->SetInputFile(in);
-  debugger_sp->SetOutputFile(out);
-  debugger_sp->SetErrorFile(out);
-
-  // A debugger driven over MCP has no event loop to service asynchronous
-  // stops, so a resume must not return before the process has stopped.
-  debugger_sp->SetAsyncExecution(false);
-
-  return createTextResult(to_uri(debugger_sp));
+    return debugger_sp.takeError();
+  return createTextResult(to_uri(*debugger_sp));
 }
 
 Expected<lldb_protocol::mcp::CallToolResult>

@@ -29,8 +29,12 @@ void Aggregator::Record(StringRef Label, StringRef Capture,
   CaptureSummary &Summary = m_labels[Label.str()][Capture.str()];
   std::string Rendered = RenderedValue.str();
 
-  if (Summary.Total != 0 && Summary.Last != Rendered)
-    Summary.Transitions.push_back({Seq, Summary.Last, Rendered});
+  if (Summary.Total != 0 && Summary.Last != Rendered) {
+    EdgeStats &Edge = Summary.Transitions[{Summary.Last, Rendered}];
+    if (Edge.Count == 0)
+      Edge.FirstSeq = Seq;
+    ++Edge.Count;
+  }
 
   ++Summary.Total;
   ValueStats &Stats = Summary.Values[Rendered];
@@ -41,6 +45,31 @@ void Aggregator::Record(StringRef Label, StringRef Capture,
   ++Stats.Count;
   Summary.Last = std::move(Rendered);
 }
+
+namespace {
+
+/// How many of \p Ranked, already ordered by descending count, are worth showing
+/// when \p Total of them exist.
+///
+/// A bounded list of counted things answers "which of these dominate". Where
+/// nothing dominates -- every entry kept carries the same count -- the list has
+/// no answer to give, and each entry past the first repeats what the first said.
+/// That only justifies shortening it further when most of the population is
+/// being dropped anyway: a histogram of nine equally common opcodes is worth
+/// enumerating, and one of two thousand equally common node ids is a sample
+/// whose only content is the count beside it.
+template <typename T, typename CountOf>
+size_t WorthShowing(llvm::ArrayRef<T> Ranked, size_t Total, CountOf Count) {
+  if (Ranked.size() < 2 || Total - Ranked.size() < Ranked.size())
+    return Ranked.size();
+  const uint64_t First = Count(Ranked.front());
+  for (const T &Entry : Ranked.drop_front())
+    if (Count(Entry) != First)
+      return Ranked.size();
+  return 1;
+}
+
+} // namespace
 
 json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   // An object describing a single value is mostly punctuation, and a capture
@@ -64,28 +93,51 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   });
 
   json::Object Histogram;
-  const size_t Kept = std::min<size_t>(ByCount.size(), MaxHistogramValues);
+  size_t Kept = std::min<size_t>(ByCount.size(), MaxHistogramValues);
+  Kept = WorthShowing(ArrayRef(ByCount).take_front(Kept), ByCount.size(),
+                      [](const auto &Entry) { return Entry.second; });
   for (size_t I = 0; I < Kept; ++I)
     Histogram[ByCount[I].first] = ByCount[I].second;
 
-  // Transitions arrive in run order, and the order is part of what they say.
-  std::vector<Transition> Ordered = Summary.Transitions;
-  llvm::stable_sort(Ordered, [](const Transition &LHS, const Transition &RHS) {
-    return LHS.Seq < RHS.Seq;
+  // Ranked by how often each change happened, so a bound drops the edges the
+  // run took least often. A cycle is the shape this exists for: two values
+  // alternating render as two edges carrying half the hits each, whatever the
+  // length of the run.
+  struct Edge {
+    std::string From, To;
+    uint64_t Count, FirstSeq;
+  };
+  std::vector<Edge> Edges;
+  Edges.reserve(Summary.Transitions.size());
+  for (const auto &[Pair, Stats] : Summary.Transitions)
+    Edges.push_back({Pair.first, Pair.second, Stats.Count, Stats.FirstSeq});
+  llvm::stable_sort(Edges, [](const Edge &LHS, const Edge &RHS) {
+    return std::tie(RHS.Count, LHS.FirstSeq) < std::tie(LHS.Count, RHS.FirstSeq);
   });
-  // A capture that changes on nearly every hit produces a transition per hit,
-  // which would leave the summary as large as the stream it summarises -- the
-  // same unboundedness the histogram cap exists to prevent. The earliest are
-  // kept, since the first change is usually where the story starts.
-  json::Array Transitions;
+
   size_t Dropped = 0;
-  if (Ordered.size() > MaxTransitions) {
-    Dropped = Ordered.size() - MaxTransitions;
-    Ordered.resize(MaxTransitions);
+  const size_t EdgesTotal = Edges.size();
+  size_t KeptEdges = std::min<size_t>(EdgesTotal, MaxTransitions);
+  KeptEdges = WorthShowing(ArrayRef(Edges).take_front(KeptEdges), EdgesTotal,
+                           [](const Edge &E) { return E.Count; });
+  if (KeptEdges < EdgesTotal) {
+    Dropped = EdgesTotal - KeptEdges;
+    Edges.resize(KeptEdges);
   }
-  for (const Transition &Change : Ordered)
-    Transitions.push_back(json::Object{
-        {"seq", Change.Seq}, {"from", Change.From}, {"to", Change.To}});
+
+  // Selected by frequency and rendered in run order, because the order changes
+  // happened in is part of what they say: "legal, then custom, then legal" is a
+  // different story from the set of pairs it is built from.
+  llvm::stable_sort(Edges, [](const Edge &LHS, const Edge &RHS) {
+    return LHS.FirstSeq < RHS.FirstSeq;
+  });
+
+  json::Array Transitions;
+  for (const Edge &Change : Edges)
+    Transitions.push_back(json::Object{{"from", Change.From},
+                                       {"to", Change.To},
+                                       {"count", Change.Count},
+                                       {"first_seq", Change.FirstSeq}});
 
   json::Object Out{{"distinct", Summary.Values.size()},
                    {"values", std::move(Histogram)},
@@ -100,7 +152,13 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   if (Dropped != 0)
     Out["transitions_elided"] = Dropped;
 
-  if (Summary.Total >= MinObservationsForOutliers) {
+  // Two gates, because they exclude different runs. A run of a dozen hits has
+  // no "many" for a value to be rare among, and a run whose values are all
+  // distinct has no repetition for one to be rare against -- there, every value
+  // is an outlier, which is another way of saying none is.
+  const bool ValuesRepeat =
+      Summary.Values.size() * MinRepeatsForOutliers <= Summary.Total;
+  if (Summary.Total >= MinObservationsForOutliers && ValuesRepeat) {
     struct Outlier {
       std::string Rendered;
       uint64_t Count;

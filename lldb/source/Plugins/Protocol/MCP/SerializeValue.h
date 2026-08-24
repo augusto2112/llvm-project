@@ -24,6 +24,17 @@ struct SerializeValueOptions {
   /// what actually stops the walk.
   unsigned MaxNodes = 64;
 
+  /// When set, the walk spends this budget instead of MaxNodes and leaves what
+  /// it did not spend, so that several values can share one.
+  ///
+  /// A caller rendering many values into a single response -- every local of a
+  /// frame -- needs the response bounded rather than each value in it. Measured
+  /// on a compiler stopped inside its instruction selector, a frame of 32 locals
+  /// each given its own 64-node budget produced 8.6 kB of pass-manager and
+  /// target-machine interior, an order of magnitude more than the backtrace and
+  /// source it was reported beside.
+  unsigned *SharedBudget = nullptr;
+
   /// Children to emit per node.
   unsigned MaxChildren = 16;
 
@@ -33,6 +44,14 @@ struct SerializeValueOptions {
   /// deeper never requires re-running the program.
   std::string ArtifactRef;
 };
+
+/// Reduces a compiler or debugger diagnostic to the one line that says what went
+/// wrong, dropping the position prefix, the language note and the caret art that
+/// a terminal reader wants and a machine reader pays for.
+///
+/// A hint is kept and appended, because for the failures worth explaining it is
+/// the hint that names the fix.
+std::string CondenseDiagnostic(llvm::StringRef Message, unsigned MaxLength);
 
 /// Renders the tree rooted at \p Root as JSON within the budgets in \p Opts.
 /// Anything the budgets cut is replaced by an elision marker rather than

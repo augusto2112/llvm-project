@@ -74,7 +74,10 @@ over every hit together with a JSONL file holding the full event stream.
 It takes:
 
 - `plan` (required): what to run and what to watch.
-- `debugger` (optional): the URI of the session to run it in.
+- `debugger` (optional): the URI of the session to run it in. With no session
+  open and none named, `observe` creates one: a plan already carries the program,
+  its arguments and its environment, so an empty session is not a decision a
+  caller has to make first.
 
 The plan is nested rather than sitting beside `debugger` because its fields are
 validated as a closed set: a field the plan does not define is an error, and the
@@ -147,7 +150,13 @@ repeating block.
 
 The response carries `outcome` — `exited`, `crashed`, `timed_out` or
 `no_progress` — a `plan_report` per observation, an `aggregate`, a `terminal`
-event, and a pointer to the artifact. A run that got stuck also carries a
+event, and a pointer to the artifact. `elapsed_ms` covers the whole call, and
+`setup_ms` appears beside it when most of that went on creating the target,
+reading its debug info and resolving the tracepoints. That cost is charged once
+per binary image rather than per hit — measured at 9.1 s for the first run against
+a 238 MB debug build of a compiler and 0.23 s for the next identical one — so it
+says nothing about what observing another run costs, which is why it is reported
+apart from the total rather than left inside it. A run that got stuck also carries a
 `cycle`, the block of locations the end of the run kept traversing, which for a
 program that did not terminate is usually the answer. The cycle is found in the
 event stream rather than on the stack, so it appears only for a plan that had
@@ -157,8 +166,19 @@ the program's own output, and `notes` holds what went wrong that no single
 observation owns.
 
 Read `aggregate` first. For each captured expression it gives the distinct
-values with counts, the transitions between them, and `outliers`: the values
-seen only once or twice among many hits. That last field is usually the answer.
+values with counts, the changes between them, and `outliers`: the values seen
+only once or twice among many hits. That last field is usually the answer.
+
+A change is reported as a `from`/`to` pair with the number of times the run made
+it and the sequence of the first time. Counting the pairs rather than listing every
+change is what makes a value that cycles readable: two values alternating come back
+as two entries carrying half the hits each, however long the run is.
+
+`outliers` needs two things to mean anything, and both are withheld rather than
+approximated. There have to be enough hits for "rare" to be a claim about the run,
+and the values have to repeat: where a capture renders something new at every hit —
+an address, a node id — every value is seen once, so every value is an outlier,
+which is another way of saying that none is.
 One vector type among four thousand integers, with the hit where it first
 appeared, is the bug — computed rather than left to be found. Re-run with
 `only_hit` set to that `first_hit` to record that single hit in full detail;
@@ -180,7 +200,17 @@ holds a single observation.
 when they drop anything. `distinct` always counts every value, so a shortened
 histogram cannot be mistaken for the real cardinality, and outliers are ranked
 rarest-first before the bound applies, so what a bound drops is the least rare
-of them.
+of them. Values and changes are ranked by count, since the question a bounded list
+of counted things answers is which of them dominate; where none does — every entry
+kept carrying the same count, with most of the population dropped regardless — one
+entry stands for the rest and the count beside it says how many.
+
+A value that could not be read comes back as `unavailable` with the kind, and a
+`reason`: the one line of the debugger's own diagnostic that says what went wrong,
+which is what decides whether to re-spell the capture, move it to another
+location, or stop asking. A capture that ran and produced nothing — a call
+returning void, which is how a compiler is asked to dump a node — reads `(void)`
+rather than as a failure, and what it printed is in `inferior_output`.
 
 `plan_report` keeps four numbers apart on purpose: how many locations the name
 resolved to, how many times the tracepoint was hit, how many of those hits had a
@@ -352,9 +382,9 @@ stable and may be reused when a target is removed and a new target is added.
 
 ## Troubleshooting
 
-**"no debug session exists yet" from `command` or `observe`.** There is no
-session to run in. Call `session_create` first, or pass the URI of an existing
-session. A `debugger` URI that names a session which is not there reports "no
+**"no debug session exists yet" from `command`.** There is no session to run
+in. Call `session_create` first, or pass the URI of an existing session.
+`observe` does not report this, because it opens a session when there is none. A `debugger` URI that names a session which is not there reports "no
 debugger found" instead; `sessions_list` says which ones exist.
 
 **"Command requires a process which is currently stopped".** The session is in
