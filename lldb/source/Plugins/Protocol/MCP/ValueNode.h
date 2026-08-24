@@ -47,7 +47,14 @@ public:
   virtual std::optional<std::string> GetValueString() = 0;
   virtual Availability GetAvailability() = 0;
 
-  /// A stable identity for cycle detection, or 0 when the node has none. Two
+  /// A stable identity for cycle detection, or 0 when the node has none.
+  ///
+  /// Two nodes sharing an identity are taken to be the same object, and the
+  /// second is reported rather than expanded. A load address alone is therefore
+  /// not enough: a struct, its first member, and that member's first member all
+  /// begin at the same address, and treating them as one loses the innermost
+  /// value. An implementation must distinguish nodes that merely start at the
+  /// same place, for instance by combining the address with the type. Two
   /// nodes sharing an identity denote the same underlying object.
   virtual uint64_t GetIdentity() = 0;
 

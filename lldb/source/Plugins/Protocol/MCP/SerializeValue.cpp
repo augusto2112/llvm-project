@@ -93,7 +93,7 @@ struct Serializer {
 
     uint64_t Id = N.GetIdentity();
     if (Id != 0 && !Seen.insert(Id).second)
-      return json::Object{{"_cycle", formatv("0x{0:x}", Id).str()}};
+      return json::Object{{"_cycle", "already reported above"}};
 
     size_t NumChildren = N.GetNumChildren();
     if (NumChildren == 0 || Depth >= Opts.MaxDepth) {

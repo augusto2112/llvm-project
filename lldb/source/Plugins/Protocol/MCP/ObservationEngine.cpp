@@ -861,6 +861,13 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     if (Capture.Disabled)
       continue;
 
+    // The return value is produced above, from the ABI rather than from a
+    // variable of that name. Resolving it here as well would record a second
+    // value under the same key on every hit, so a capture of five return values
+    // would report ten, half of them unreadable.
+    if (Obs.OnReturn && Capture.Expr == ReturnValueCapture)
+      continue;
+
     const Clock::time_point Started = Clock::now();
     ValueResolution Resolved = ResolveValueDWIM(Capture.Expr, Frame, *m_target,
                                                 Frame, CaptureOptions());

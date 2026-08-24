@@ -11,6 +11,7 @@
 #include "lldb/Utility/ConstString.h"
 #include "lldb/Utility/Status.h"
 #include "lldb/ValueObject/ValueObject.h"
+#include "llvm/ADT/Hashing.h"
 #include "lldb/lldb-defines.h"
 #include "lldb/lldb-forward.h"
 #include "lldb/lldb-types.h"
@@ -86,12 +87,15 @@ Availability ValueObjectNode::GetAvailability() {
 uint64_t ValueObjectNode::GetIdentity() {
   if (!m_value)
     return 0;
-  // Two nodes at the same load address denote the same object. A value with no
-  // address in the target has no identity, which the interface spells as 0.
   lldb::addr_t Addr = m_value->GetLoadAddress();
   if (Addr == LLDB_INVALID_ADDRESS)
     return 0;
-  return Addr;
+
+  // An address alone does not identify an object: a struct, its first member,
+  // and that member's first member all begin at the same address, so an
+  // address-only identity reports a nested aggregate as a cycle and loses the
+  // value it was standing in for. The type is what separates them.
+  return llvm::hash_combine(Addr, m_value->GetTypeName().GetStringRef());
 }
 
 size_t ValueObjectNode::GetNumChildren() {
