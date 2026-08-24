@@ -105,10 +105,20 @@ std::string Compact(const json::Value &V) {
 /// a run's return values would be summarised separately from the paths they came
 /// from and neither would be comparable with the other.
 std::string AggregateKey(const json::Value &V) {
-  if (const json::Object *Obj = V.getAsObject())
-    if (Obj->size() == 1)
-      if (std::optional<StringRef> Scalar = Obj->getString("value"))
+  if (const json::Object *Obj = V.getAsObject()) {
+    // A marker is not data. A value reduced for size carries its own value plus
+    // an `_elided` saying so, and keying on the whole document repeated that
+    // sentence in every histogram key, on both sides of every transition and in
+    // every outlier -- which is what the reduction was meant to stop.
+    if (std::optional<StringRef> Scalar = Obj->getString("value")) {
+      const bool OnlyMarkers = all_of(*Obj, [](const auto &Entry) {
+        const StringRef Key = Entry.first;
+        return Key == "value" || Key.starts_with("_");
+      });
+      if (OnlyMarkers)
         return Scalar->str();
+    }
+  }
   return Compact(V);
 }
 

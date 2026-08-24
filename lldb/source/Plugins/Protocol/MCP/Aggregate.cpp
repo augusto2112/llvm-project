@@ -71,6 +71,24 @@ size_t WorthShowing(llvm::ArrayRef<T> Ranked, size_t Total, CountOf Count) {
 
 } // namespace
 
+bool Aggregator::RarityIsMeaningful(
+    ArrayRef<std::pair<std::string, uint64_t>> ByCountDescending,
+    uint64_t Total) {
+  // The count of the value a hit picked at random out of the run would hold.
+  // Walking the values from the most common down, the one that crosses half the
+  // hits is that value, which is the hit-weighted median: the unweighted median
+  // would be a fact about the length of the tail rather than about the run, and
+  // would call one vector type among four thousand integers unremarkable because
+  // half the *values* are the rare one.
+  uint64_t Seen = 0;
+  for (const auto &[Value, Count] : ByCountDescending) {
+    Seen += Count;
+    if (Seen * 2 >= Total)
+      return Count > MaxOutlierCount;
+  }
+  return false;
+}
+
 json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   // An object describing a single value is mostly punctuation, and a capture
   // that never varied is the common case.
@@ -152,13 +170,12 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   if (Dropped != 0)
     Out["transitions_elided"] = Dropped;
 
-  // Two gates, because they exclude different runs. A run of a dozen hits has
-  // no "many" for a value to be rare among, and a run whose values are all
-  // distinct has no repetition for one to be rare against -- there, every value
-  // is an outlier, which is another way of saying none is.
-  const bool ValuesRepeat =
-      Summary.Values.size() * MinRepeatsForOutliers <= Summary.Total;
-  if (Summary.Total >= MinObservationsForOutliers && ValuesRepeat) {
+  // Two gates, because they exclude different runs. A run of a dozen hits has no
+  // "many" for a value to be rare among, and a run whose typical hit holds a value
+  // seen once or twice has nothing for a rare one to be rare against -- there,
+  // every value is an outlier, which is another way of saying none is.
+  if (Summary.Total >= MinObservationsForOutliers &&
+      RarityIsMeaningful(ByCount, Summary.Total)) {
     struct Outlier {
       std::string Rendered;
       uint64_t Count;

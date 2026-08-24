@@ -976,9 +976,9 @@ TEST(AggregateTest, OutliersAreBoundedAndSayHowManyWereDropped) {
   size_t Seq = 0;
   for (; Seq < Rare; ++Seq)
     Aggregate.Record("loop", "p", ValueName(Seq), Seq, Seq);
-  // Enough repetition for rarity to mean something: among values that are all
-  // unique, none is rare.
-  for (size_t I = 0; I < Rare * Aggregator::MinRepeatsForOutliers; ++I, ++Seq)
+  // A common value the typical hit holds, so that being seen once is remarkable
+  // rather than ordinary.
+  for (size_t I = 0; I < Rare * 3; ++I, ++Seq)
     Aggregate.Record("loop", "p", "common", Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
@@ -1002,6 +1002,47 @@ TEST(AggregateTest, OutliersAreBoundedAndSayHowManyWereDropped) {
   // cannot be read as the whole of what was rare.
   EXPECT_EQ(Fields->getInteger("distinct"),
             std::optional<int64_t>(static_cast<int64_t>(Rare + 1)));
+}
+
+TEST(AggregateTest, NothingIsRareWhenTheTypicalHitIsItselfRare) {
+  // Measured on a capture of an instruction pointer over 1200 hits: three
+  // addresses held 135, 133 and 133 of them while four hundred held one or two.
+  // Something was common by any share you like, and the answer was still eight
+  // arbitrary addresses with 392 elided -- because two thirds of the hits were in
+  // that tail, which is what makes the tail ordinary.
+  Aggregator Aggregate;
+  uint64_t Seq = 0;
+  for (unsigned I = 0; I < 3; ++I)
+    for (unsigned Repeat = 0; Repeat < 134; ++Repeat, ++Seq)
+      Aggregate.Record("loop", "p", "hot" + std::to_string(I), Seq, Seq);
+  for (unsigned I = 0; I < 400; ++I)
+    for (unsigned Repeat = 0; Repeat < 2; ++Repeat, ++Seq)
+      Aggregate.Record("loop", "p", ValueName(I), Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "p");
+  ASSERT_NE(Fields, nullptr);
+  EXPECT_EQ(Fields->get("outliers"), nullptr) << ToString(*Fields).substr(0, 300);
+  // Withheld, not hidden: the histogram still shows what dominated.
+  EXPECT_NE(Fields->getObject("values")->getInteger("hot0"), std::nullopt);
+}
+
+TEST(AggregateTest, OneRareValueAmongThousandsOfCommonOnesSurvives) {
+  // The case the rule exists to keep, and the one every bound and gate here is
+  // measured against: one vector type among four thousand integers.
+  Aggregator Aggregate;
+  uint64_t Seq = 0;
+  for (; Seq < 4000; ++Seq)
+    Aggregate.Record("loop", "ty", "i32", Seq, Seq);
+  Aggregate.Record("loop", "ty", "v4i32", Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "ty");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Array *Outliers = Fields->getArray("outliers");
+  ASSERT_NE(Outliers, nullptr);
+  EXPECT_EQ(ToString(*Outliers),
+            R"([{"count":1,"first_hit":4000,"first_seq":4000,"value":"v4i32"}])");
 }
 
 TEST(AggregateTest, NothingIsRareWhenEveryValueIsDistinct) {

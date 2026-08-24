@@ -16,6 +16,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace lldb_private::mcp {
@@ -68,15 +69,25 @@ public:
   /// The most times a value can be seen and still be rare.
   static constexpr uint64_t MaxOutlierCount = 2;
 
-  /// A value repeats often enough for a rare one to stand out against it only
-  /// when values repeat at all. Measured on a capture of a compiler's node ids
-  /// over 1808 hits, all 1808 distinct: every value qualified as rare, and the
-  /// bound below rendered 32 of them plus a count of 1776 more -- three
-  /// kilobytes saying nothing except that the ids differ, which `distinct`
-  /// already said. Outliers are withheld unless each value is seen twice on
-  /// average, because "rare" among values that are all unique is not a fact
-  /// about the run.
-  static constexpr uint64_t MinRepeatsForOutliers = 2;
+  /// Whether a value seen once or twice is remarkable, decided against the run it
+  /// sits in: what a hit picked at random out of this capture holds. If that value
+  /// was itself seen once or twice then being seen once or twice is the norm here
+  /// and nothing about it is worth naming.
+  ///
+  /// Two measurements shaped this. A capture of a compiler's node ids over 1808
+  /// hits, all distinct: every value was rare, and the list rendered 32 of them
+  /// plus a count of 1776 more -- three kilobytes saying only that ids differ,
+  /// which `distinct` already said. Then a capture of an instruction pointer over
+  /// 1200 hits: three addresses held 135, 133 and 133 of them and four hundred
+  /// held one or two, so a gate asking whether anything was common passed, and the
+  /// answer was still eight arbitrary addresses with 392 elided. Two thirds of
+  /// those hits were in the tail, which is what makes the tail ordinary. The
+  /// counterexample the rule has to keep is one vector type among four thousand
+  /// integers, where the typical hit holds the common value and the rare one is the
+  /// answer.
+  static bool RarityIsMeaningful(
+      llvm::ArrayRef<std::pair<std::string, uint64_t>> ByCountDescending,
+      uint64_t Total);
 
   /// Histogram keys kept in `values`. A capture that renders a distinct string
   /// on every hit would otherwise put one key per hit into the response, so the
