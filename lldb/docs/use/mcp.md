@@ -112,6 +112,13 @@ another observation has been hit), `skip_first`, `only_hit`, `backtrace`,
 `depth`, and `on` set to `entry` or `return`. `emit` is `every_hit`,
 `on_change`, or `first_and_last`.
 
+The plan itself also takes `args`, `env`, `cwd`, `stdin` (a path whose contents
+are fed to the program), `capture_inferior_output` (on unless turned off), and
+`no_progress_seconds`, which ends a run that goes that long without any
+tracepoint in the plan being hit. That last one is off unless asked for,
+because a plan whose triggers only fire near the end of a long run is
+legitimate.
+
 **An empty `observe` list is crash triage.** The program runs untouched and the
 result is how it ended, with a ranked backtrace, locals and source at the
 failure. That is the shortest useful plan:
@@ -124,7 +131,11 @@ failure. That is the shortest useful plan:
 
 The response carries `outcome` — `exited`, `crashed`, `timed_out` or
 `no_progress` — a `plan_report` per observation, an `aggregate`, a `terminal`
-event, and a pointer to the artifact.
+event, and a pointer to the artifact. A run that got stuck also carries a
+`cycle`, the block of locations the end of the run kept traversing, which for a
+program that did not terminate is usually the answer. `inferior_output` holds
+the program's own output, and `notes` holds what went wrong that no single
+observation owns.
 
 Read `aggregate` first. For each captured expression it gives the distinct
 values with counts, the transitions between them, and `outliers`: the values
@@ -137,21 +148,33 @@ generous as you like.
 
 An outlier carries two numbers because they count different things.
 `first_hit` counts that observation's own hits and is what `only_hit` takes.
-`first_seq` numbers the whole event stream and is what matches a line in the
-artifact. They are equal only when a plan holds a single observation.
+`first_seq` numbers the whole event stream: it matches a line in the artifact
+for any hit whose event the emission mode kept. They are equal only when a plan
+holds a single observation.
 
-Both `values` and `transitions` are bounded, and report `values_elided` and
-`transitions_elided` beside themselves when they drop anything. `distinct`
-always counts every value, so a shortened histogram cannot be mistaken for the
-real cardinality, and outliers are chosen before the bound applies, so the rare
-value that is usually the answer is never the one dropped.
+`values`, `transitions` and `outliers` are all bounded, and report
+`values_elided`, `transitions_elided` and `outliers_elided` beside themselves
+when they drop anything. `distinct` always counts every value, so a shortened
+histogram cannot be mistaken for the real cardinality, and outliers are ranked
+rarest-first before the bound applies, so what a bound drops is the least rare
+of them.
 
 `plan_report` keeps four numbers apart on purpose: how many locations the name
 resolved to, how many times the tracepoint was hit, how many of those hits had a
 true condition, and how many events were emitted. A misspelled function name, a
 condition that never held, and code that never ran all produce no events, and
 these numbers are what tell them apart. A name that resolved to nothing comes
-back with the nearest names that do exist.
+back with the nearest names that do exist; a name that resolved when its library
+loaded partway through the run comes back resolved, since the count is read after
+the run rather than before it.
+
+An observation hit on more than one thread also reports `threads`. Hit order,
+change detection and the aggregate all cover the observation rather than one
+thread, so past one thread the sequence is an interleaving — the `tid` on each
+event is what separates it again. An `on: return` observation reports
+`returns_abandoned` when a frame left without returning, which is what an
+exception or a longjmp does to one: those calls produce no event, and observing
+the function on entry is what counts all of them.
 
 Events themselves live in the artifact, one JSON object per line, and the
 response reports its path and field names. The last few events are included
@@ -434,8 +457,21 @@ evaluated in `PerformAction`. `when` is evaluated by the callback itself.
 
 **A one-shot breakpoint does not retire.** `PerformAction` removes it only when
 the callback asks to stop, which a tracepoint never does. The engine reuses one
-breakpoint per distinct return address and arms it with a counter, so the set is
-bounded by call sites rather than by hits.
+breakpoint per distinct return address, so the set is bounded by call sites
+rather than by hits.
+
+**A return address is not a frame.** Because that breakpoint is shared, what
+says whether a stop there is the return of the frame that armed it has to be
+kept separately — `ArmedFrames`. Two threads reach the same return address, so
+counting arrivals reports one thread's return as another's. A frame unwound by
+an exception or a longjmp never reaches it at all, so counting arrivals also
+waits forever for that frame and then credits the next call's return to it. A
+frame is identified by its thread and its call-frame address, and the stack
+grows down, so a frame is known to be gone once its thread is seen at or below
+it — which costs no unwinding, since the current frame's own CFA is enough. The
+same test is what makes `called_from` mean "a frame of that function is still
+below this one, on this thread" rather than "the gate was entered at some point
+by somebody".
 
 **Evaluating an expression from a synchronous callback costs a thread.**
 `Breakpoint::SetCallback`'s own documentation warns against it. It does work —
@@ -443,6 +479,10 @@ bounded by call sites rather than by hits.
 a temporary one — but at roughly 20ms per evaluation, measured. That cost is the
 whole reason for the adaptive control that disables an expensive capture partway
 through a run.
+
+**`StackID` carries two call-frame addresses.** The metadata-bearing one can hold
+pointer-authentication bits, which do not survive being compared as numbers.
+Ordering frames on a stack needs `GetCallFrameAddressWithoutMetadata`.
 
 **`Target::Launch` has no timeout.** It waits for the first stop with
 `WaitForProcessToStop(std::nullopt, ...)` unconditionally, so `timeout_seconds`
@@ -469,10 +509,10 @@ means choosing the DIL mode to match, or every pointer path fails under
 
 `lldb/unittests/Protocol/` holds the unit tests: the plan parser, the
 serializer, the aggregate, the artifact, and the engine's pure decisions —
-emission, expression-cost control, and frame ranking. Everything needing a live
-process is in `lldb/test/API/tools/lldb-mcp/observe/`, which drives the tool
-over a Unix socket the way a real client does. That test needs to bind a socket,
-so a sandbox that forbids it will fail the whole file at
+emission, expression-cost control, frame arming, and frame ranking. Everything
+needing a live process is in `lldb/test/API/tools/lldb-mcp/observe/`, which
+drives the tool over a Unix socket the way a real client does. That test needs to
+bind a socket, so a sandbox that forbids it will fail the whole file at
 `protocol-server start`.
 
 ### Adding Tools and Resources

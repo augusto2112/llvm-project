@@ -99,9 +99,11 @@ struct ObservationPlan {
   /// result rather than a failure, so there is always a limit.
   uint32_t TimeoutSeconds = 30;
 
-  /// Gives up after this long with no emitted event. Absent leaves the check
-  /// disarmed, because a plan whose triggers only fire near the end of a run
-  /// is legitimate and would otherwise be cut short.
+  /// Gives up after this long with no tracepoint in the plan being hit at all.
+  /// Measured over hits rather than over emitted events, because an emission
+  /// mode that keeps one event in a thousand is not the program stalling.
+  /// Absent leaves the check disarmed, because a plan whose triggers only fire
+  /// near the end of a run is legitimate and would otherwise be cut short.
   std::optional<uint32_t> NoProgressSeconds;
 
   /// An empty list is a legal plan: it runs the program and reports how it

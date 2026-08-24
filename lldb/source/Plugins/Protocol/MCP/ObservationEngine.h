@@ -15,7 +15,10 @@
 #include "lldb/Target/DWIMValueResolution.h"
 #include "lldb/lldb-forward.h"
 #include "lldb/lldb-private-interfaces.h"
+#include "lldb/lldb-types.h"
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
@@ -39,9 +42,9 @@ enum class Outcome {
   /// The wall-clock ceiling was reached with the program still running.
   TimedOut,
 
-  /// No event was emitted for longer than the plan allowed. Distinct from
-  /// \ref TimedOut because the program was making progress of some kind; what
-  /// stopped was the part of it the plan was watching.
+  /// No tracepoint in the plan was hit for longer than the plan allowed.
+  /// Distinct from \ref TimedOut because the program was making progress of
+  /// some kind; what stopped was the part of it the plan was watching.
   NoProgress,
 };
 
@@ -98,10 +101,11 @@ struct EmitDecisionInput {
   /// only to offset its numbering.
   uint32_t SkipFirst = 0;
 
-  /// Records a single hit, numbered over all of the observation's hits rather
-  /// than over the ones that survived \ref SkipFirst: the number a caller has
-  /// in mind is one it counted in the program, and skipping is a separate
-  /// instruction that must not silently renumber it.
+  /// Records a single hit, numbered the way the aggregate numbers the hit it
+  /// names: \ref SkipFirst plus \ref HitIndex. Both sides have to compute it
+  /// the same way, because reading an interesting hit out of the aggregate and
+  /// asking for that hit here is the loop the tool is built around, and a
+  /// numbering that disagreed by the skipped hits would select a different one.
   std::optional<uint32_t> OnlyHit;
 };
 
@@ -175,6 +179,76 @@ CaptureCostDecision AssessCaptureCost(const CaptureCostInput &In);
 /// pairs `getX()` with a readable member is what makes the substitution sound;
 /// it turns a compile and a call in the inferior into a memory read.
 std::optional<std::string> SuggestPathForm(llvm::StringRef Expr);
+
+//===----------------------------------------------------------------------===//
+// Frame arming
+//===----------------------------------------------------------------------===//
+
+/// The frames whose departure is being waited for, at breakpoints on the
+/// addresses they return to.
+///
+/// A frame is identified by the thread it runs on together with its call-frame
+/// address, because a return address is not an identity. Two threads reach the
+/// same one, so waiting on the address alone reports one thread's return as
+/// another's. A frame unwound by an exception or a longjmp never reaches it at
+/// all, so waiting on the address alone also waits forever -- and then reports
+/// the next arrival there as the return of a frame that is long gone.
+///
+/// The stack grows down, so a frame is known to have been left as soon as its
+/// thread is seen in a frame at or below it. That is the whole test, and it
+/// costs no unwinding: the current frame's own call-frame address is enough.
+class ArmedFrames {
+public:
+  /// Records that \p Tid is in a frame at \p CFA that will return to \p Return.
+  void Arm(lldb::tid_t Tid, lldb::addr_t Return, lldb::addr_t CFA);
+
+  /// Whether one of \p Tid's armed frames returned to \p Return, given that the
+  /// thread is now in the frame at \p CFA. Frames the thread has left without
+  /// returning are dropped here rather than reported, and counted in
+  /// \ref GetAbandoned.
+  bool Returned(lldb::tid_t Tid, lldb::addr_t Return, lldb::addr_t CFA);
+
+  /// Whether an armed frame of \p Tid still encloses the frame at \p CFA.
+  ///
+  /// This is what makes a `called_from` gate exact: being called from a
+  /// function is having one of its frames still below this one on this thread,
+  /// which is not the same as the gate having been entered at some point by
+  /// somebody.
+  bool EnclosesFrame(lldb::tid_t Tid, lldb::addr_t CFA);
+
+  /// Whether no frame is armed on any thread, which is when the breakpoints
+  /// behind them can be switched off.
+  bool Empty() const { return m_count == 0; }
+
+  /// Frames proven to have been left without returning, which is what an
+  /// exception or a longjmp does to one. A frame is proven gone by a later
+  /// frame of the same thread, so the last call of a run is not among these;
+  /// \ref GetOutstanding is what accounts for that one.
+  uint64_t GetAbandoned() const { return m_abandoned; }
+
+  /// Frames still armed. Once the program has exited these are frames that
+  /// never returned either, but while it is running they may simply not have
+  /// returned yet, and the difference is not this class's to decide.
+  uint64_t GetOutstanding() const { return m_count; }
+
+private:
+  struct Frame {
+    lldb::addr_t Return;
+    lldb::addr_t CFA;
+  };
+
+  /// Drops the frames of \p Frames that a thread found at \p CFA has left, and
+  /// counts them as abandoned. Armed frames run outermost-first, so the
+  /// departed ones are always a suffix.
+  void Discard(llvm::SmallVectorImpl<Frame> &Frames, lldb::addr_t CFA);
+
+  /// Innermost last, per thread. Erased once a thread has no armed frame, so
+  /// that a program churning through threads does not grow this indefinitely.
+  llvm::DenseMap<lldb::tid_t, llvm::SmallVector<Frame, 4>> m_frames;
+
+  uint64_t m_count = 0;
+  uint64_t m_abandoned = 0;
+};
 
 //===----------------------------------------------------------------------===//
 // Frame ranking
@@ -285,6 +359,17 @@ struct ObservationReport {
   /// the aggregate is computed over every hit.
   uint64_t Emitted = 0;
 
+  /// Threads that hit this observation. Reported once it is more than one,
+  /// because hit order, change detection and the aggregate are all kept per
+  /// observation and not per thread: past one thread, the sequence a reader
+  /// sees is an interleaving, and events carry the thread each hit came from.
+  uint32_t Threads = 0;
+
+  /// Frames of an `on: return` observation that were left without returning,
+  /// which is what an exception or a longjmp does to one. Reported because it
+  /// is otherwise indistinguishable from a return that went unnoticed.
+  uint64_t ReturnsAbandoned = 0;
+
   std::vector<CaptureReport> Captures;
 
   llvm::json::Value Render() const;
@@ -377,8 +462,8 @@ struct ObservationResult {
 /// to one is the baton the breakpoint callbacks are installed with.
 struct ObservationSite;
 
-/// Breakpoints at the addresses frames return to, defined by the
-/// implementation.
+/// Breakpoints at the addresses frames return to, together with the frames
+/// armed at them. Defined by the implementation.
 struct ReturnSet;
 
 /// Runs an observation plan and reports what happened.
@@ -424,8 +509,8 @@ private:
   /// a frame can be observed without unwinding at every hit of something else.
   /// Unwinding per hit to ask who called is what makes the obvious
   /// implementation cost stack depth times hits.
-  lldb::BreakpointSP ArmReturn(ReturnSet &Set, StoppointCallbackContext *Ctx,
-                               BreakpointHitCallback Callback, void *Baton);
+  void ArmReturn(ReturnSet &Set, StoppointCallbackContext *Ctx,
+                 BreakpointHitCallback Callback, void *Baton);
 
   llvm::Error InstallObservations();
   llvm::Error Launch();
@@ -434,6 +519,17 @@ private:
   void DrainInferiorOutput();
   void FlushHeldEvents();
   void WriteEvent(ObservationSite &Site, llvm::json::Object Event);
+
+  /// Kills the observed process and drops the target. Runs however the run
+  /// ended, including on the paths that never got the program started: a target
+  /// left behind holds this run's breakpoints, and in a session somebody else
+  /// is using it also outlives the call that made it.
+  void Teardown();
+
+  /// Records that the plan saw the program move. The stall ceiling is measured
+  /// against this rather than against the event stream, because a mode that
+  /// reduces the stream is not the program slowing down.
+  void NoteProgress();
 
   ValueResolutionOptions CaptureOptions() const;
 
@@ -469,7 +565,10 @@ private:
   uint64_t m_seq = 0;
 
   std::chrono::steady_clock::time_point m_start;
-  std::chrono::steady_clock::time_point m_last_emit;
+
+  /// When the plan last saw the program move, which is the last hit any
+  /// observation took rather than the last event written.
+  std::chrono::steady_clock::time_point m_last_progress;
 
   /// Set by a callback that found the run has to end, and read by the wait
   /// loop. A callback is the only place a run that keeps hitting tracepoints

@@ -27,6 +27,7 @@
 #include "lldb/Target/Process.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/StackFrame.h"
+#include "lldb/Target/StackID.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/TargetList.h"
 #include "lldb/Target/Thread.h"
@@ -40,6 +41,8 @@
 #include "lldb/lldb-enumerations.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
+#include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
@@ -224,6 +227,75 @@ json::Value CaptureCostDecision::Render() const {
 }
 
 //===----------------------------------------------------------------------===//
+// Frame arming
+//===----------------------------------------------------------------------===//
+
+void ArmedFrames::Discard(SmallVectorImpl<Frame> &Frames, lldb::addr_t CFA) {
+  // The stack grows down, so a frame strictly below where the thread is now has
+  // been left. Strictly: a thread standing at exactly an armed frame's
+  // call-frame address is standing in that frame, which is what happens the
+  // moment a recursive call returns into the frame that made it.
+  //
+  // Armed frames run outermost-first, and an outer frame's call-frame address
+  // is the higher one, so the departed frames are always a suffix.
+  while (!Frames.empty() && Frames.back().CFA < CFA) {
+    Frames.pop_back();
+    --m_count;
+    ++m_abandoned;
+  }
+}
+
+void ArmedFrames::Arm(lldb::tid_t Tid, lldb::addr_t Return, lldb::addr_t CFA) {
+  SmallVector<Frame, 4> &Frames = m_frames[Tid];
+
+  // A call below an armed frame is proof that frame is gone: this thread could
+  // not be running here otherwise. Dropping those now is what keeps a frame
+  // lost to an exception from being reported as the return of a later call.
+  Discard(Frames, CFA);
+
+  Frames.push_back({Return, CFA});
+  ++m_count;
+}
+
+bool ArmedFrames::Returned(lldb::tid_t Tid, lldb::addr_t Return,
+                           lldb::addr_t CFA) {
+  auto It = m_frames.find(Tid);
+  if (It == m_frames.end())
+    return false;
+  SmallVector<Frame, 4> &Frames = It->second;
+
+  // Only the innermost armed frame can be the one that returned here, and only
+  // if the thread has left it. When it has, that frame is removed as having
+  // returned rather than counted among the abandoned.
+  const bool Returned = !Frames.empty() && Frames.back().CFA < CFA &&
+                        Frames.back().Return == Return;
+  if (Returned) {
+    Frames.pop_back();
+    --m_count;
+  }
+  Discard(Frames, CFA);
+
+  if (Frames.empty())
+    m_frames.erase(It);
+  return Returned;
+}
+
+bool ArmedFrames::EnclosesFrame(lldb::tid_t Tid, lldb::addr_t CFA) {
+  auto It = m_frames.find(Tid);
+  if (It == m_frames.end())
+    return false;
+
+  Discard(It->second, CFA);
+  if (It->second.empty()) {
+    m_frames.erase(It);
+    return false;
+  }
+  // Strictly outer, so that a function observed as being called from itself
+  // counts its nested calls and not the outermost one, which nothing called.
+  return It->second.back().CFA > CFA;
+}
+
+//===----------------------------------------------------------------------===//
 // Frame ranking
 //===----------------------------------------------------------------------===//
 
@@ -350,6 +422,13 @@ json::Value ObservationReport::Render() const {
     O["condition_ms"] = Round2(ConditionMs);
   }
 
+  // One thread is the case a reader assumes, so saying so would be noise. More
+  // than one changes how every other number here reads, so it is not.
+  if (Threads > 1)
+    O["threads"] = static_cast<int64_t>(Threads);
+  if (ReturnsAbandoned != 0)
+    O["returns_abandoned"] = static_cast<int64_t>(ReturnsAbandoned);
+
   if (!Captures.empty()) {
     json::Object Rendered;
     for (const CaptureReport &Capture : Captures)
@@ -400,7 +479,7 @@ json::Value ArtifactReport::Render() const {
   // which is the point of writing it out rather than inlining it.
   if (!Path.empty()) {
     O["format"] = "one JSON object per line";
-    O["fields"] = json::Array{"seq", "label", "t_ms", "frame", "values"};
+    O["fields"] = json::Array{"seq", "label", "tid", "t_ms", "frame", "values"};
   }
   return O;
 }
@@ -448,18 +527,23 @@ json::Value ObservationResult::Render() const {
 
 namespace lldb_private::mcp {
 
-/// Breakpoints at the addresses frames return to.
+/// Breakpoints at the addresses frames return to, and the frames armed at them.
 ///
-/// They are re-used rather than made one-shot. A one-shot breakpoint is retired
-/// by the code that runs after a stop is accepted, which a callback declining
-/// the stop never reaches, so one-shot here would grow the set with every hit
-/// instead of with the number of call sites.
+/// The breakpoints are re-used rather than made one-shot. A one-shot breakpoint
+/// is retired by the code that runs after a stop is accepted, which a callback
+/// declining the stop never reaches, so one-shot here would grow the set with
+/// every hit instead of with the number of call sites. Which frames are
+/// outstanding is therefore tracked separately, in \ref Armed, since a shared
+/// breakpoint cannot answer that itself.
 struct ReturnSet {
   DenseMap<lldb::addr_t, lldb::BreakpointSP> Breakpoints;
+  ArmedFrames Armed;
 
-  /// Frames armed and not yet seen to return. Guards against a re-used
-  /// breakpoint firing for a frame nobody asked about.
-  uint32_t Pending = 0;
+  /// Frames that could not be armed at all, because the return address or the
+  /// call-frame address could not be read. Counted rather than ignored: an
+  /// observation that recorded nothing because of this is otherwise
+  /// indistinguishable from one whose code never ran.
+  uint64_t ArmFailures = 0;
 
   void SetEnabled(bool Enable) {
     for (auto &Entry : Breakpoints)
@@ -477,14 +561,20 @@ struct ObservationSite {
 
   uint64_t Hits = 0;
 
-  /// Hits that reached the emission decision, which is what \ref OnlyHit and
-  /// `first_and_last` are numbered over.
+  /// Hits that reached the emission decision. Both `only_hit` and the hit an
+  /// outlier names are this plus `skip_first`, so that the number the aggregate
+  /// reports is the number a plan can ask for.
   uint64_t Recorded = 0;
 
   uint64_t ConditionTrue = 0;
   uint64_t ConditionErrors = 0;
   uint64_t Emitted = 0;
   Micros ConditionSpent{0};
+
+  /// Threads this observation was hit on. A DenseSet is not usable here:
+  /// DenseMapInfo<uint64_t> reserves ~0ULL, which is a thread id like any
+  /// other.
+  SmallSet<lldb::tid_t, 4> Threads;
 
   std::optional<std::string> Previous;
   std::optional<json::Object> Held;
@@ -507,11 +597,10 @@ struct ObservationSite {
   CompilerType ReturnType;
   bool ReturnTypeResolved = false;
 
-  /// The breakpoint on the function named by `called_from`, and the addresses
-  /// its frames return to.
+  /// The breakpoint on the function named by `called_from`, and the frames of
+  /// it that are currently on a stack.
   lldb::BreakpointSP Gate;
   ReturnSet GateReturns;
-  uint32_t GateDepth = 0;
 
   /// Sites this one enables the first time it is hit.
   std::vector<ObservationSite *> Enables;
@@ -588,6 +677,34 @@ StackFrame *FrameOf(StoppointCallbackContext *Ctx) {
   return ExeCtx.GetFramePtr();
 }
 
+/// What identifies one frame of one thread for the whole time it is on the
+/// stack. A return address does not: two threads share it, and a frame can be
+/// left without ever reaching it.
+struct FrameIdentity {
+  lldb::tid_t Tid = LLDB_INVALID_THREAD_ID;
+
+  /// The frame's call-frame address, which orders it against every other frame
+  /// on its thread.
+  lldb::addr_t CFA = LLDB_INVALID_ADDRESS;
+
+  /// Where the thread is stopped.
+  lldb::addr_t PC = LLDB_INVALID_ADDRESS;
+};
+
+FrameIdentity IdentifyFrame(StackFrame *Frame, Target &Tgt) {
+  FrameIdentity Id;
+  if (!Frame)
+    return Id;
+  if (lldb::ThreadSP T = Frame->GetThread())
+    Id.Tid = T->GetID();
+  // Without the metadata, because these are compared as numbers to order frames
+  // on a stack, and the metadata form can carry pointer-authentication bits
+  // that do not survive that comparison.
+  Id.CFA = Frame->GetStackID().GetCallFrameAddressWithoutMetadata();
+  Id.PC = Frame->GetFrameCodeAddress().GetLoadAddress(&Tgt);
+  return Id;
+}
+
 /// The name and source location of \p Frame. The file is empty when the frame
 /// resolved none.
 RawFrame DescribeFrame(StackFrame &Frame) {
@@ -619,7 +736,26 @@ json::Value RenderBacktrace(Thread &T, uint32_t Frames) {
 } // namespace
 
 bool ObservationSite::OnHit(StoppointCallbackContext *Ctx) {
+  StackFrame *Frame = FrameOf(Ctx);
+  const FrameIdentity Id = IdentifyFrame(Frame, *Engine->m_target);
+
+  // A gate is answered from the stack rather than remembered from the moment it
+  // was entered: being called from a function is having one of its frames still
+  // below this one, on this thread. Remembering it instead would open the gate
+  // for every other thread as well.
+  //
+  // Tested before the hit is counted, because a hit reached some other way is
+  // not this observation's hit at all -- `called_from` reduces hits, not just
+  // events.
+  if (Obs->CalledFrom && !GateReturns.Armed.EnclosesFrame(Id.Tid, Id.CFA))
+    return false;
+
   ++Hits;
+  Threads.insert(Id.Tid);
+
+  // Any arrival at a tracepoint is the plan seeing the program move, whatever
+  // the emission mode goes on to do with the event.
+  Engine->NoteProgress();
 
   // Counted here rather than delegated to the breakpoint's ignore count. The
   // ignore count is consulted only in the asynchronous half of stop processing,
@@ -643,7 +779,7 @@ bool ObservationSite::OnHit(StoppointCallbackContext *Ctx) {
     // path, so neither could supply the type.
     if (!ReturnTypeResolved) {
       ReturnTypeResolved = true;
-      if (StackFrame *Frame = FrameOf(Ctx)) {
+      if (Frame) {
         SymbolContext SC =
             Frame->GetSymbolContext(lldb::eSymbolContextFunction);
         if (SC.function)
@@ -657,33 +793,47 @@ bool ObservationSite::OnHit(StoppointCallbackContext *Ctx) {
 }
 
 bool ObservationSite::OnReturned(StoppointCallbackContext *Ctx) {
-  // A re-used return breakpoint can be reached by a frame nobody armed it for,
-  // so the count of armed frames rather than the breakpoint is what says
-  // whether this return is one that was asked about.
-  if (Returns.Pending == 0)
-    return false;
-  if (--Returns.Pending == 0)
+  StackFrame *Frame = FrameOf(Ctx);
+  const FrameIdentity Id = IdentifyFrame(Frame, *Engine->m_target);
+
+  // A re-used return breakpoint is reached by frames nobody armed it for: the
+  // same call site calling again, or another thread passing through. Which
+  // frame this is, rather than which address, is what says whether the return
+  // is one that was asked about.
+  const bool Returned = Returns.Armed.Returned(Id.Tid, Id.PC, Id.CFA);
+  if (Returns.Armed.Empty())
     Returns.SetEnabled(false);
+  if (!Returned)
+    return false;
+
+  Engine->NoteProgress();
   return Engine->RecordHit(*this, Ctx);
 }
 
 bool ObservationSite::OnGateEntered(StoppointCallbackContext *Ctx) {
-  if (GateDepth++ == 0 && Breakpoint)
-    Breakpoint->SetEnabled(true);
   Engine->ArmReturn(GateReturns, Ctx, GateLeft, this);
+
+  // Enabling the tracepoint is an optimization on top of the per-hit test in
+  // OnHit: it keeps the callback from running at all while no thread is inside
+  // the gating function.
+  if (Breakpoint && !GateReturns.Armed.Empty())
+    Breakpoint->SetEnabled(true);
   return false;
 }
 
 bool ObservationSite::OnGateLeft(StoppointCallbackContext *Ctx) {
-  if (GateReturns.Pending == 0)
-    return false;
-  if (--GateReturns.Pending == 0)
-    GateReturns.SetEnabled(false);
+  StackFrame *Frame = FrameOf(Ctx);
+  const FrameIdentity Id = IdentifyFrame(Frame, *Engine->m_target);
+  GateReturns.Armed.Returned(Id.Tid, Id.PC, Id.CFA);
 
-  // The counter, not the breakpoint, tracks depth: a recursive gating function
-  // is still on the stack until the outermost of its frames returns.
-  if (GateDepth != 0 && --GateDepth == 0 && Breakpoint)
-    Breakpoint->SetEnabled(false);
+  // The frames, not the breakpoint, track who is inside: a recursive gating
+  // function is still on the stack until the outermost of its frames returns,
+  // and another thread may be inside it either way.
+  if (GateReturns.Armed.Empty()) {
+    GateReturns.SetEnabled(false);
+    if (Breakpoint)
+      Breakpoint->SetEnabled(false);
+  }
   return false;
 }
 
@@ -742,7 +892,7 @@ bool ObservationEngine::ShouldEnd(Outcome &Reason) {
   // short.
   if (m_plan.NoProgressSeconds) {
     const Micros Idle =
-        std::chrono::duration_cast<Micros>(Clock::now() - m_last_emit);
+        std::chrono::duration_cast<Micros>(Clock::now() - m_last_progress);
     if (Idle >= Micros(std::chrono::seconds(*m_plan.NoProgressSeconds))) {
       Reason = Outcome::NoProgress;
       return true;
@@ -750,6 +900,8 @@ bool ObservationEngine::ShouldEnd(Outcome &Reason) {
   }
   return false;
 }
+
+void ObservationEngine::NoteProgress() { m_last_progress = Clock::now(); }
 
 bool ObservationEngine::EndIfDue() {
   Outcome Reason = Outcome::TimedOut;
@@ -759,23 +911,36 @@ bool ObservationEngine::EndIfDue() {
   return true;
 }
 
-lldb::BreakpointSP ObservationEngine::ArmReturn(ReturnSet &Set,
-                                                StoppointCallbackContext *Ctx,
-                                                BreakpointHitCallback Cb,
-                                                void *Baton) {
+void ObservationEngine::ArmReturn(ReturnSet &Set, StoppointCallbackContext *Ctx,
+                                  BreakpointHitCallback Cb, void *Baton) {
   StackFrame *Frame = FrameOf(Ctx);
-  if (!Frame || !m_target)
-    return nullptr;
+  if (!Frame || !m_target) {
+    ++Set.ArmFailures;
+    return;
+  }
 
   // Read out of the frame's own register context. Walking the stack at each hit
   // to ask who called is what makes the obvious implementation cost stack depth
   // times hits.
   lldb::RegisterContextSP Regs = Frame->GetRegisterContext();
-  if (!Regs)
-    return nullptr;
+  if (!Regs) {
+    ++Set.ArmFailures;
+    return;
+  }
   const lldb::addr_t Return = Regs->GetReturnAddress(LLDB_INVALID_ADDRESS);
-  if (Return == LLDB_INVALID_ADDRESS)
-    return nullptr;
+  if (Return == LLDB_INVALID_ADDRESS) {
+    ++Set.ArmFailures;
+    return;
+  }
+
+  const FrameIdentity Id = IdentifyFrame(Frame, *m_target);
+  if (Id.CFA == LLDB_INVALID_ADDRESS) {
+    // Without a call-frame address there is nothing to tell this frame from the
+    // next one at the same address, and a return reported for the wrong frame
+    // is worse than one not reported at all.
+    ++Set.ArmFailures;
+    return;
+  }
 
   lldb::BreakpointSP &BP = Set.Breakpoints[Return];
   if (!BP) {
@@ -783,14 +948,14 @@ lldb::BreakpointSP ObservationEngine::ArmReturn(ReturnSet &Set,
                                     /*request_hardware=*/false);
     if (!BP) {
       Set.Breakpoints.erase(Return);
-      return nullptr;
+      ++Set.ArmFailures;
+      return;
     }
     BP->SetAutoContinue(true);
     BP->SetCallback(std::move(Cb), Baton, /*is_synchronous=*/true);
   }
   BP->SetEnabled(true);
-  ++Set.Pending;
-  return BP;
+  Set.Armed.Arm(Id.Tid, Return, Id.CFA);
 }
 
 bool ObservationEngine::RecordHit(ObservationSite &Site,
@@ -828,6 +993,12 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
   ++Site.Recorded;
   const uint64_t Seq = ++m_seq;
 
+  // Numbered over all of this observation's hits rather than over the ones that
+  // survived skip_first, because that is the numbering `only_hit` takes. An
+  // aggregate that named its hits the other way would send a caller acting on
+  // one of them to a hit it never meant.
+  const uint64_t Hit = static_cast<uint64_t>(Obs.SkipFirst) + Site.Recorded;
+
   json::Object Values;
   std::string Rendered;
 
@@ -847,8 +1018,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
           SOpts.MaxDepth = Obs.Depth;
           json::Value V = SerializeValue(Node, SOpts);
           std::string Text = Compact(V);
-          m_aggregator.Record(Obs.Label, ReturnValueCapture, Text, Seq,
-                              Site.Recorded);
+          m_aggregator.Record(Obs.Label, ReturnValueCapture, Text, Seq, Hit);
           Rendered += Text;
           Rendered += CaptureSeparator;
           Values[ReturnValueCapture] = std::move(V);
@@ -898,8 +1068,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     // The aggregate sees every recorded hit, whatever the emission mode does
     // with the event. That invariant is the whole reason reducing the stream is
     // a saving rather than a loss.
-    m_aggregator.Record(Obs.Label, Capture.Expr, Text, Seq,
-                        Site.Recorded);
+    m_aggregator.Record(Obs.Label, Capture.Expr, Text, Seq, Hit);
 
     Rendered += Text;
     Rendered += CaptureSeparator;
@@ -937,6 +1106,12 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     json::Object Event{{"seq", static_cast<int64_t>(Seq)},
                        {"label", Obs.Label},
                        {"t_ms", Round2(At)}};
+
+    // Hits of one observation are numbered and compared as a single sequence,
+    // so on a program with more than one thread that sequence is an
+    // interleaving. The thread is what lets a reader take it apart again.
+    if (lldb::ThreadSP T = Frame ? Frame->GetThread() : lldb::ThreadSP())
+      Event["tid"] = static_cast<int64_t>(T->GetID());
     if (Frame)
       Event["frame"] = DescribeFrame(*Frame).Function;
     if (!Values.empty())
@@ -956,7 +1131,6 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
 
 void ObservationEngine::WriteEvent(ObservationSite &Site, json::Object Event) {
   ++Site.Emitted;
-  m_last_emit = Clock::now();
 
   m_tail_events.push_back(json::Value(json::Object(Event)));
   if (m_tail_events.size() > InlinedTailEvents)
@@ -1322,9 +1496,22 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
   }
 }
 
+void ObservationEngine::Teardown() {
+  if (!m_target)
+    return;
+
+  // The observed process must not outlive the run: it is holding a stopped
+  // thread and every breakpoint this engine installed.
+  if (lldb::ProcessSP P = m_target->GetProcessSP())
+    if (P->IsAlive())
+      P->Destroy(/*force_kill=*/true);
+  m_debugger.GetTargetList().DeleteTarget(m_target);
+  m_target.reset();
+}
+
 Expected<ObservationResult> ObservationEngine::Run() {
   m_start = Clock::now();
-  m_last_emit = m_start;
+  m_last_progress = m_start;
 
   lldb::TargetSP Target;
   Status Err = m_debugger.GetTargetList().CreateTarget(
@@ -1335,6 +1522,12 @@ Expected<ObservationResult> ObservationEngine::Run() {
         formatv("could not create a target for \"{0}\": {1}", m_plan.Program,
                 Err.AsCString("unknown error")));
   m_target = Target;
+
+  // Every path out of here from this point on has a target to drop, including
+  // the ones that fail before the program runs. A debugger this run does not
+  // own would otherwise accumulate one target per failed call, each holding
+  // this run's breakpoints.
+  llvm::scope_exit Cleanup([this] { Teardown(); });
 
   if (Expected<std::unique_ptr<EventArtifact>> Artifact =
           EventArtifact::Create())
@@ -1383,6 +1576,26 @@ Expected<ObservationResult> ObservationEngine::Run() {
     Report.ConditionErrors = Site->ConditionErrors;
     Report.ConditionMs = ToMs(Site->ConditionSpent);
     Report.Emitted = Site->Emitted;
+    Report.Threads = static_cast<uint32_t>(Site->Threads.size());
+
+    // Once the program has exited, a frame still armed is one that never
+    // returned; while it was running it might only not have returned yet, which
+    // is a different thing and not counted as a loss.
+    Report.ReturnsAbandoned = Site->Returns.Armed.GetAbandoned();
+    if (Result == Outcome::Exited)
+      Report.ReturnsAbandoned += Site->Returns.Armed.GetOutstanding();
+
+    // Re-read now rather than trusting what the name resolved to before launch.
+    // A name in a library that is loaded during the run resolves when it loads,
+    // and a report still saying it matched nothing -- next to a hit count that
+    // says it did -- gives the one answer this field exists to rule out.
+    if (Site->Breakpoint) {
+      Report.ResolvedLocations =
+          static_cast<uint32_t>(Site->Breakpoint->GetNumLocations());
+      if (Report.ResolvedLocations != 0)
+        Report.ResolutionError.reset();
+    }
+
     for (const ObservationSite::CaptureState &Capture : Site->Captures) {
       CaptureReport Rendered;
       Rendered.Expr = Capture.Expr;
@@ -1411,6 +1624,49 @@ Expected<ObservationResult> ObservationEngine::Run() {
                   "\"{1}\"; anything else has to be captured on entry.",
                   Site->Obs->Label, ReturnValueCapture)
               .str());
+
+    // A frame that never returns is how an exception or a longjmp leaves one,
+    // and it is the reason a return observation can report fewer hits than the
+    // entry it is derived from. Unexplained, that difference reads as a bug in
+    // the counting.
+    if (Report.ReturnsAbandoned != 0)
+      m_result.Notes.push_back(
+          formatv(
+              "observation \"{0}\" is taken as the function returns, and "
+              "{1} of its {2} calls left without returning -- an exception, "
+              "a longjmp, or a thread that ended inside. Those calls "
+              "produced no event; observe the function on entry to count "
+              "all of them.",
+              Site->Obs->Label, Report.ReturnsAbandoned, Site->Hits)
+              .str());
+
+    // The interleaving is not a fault, but every number here is per observation
+    // rather than per thread, so a reader who assumes one thread will read a
+    // change that is really two threads' values alternating as a change in one.
+    if (Report.Threads > 1)
+      m_result.Notes.push_back(
+          formatv("observation \"{0}\" was hit on {1} threads. Its hit order, "
+                  "its change detection and its aggregate cover the whole "
+                  "observation rather than one thread, so the sequence is an "
+                  "interleaving; the \"tid\" field on each event is what "
+                  "separates it again.",
+                  Site->Obs->Label, Report.Threads)
+              .str());
+
+    // Rare, and silent if it is not said: a frame whose return could not be
+    // waited for produces no event, and neither does a gate that could not be
+    // tracked, which leaves an empty observation looking like code that never
+    // ran.
+    if (const uint64_t Failures =
+            Site->Returns.ArmFailures + Site->GateReturns.ArmFailures)
+      m_result.Notes.push_back(
+          formatv(
+              "observation \"{0}\": {1} frames could not be watched for "
+              "their return, because the address they return to or the "
+              "frame itself could not be read. Those calls are missing from "
+              "this observation rather than absent from the program.",
+              Site->Obs->Label, Failures)
+              .str());
   }
 
   // Reported even with no file behind it, so that a run whose artifact could
@@ -1431,13 +1687,6 @@ Expected<ObservationResult> ObservationEngine::Run() {
       Artifact.Tail = m_tail_events;
     m_result.Artifact = std::move(Artifact);
   }
-
-  // The observed process must not outlive the run: it is holding a stopped
-  // thread and every breakpoint this engine installed.
-  if (lldb::ProcessSP P = m_target->GetProcessSP())
-    if (P->IsAlive())
-      P->Destroy(/*force_kill=*/true);
-  m_debugger.GetTargetList().DeleteTarget(m_target);
 
   return std::move(m_result);
 }

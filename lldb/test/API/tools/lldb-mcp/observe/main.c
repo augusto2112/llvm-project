@@ -1,3 +1,6 @@
+#include <dlfcn.h>
+#include <pthread.h>
+#include <setjmp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,6 +55,50 @@ void spin(void) {
   }
 }
 
+/* Hit steadily for several seconds, so that a stall ceiling has a run that is
+   plainly making progress while almost nothing is being emitted. The sleep is
+   what makes the run outlast that ceiling however fast the machine is. */
+int tick(int n) { return n + 1; }
+
+void churn(void) {
+  int i;
+  for (i = 0; i < 3000; ++i) {
+    tick(i);
+    usleep(1000);
+  }
+}
+
+static jmp_buf escape;
+
+/* Leaves without returning at one of its calls, so that a return observation
+   has a frame that never reaches its return address. */
+int abandons(int n) {
+  if (n == 1)
+    longjmp(escape, 1);
+  return n + 7;
+}
+
+int unwind_loop(void) {
+  volatile int sum = 0;
+  int i;
+  for (i = 0; i < 3; ++i)
+    if (setjmp(escape) == 0)
+      sum += abandons(i);
+  return sum;
+}
+
+/* Called from more than one thread, so that an observation has an interleaving
+   to report rather than one thread's sequence. */
+int shared_step(int n) { return n * 2; }
+
+static void *worker(void *arg) {
+  int base = *(int *)arg;
+  int i;
+  for (i = 0; i < 5; ++i)
+    shared_step(base + i);
+  return NULL;
+}
+
 void crash_now(void) {
   volatile int *null_pointer = (volatile int *)0;
   *null_pointer = 1; /* the null dereference */
@@ -82,6 +129,51 @@ int main(int argc, char **argv) {
      before the loops so that a no-progress ceiling has no events to see. */
   if (strcmp(mode, "spin") == 0)
     spin();
+
+  /* The modes below are the whole of the run they belong to: each one exists to
+     give one observation something specific to see, and the loops that follow
+     would only add hits nobody asked about. */
+  if (strcmp(mode, "churn") == 0) {
+    churn();
+    return 0;
+  }
+
+  if (strcmp(mode, "unwind") == 0) {
+    printf("unwound=%d\n", unwind_loop());
+    fflush(stdout);
+    return 0;
+  }
+
+  if (strcmp(mode, "threads") == 0) {
+    pthread_t first, second;
+    int first_base = 0;
+    int second_base = 100;
+    if (pthread_create(&first, NULL, worker, &first_base) != 0)
+      return 1;
+    if (pthread_create(&second, NULL, worker, &second_base) != 0)
+      return 1;
+    pthread_join(first, NULL);
+    pthread_join(second, NULL);
+    return 0;
+  }
+
+  /* Loaded while the program is running, so that a name observed inside it
+     cannot resolve before the launch. The path arrives as an argument because
+     the library sits beside the binary rather than anywhere a loader searches.
+   */
+  if (strcmp(mode, "plugin") == 0) {
+    void *handle = argc > 2 ? dlopen(argv[2], RTLD_NOW) : NULL;
+    int (*step)(int) = NULL;
+    if (handle)
+      step = (int (*)(int))dlsym(handle, "plugin_step");
+    printf("plugin=%d\n", step != NULL);
+    fflush(stdout);
+    if (!step)
+      return 1;
+    for (i = 0; i < 4; ++i)
+      total += step(i);
+    return 0;
+  }
 
   for (i = 0; i < 100; ++i)
     total += record_bucket(i / 25);

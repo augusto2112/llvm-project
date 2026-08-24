@@ -120,13 +120,19 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
     });
 
     if (!Rare.empty()) {
+      // Bounded like the histogram and for the same reason. The order above
+      // puts the rarest first and breaks ties by first sighting, so the entries
+      // a bound drops are the least rare and latest of them.
+      const size_t KeptRare = std::min<size_t>(Rare.size(), MaxOutliers);
       json::Array Outliers;
-      for (const Outlier &Value : Rare)
-        Outliers.push_back(json::Object{{"value", Value.Rendered},
-                                        {"count", Value.Count},
-                                        {"first_hit", Value.FirstHit},
-                                        {"first_seq", Value.FirstSeq}});
+      for (size_t I = 0; I < KeptRare; ++I)
+        Outliers.push_back(json::Object{{"value", Rare[I].Rendered},
+                                        {"count", Rare[I].Count},
+                                        {"first_hit", Rare[I].FirstHit},
+                                        {"first_seq", Rare[I].FirstSeq}});
       Out["outliers"] = std::move(Outliers);
+      if (KeptRare < Rare.size())
+        Out["outliers_elided"] = Rare.size() - KeptRare;
     }
   }
 

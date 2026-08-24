@@ -873,3 +873,55 @@ TEST(AggregateTest, TransitionsAreBoundedAndSayHowManyWereDropped) {
   ASSERT_NE(First, nullptr);
   EXPECT_EQ(First->getInteger("seq"), std::optional<int64_t>(1));
 }
+
+TEST(AggregateTest, OutliersAreBoundedAndSayHowManyWereDropped) {
+  // A capture rendering a pointer or an address is distinct at every hit, which
+  // makes every one of its values rare. Unbounded, that puts one outlier per
+  // hit into the response -- the same unboundedness the histogram cap exists to
+  // prevent, reached through the door that is exempt from it.
+  Aggregator Aggregate;
+  const size_t Rare = Aggregator::MaxOutliers + 40;
+  for (size_t I = 0; I < Rare; ++I)
+    Aggregate.Record("loop", "p", ValueName(I), I, I);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "p");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Array *Outliers = Fields->getArray("outliers");
+  ASSERT_NE(Outliers, nullptr);
+
+  EXPECT_EQ(Outliers->size(), Aggregator::MaxOutliers);
+  EXPECT_EQ(Fields->getInteger("outliers_elided"), std::optional<int64_t>(40));
+
+  // Every value here is equally rare, so the tie-break decides, and it keeps
+  // the earliest: the first sighting of a rare value is the whole reason to
+  // report one.
+  const llvm::json::Object *First = (*Outliers)[0].getAsObject();
+  ASSERT_NE(First, nullptr);
+  EXPECT_EQ(First->getString("value"),
+            std::optional<llvm::StringRef>(ValueName(0)));
+
+  // Nothing about the cardinality is hidden by the bound, so a shortened list
+  // cannot be read as the whole of what was rare.
+  EXPECT_EQ(Fields->getInteger("distinct"),
+            std::optional<int64_t>(static_cast<int64_t>(Rare)));
+}
+
+TEST(AggregateTest, OutliersUpToTheBoundSayNothingWasDropped) {
+  Aggregator Aggregate;
+  size_t Seq = 0;
+  for (; Seq < Aggregator::MaxOutliers; ++Seq)
+    Aggregate.Record("loop", "p", ValueName(Seq), Seq, Seq);
+  // Enough common hits to put the run over the threshold at which a rare value
+  // is worth naming at all.
+  for (size_t I = 0; I < Aggregator::MinObservationsForOutliers; ++I, ++Seq)
+    Aggregate.Record("loop", "p", "common", Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "p");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Array *Outliers = Fields->getArray("outliers");
+  ASSERT_NE(Outliers, nullptr);
+  EXPECT_EQ(Outliers->size(), Aggregator::MaxOutliers);
+  EXPECT_EQ(Fields->get("outliers_elided"), nullptr);
+}

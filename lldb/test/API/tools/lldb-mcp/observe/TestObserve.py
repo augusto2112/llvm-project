@@ -183,6 +183,12 @@ class ObserveTestCase(TestBase):
             )
         return document
 
+    def events(self, document):
+        """The artifact's events, one per line, as objects."""
+        path = document["artifact"]["path"]
+        with open(path, "r") as stream:
+            return [json.loads(line) for line in stream.read().splitlines() if line]
+
     def test_empty_plan_is_crash_triage(self):
         """A plan with no observations reports how the program died."""
         self.build()
@@ -389,6 +395,13 @@ class ObserveTestCase(TestBase):
             self.assertEqual(event["frame"], "record_value")
             self.assertIsInstance(event["t_ms"], (int, float))
             self.assertIn("value", event["values"], str(event))
+
+        # Hits of one observation are numbered and compared as a single
+        # sequence, so the thread is what lets a reader take that sequence apart
+        # again. One thread here, and every event says which.
+        threads = {event["tid"] for event in events}
+        self.assertEqual(len(threads), 1, str(threads))
+        self.assertGreater(threads.pop(), 0)
 
     def test_outlier_is_found(self):
         """A value seen once among a hundred hits is named, with the sequence
@@ -857,3 +870,167 @@ class ObserveTestCase(TestBase):
         # stall ceiling is what ends the run, well inside the wall-clock one.
         self.assertEqual(document["outcome"], "no_progress", str(document))
         self.assertLess(document["elapsed_ms"], 300000, str(document))
+
+    def test_no_progress_is_measured_over_hits_not_events(self):
+        """A mode that emits almost nothing is not a program that has stalled."""
+        self.build()
+
+        # churn hits the tracepoint every millisecond for three seconds, while
+        # first_and_last emits twice in the whole run. A stall ceiling measured
+        # over the event stream would end this run a moment after the first hit
+        # and call a healthy program stuck.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["churn"],
+                "timeout_seconds": 300,
+                "no_progress_seconds": 2,
+                "observe": [{"at": "tick", "capture": ["n"], "emit": "first_and_last"}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["tick"]
+        self.assertEqual(report["hits"], 3000, str(report))
+        # The first hit, and the last one held until the run ended.
+        self.assertEqual(report["emitted"], 2, str(report))
+
+        # Every one of those hits carried a value nothing else did, which makes
+        # every value rare. The outlier list is bounded like the histogram, so a
+        # capture shaped like this cannot put one entry per hit in the response.
+        aggregate = document["aggregate"]["tick"]["n"]
+        self.assertEqual(aggregate["distinct"], 3000, str(aggregate)[:400])
+        self.assertEqual(len(aggregate["outliers"]), 32, str(aggregate)[:400])
+        self.assertEqual(aggregate["outliers_elided"], 3000 - 32, str(aggregate)[:400])
+
+    def test_a_frame_that_never_returns_is_not_a_return(self):
+        """A frame left by a longjmp produces no event and is accounted for."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["unwind"],
+                "timeout_seconds": 300,
+                "observe": [{"at": "abandons", "on": "return"}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["abandons"]
+        # Three calls, one of which leaves through a longjmp.
+        self.assertEqual(report["hits"], 3, str(report))
+        self.assertEqual(report["returns_abandoned"], 1, str(report))
+
+        # Two returns, and exactly two: the breakpoint at the return address is
+        # shared by all three calls, so waiting on the address rather than on the
+        # frame would report the third call's return twice -- once for itself and
+        # once for the frame that never came back.
+        self.assertEqual(report["emitted"], 2, str(report))
+        returned = [
+            event["values"]["$return"]["value"] for event in self.events(document)
+        ]
+        self.assertEqual(returned, ["7", "9"], str(returned))
+
+        # The difference between three calls and two returns is otherwise a
+        # miscount as far as a reader can tell.
+        self.assertTrue(
+            any("without returning" in note for note in document["notes"]),
+            str(document.get("notes")),
+        )
+
+    def test_hits_from_several_threads_are_reported_together(self):
+        """Two threads at one tracepoint are counted, and each event says which."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["threads"],
+                "timeout_seconds": 300,
+                "observe": [{"at": "shared_step", "capture": ["n"]}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["shared_step"]
+        # Five calls on each of two threads, whatever order they interleave in.
+        self.assertEqual(report["hits"], 10, str(report))
+        self.assertEqual(report["threads"], 2, str(report))
+
+        # Every number in the report covers the observation rather than one
+        # thread, so the sequence is an interleaving and the report has to say so
+        # rather than leave it to be discovered.
+        self.assertTrue(
+            any("threads" in note for note in document["notes"]),
+            str(document.get("notes")),
+        )
+
+        events = self.events(document)
+        self.assertEqual(len(events), 10, str(events))
+        self.assertEqual(len({event["tid"] for event in events}), 2, str(events))
+
+    def test_a_name_in_a_library_resolves_when_the_library_loads(self):
+        """A name that matched nothing before the launch is not left saying so."""
+        self.build()
+
+        library = self.getBuildArtifact(
+            "libobserve_plugin.dylib"
+            if self.platformIsDarwin()
+            else "libobserve_plugin.so"
+        )
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["plugin", library],
+                "timeout_seconds": 300,
+                "observe": [{"at": "plugin_step", "capture": ["n"]}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["plugin_step"]
+        self.assertEqual(report["hits"], 4, str(report))
+
+        # The count is re-read after the run, so the one field that exists to
+        # tell a misspelled name from code that never ran cannot report a name
+        # that matched nothing next to the hits proving it did.
+        self.assertGreaterEqual(report["resolved_locations"], 1, str(report))
+        self.assertNotIn("error", report, str(report))
+
+    def test_only_hit_takes_the_number_the_aggregate_reported(self):
+        """An outlier's first_hit is numbered the way only_hit reads it."""
+        self.build()
+
+        # skip_first is what pulls the two numberings apart: one counts the hits
+        # that were recorded, the other counts the observation's own hits. The
+        # loop the tool advertises -- read an outlier, re-run for that one hit --
+        # lands on a different hit if they disagree.
+        plan = {
+            "program": self.getBuildArtifact("a.out"),
+            "timeout_seconds": 300,
+            "observe": [{"at": "record_value", "capture": ["value"], "skip_first": 2}],
+        }
+        document = self.observe(plan)
+
+        report = document["plan_report"]["record_value"]
+        self.assertEqual(report["hits"], 100, str(report))
+        self.assertEqual(report["emitted"], 98, str(report))
+
+        outliers = document["aggregate"]["record_value"]["value"]["outliers"]
+        self.assertEqual(len(outliers), 1, str(outliers))
+        self.assertEqual(serialized_scalar(outliers[0]["value"]), "99")
+        # main.c passes 99 at the forty-third call, which is what the number has
+        # to name whether or not the first two were skipped.
+        self.assertEqual(outliers[0]["first_hit"], 43, str(outliers))
+
+        plan["observe"][0]["only_hit"] = outliers[0]["first_hit"]
+        repeat = self.observe(plan)
+
+        record = repeat["plan_report"]["record_value"]
+        self.assertEqual(record["hits"], 100, str(record))
+        self.assertEqual(record["emitted"], 1, str(record))
+        events = self.events(repeat)
+        self.assertEqual(len(events), 1, str(events))
+        # The one hit that came back is the one the aggregate pointed at.
+        self.assertEqual(events[0]["values"]["value"]["value"], "99", str(events))

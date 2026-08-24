@@ -37,7 +37,9 @@ public:
   /// matched to a line in the artifact. \p Hit numbers this observation's own
   /// hits, which is what only_hit takes: the two differ as soon as a plan holds
   /// more than one observation, and an outlier reports the hit so that acting
-  /// on it lands on the hit it named.
+  /// on it lands on the hit it named. Whoever records has to number \p Hit the
+  /// way only_hit reads it, skipped hits included, or that is exactly what it
+  /// will not do.
   void Record(llvm::StringRef Label, llvm::StringRef Capture,
               llvm::StringRef RenderedValue, uint64_t Seq, uint64_t Hit);
 
@@ -73,6 +75,15 @@ public:
   /// otherwise render one transition per hit, making the summary as large as
   /// the stream it stands in for.
   static constexpr size_t MaxTransitions = 32;
+
+  /// Outliers kept. A capture that renders a distinct value at every hit -- an
+  /// address, a pointer -- makes every one of those values rare, so an
+  /// unbounded outlier list is the same unboundedness the histogram cap exists
+  /// to prevent, reached by the other door. The rarest are kept, and among
+  /// equally rare values the earliest, which is the order they are already
+  /// ranked in: a bound that dropped the first sighting would defeat the point
+  /// of reporting one.
+  static constexpr size_t MaxOutliers = 32;
 
 private:
   struct ValueStats {

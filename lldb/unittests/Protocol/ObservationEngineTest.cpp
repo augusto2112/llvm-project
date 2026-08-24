@@ -209,6 +209,155 @@ TEST(ObservationEngineTest, PathFormRejectsWhatIsNotAGetter) {
 }
 
 //===----------------------------------------------------------------------===//
+// Frame arming
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// Stack addresses for the tests below. The stack grows down, so an outer frame
+/// has the higher call-frame address, and the names are ordered to match.
+constexpr lldb::addr_t kOuter = 3000;
+constexpr lldb::addr_t kMiddle = 2000;
+constexpr lldb::addr_t kInner = 1000;
+
+/// Return addresses, which say nothing about which frame is returning: that is
+/// the whole reason a frame is not identified by one.
+constexpr lldb::addr_t kRetA = 0x4000;
+constexpr lldb::addr_t kRetB = 0x5000;
+
+constexpr lldb::tid_t kThreadOne = 11;
+constexpr lldb::tid_t kThreadTwo = 22;
+
+} // namespace
+
+TEST(ObservationEngineTest, ArmedFrameReturnsOnce) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kMiddle);
+  EXPECT_FALSE(Armed.Empty());
+
+  EXPECT_TRUE(Armed.Returned(kThreadOne, kRetA, kOuter));
+  EXPECT_TRUE(Armed.Empty());
+  EXPECT_EQ(Armed.GetAbandoned(), 0u);
+
+  // The breakpoint at the return address stays behind and is reached by every
+  // later call from the same call site. Nothing is armed there now, so none of
+  // those is a return anybody asked about.
+  EXPECT_FALSE(Armed.Returned(kThreadOne, kRetA, kOuter));
+}
+
+TEST(ObservationEngineTest, AnotherThreadsReturnIsNotThisFrames) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kMiddle);
+
+  // Both threads run through the same return address. Counting arrivals rather
+  // than frames would report this one as the armed frame returning, and then
+  // leave the real return unreported.
+  EXPECT_FALSE(Armed.Returned(kThreadTwo, kRetA, kOuter));
+  EXPECT_FALSE(Armed.Empty());
+
+  EXPECT_TRUE(Armed.Returned(kThreadOne, kRetA, kOuter));
+  EXPECT_TRUE(Armed.Empty());
+}
+
+TEST(ObservationEngineTest, RecursionReturnsInnermostFirst) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kOuter);
+  Armed.Arm(kThreadOne, kRetB, kMiddle);
+
+  // The inner frame returns into the outer one, so the thread is now standing
+  // at exactly the outer frame's call-frame address. Reading that as "at or
+  // below, therefore gone" would throw the outer frame away here and then
+  // report its real return as belonging to nothing.
+  EXPECT_TRUE(Armed.Returned(kThreadOne, kRetB, kOuter));
+  EXPECT_FALSE(Armed.Empty());
+  EXPECT_EQ(Armed.GetAbandoned(), 0u);
+
+  EXPECT_TRUE(Armed.Returned(kThreadOne, kRetA, kOuter + 1000));
+  EXPECT_TRUE(Armed.Empty());
+  EXPECT_EQ(Armed.GetAbandoned(), 0u);
+}
+
+TEST(ObservationEngineTest, AStopInsideAnArmedFrameIsNotItsReturn) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kMiddle);
+
+  // Stopped at the armed address, but deeper than the armed frame, so the frame
+  // is still on the stack and this is not it returning.
+  EXPECT_FALSE(Armed.Returned(kThreadOne, kRetA, kInner));
+  EXPECT_FALSE(Armed.Empty());
+  EXPECT_EQ(Armed.GetAbandoned(), 0u);
+}
+
+TEST(ObservationEngineTest, AFrameLeftWithoutReturningIsDiscardedNotReported) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kMiddle);
+
+  // An exception or a longjmp takes the frame away without it ever reaching the
+  // return address, and the same call site calls again.
+  Armed.Arm(kThreadOne, kRetA, kMiddle);
+
+  // Waiting on the address alone would have reported this one return twice:
+  // once for the frame that never came back, and once for the frame that did.
+  EXPECT_TRUE(Armed.Returned(kThreadOne, kRetA, kOuter));
+  EXPECT_TRUE(Armed.Empty());
+  EXPECT_EQ(Armed.GetAbandoned(), 1u);
+}
+
+TEST(ObservationEngineTest, AnUnwindPastSeveralFramesAbandonsThemAll) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kMiddle);
+  Armed.Arm(kThreadOne, kRetB, kInner);
+
+  // A handler outside both of them is where an exception lands, and being there
+  // is proof that neither frame is still on the stack.
+  EXPECT_FALSE(Armed.EnclosesFrame(kThreadOne, kOuter));
+  EXPECT_TRUE(Armed.Empty());
+  EXPECT_EQ(Armed.GetAbandoned(), 2u);
+}
+
+TEST(ObservationEngineTest, AGateEnclosesOnlyTheThreadInsideIt) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kOuter);
+
+  // Being called from a function is having one of its frames still below this
+  // one, on this thread. A gate remembered as a state change instead would be
+  // open for every thread at once.
+  EXPECT_TRUE(Armed.EnclosesFrame(kThreadOne, kInner));
+  EXPECT_FALSE(Armed.EnclosesFrame(kThreadTwo, kInner));
+
+  // Still open: asking about another thread must not disarm anything.
+  EXPECT_TRUE(Armed.EnclosesFrame(kThreadOne, kInner));
+}
+
+TEST(ObservationEngineTest, AFrameDoesNotEncloseItself) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kMiddle);
+
+  // The frame the gate armed and the frame being asked about are the same one,
+  // which is what observing a function as called from itself does at the
+  // outermost call. Nothing called that one, so the gate is shut for it.
+  EXPECT_FALSE(Armed.EnclosesFrame(kThreadOne, kMiddle));
+
+  // Shut, not gone: the recursive calls below it are the ones it does cover.
+  EXPECT_FALSE(Armed.Empty());
+  EXPECT_TRUE(Armed.EnclosesFrame(kThreadOne, kInner));
+}
+
+TEST(ObservationEngineTest, EveryThreadHasToLeaveBeforeTheSetIsEmpty) {
+  ArmedFrames Armed;
+  Armed.Arm(kThreadOne, kRetA, kMiddle);
+  Armed.Arm(kThreadTwo, kRetA, kMiddle);
+
+  EXPECT_TRUE(Armed.Returned(kThreadOne, kRetA, kOuter));
+  // The breakpoints behind the set are shared, so switching them off on the
+  // first thread's return would stop watching the second thread's frame.
+  EXPECT_FALSE(Armed.Empty());
+
+  EXPECT_TRUE(Armed.Returned(kThreadTwo, kRetA, kOuter));
+  EXPECT_TRUE(Armed.Empty());
+}
+
+//===----------------------------------------------------------------------===//
 // Frame ranking
 //===----------------------------------------------------------------------===//
 

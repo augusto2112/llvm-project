@@ -180,9 +180,9 @@ const StringLiteral lldb_private::mcp::ObserveToolDescription =
     "\n"
     "An outlier carries two numbers because they count different things. "
     "\"first_hit\" counts that observation's own hits and is what \"only_hit\" "
-    "takes. \"first_seq\" numbers the whole event stream and is what matches a "
-    "line in the artifact. They are equal only when a plan holds a single "
-    "observation.";
+    "takes. \"first_seq\" numbers the whole event stream and matches a line in "
+    "the artifact for any hit whose event the emission mode kept. They are "
+    "equal only when a plan holds a single observation.";
 
 namespace {
 
@@ -315,12 +315,14 @@ json::Value planSchema() {
                              "never terminates is a result rather than a "
                              "failure, so there is always a limit.")},
            {"no_progress_seconds",
-            schemaField("integer",
-                        "Gives up after this long with no emitted event, and "
-                        "must be shorter than \"timeout_seconds\". Absent "
-                        "leaves the check disarmed, because a plan whose "
-                        "triggers only fire near the end of a run is "
-                        "legitimate and would otherwise be cut short.")},
+            schemaField(
+                "integer",
+                "Gives up after this long with no tracepoint in the "
+                "plan being hit at all, and must be shorter than "
+                "\"timeout_seconds\". Absent leaves the check "
+                "disarmed, because a plan whose triggers only fire near "
+                "the end of a run is legitimate and would otherwise be "
+                "cut short.")},
            {"observe",
             json::Object{
                 {"type", "array"},
