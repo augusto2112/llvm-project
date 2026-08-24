@@ -288,6 +288,71 @@ TEST(SerializeValueTest, SharedBudgetIsSpentAcrossSeveralValues) {
   EXPECT_EQ(ToString(SerializeValue(ScalarRef, {})), R"({"value":"42"})");
 }
 
+TEST(SerializeValueTest, ChildrenAllUnreadableForOneReasonSayItOnce) {
+  // A pointer that is null has an unreadable member for every member its type
+  // has. Measured on a capture of one such pointer into a compiler's value
+  // hierarchy: twelve copies of "parent is NULL", none of which said anything the
+  // pointer's own value had not already said.
+  auto Root = MakeLeaf("p", "0x0");
+  for (int I = 0; I < 12; ++I) {
+    auto Child = MakeLeaf("f" + std::to_string(I), "");
+    Child->Avail = Availability::Error;
+    Child->Reason = "parent is NULL";
+    Root->Children.push_back(Child);
+  }
+
+  FakeNodeRef Ref(Root);
+  const std::string S = ToString(SerializeValue(Ref, {}));
+  EXPECT_NE(S.find(R"("value":"0x0")"), std::string::npos) << S;
+  EXPECT_NE(S.find("12 children, none readable: parent is NULL"),
+            std::string::npos)
+      << S;
+  EXPECT_EQ(S.find("\"f0\""), std::string::npos) << S;
+}
+
+TEST(SerializeValueTest, ChildrenFailingDifferentlyAreEachReported) {
+  // The collapse above is a claim that one fact covers them all, so two facts
+  // must not become one.
+  auto Root = MakeLeaf("s", "");
+  auto A = MakeLeaf("a", "");
+  A->Avail = Availability::Error;
+  A->Reason = "parent is NULL";
+  auto B = MakeLeaf("b", "");
+  B->Avail = Availability::OptimizedOut;
+  B->Reason = "variable optimized out";
+  Root->Children.push_back(A);
+  Root->Children.push_back(B);
+
+  FakeNodeRef Ref(Root);
+  const std::string S = ToString(SerializeValue(Ref, {}));
+  EXPECT_NE(S.find("parent is NULL"), std::string::npos) << S;
+  EXPECT_NE(S.find("variable optimized out"), std::string::npos) << S;
+}
+
+TEST(SerializeValueTest, AnOversizeValueComesBackAsItsOwnValueAlone) {
+  // Depth and node counts bound the walk, not the reading. A capture whose value
+  // renders large is large three times over in a summary: once as a histogram
+  // key, once on each side of a transition, and once in the artifact.
+  auto Root = MakeLeaf("I", "0x1040");
+  for (int I = 0; I < 12; ++I)
+    Root->Children.push_back(
+        MakeLeaf("field" + std::to_string(I), std::string(20, 'x')));
+
+  SerializeValueOptions Opts;
+  Opts.MaxRenderedChars = 120;
+  FakeNodeRef Ref(Root);
+  const std::string S = ToString(SerializeValue(Ref, Opts));
+  EXPECT_NE(S.find(R"("value":"0x1040")"), std::string::npos) << S;
+  EXPECT_NE(S.find("_elided"), std::string::npos) << S;
+  EXPECT_EQ(S.find("field0"), std::string::npos) << S;
+  // Reduced to a value, not cut off mid-document.
+  EXPECT_NE(ToString(SerializeValue(Ref, Opts)).back(), 'x');
+
+  // Unbounded by default, which is what a reader of one value at a time wants.
+  EXPECT_NE(ToString(SerializeValue(Ref, {})).find("field0"),
+            std::string::npos);
+}
+
 TEST(CondenseDiagnosticTest, ExpressionDiagnosticKeepsOnlyTheErrorLine) {
   // The evaluator opens with what language it chose, which is true of every
   // expression, and closes with clang's caret art, which is laid out for a

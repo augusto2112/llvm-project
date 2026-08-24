@@ -548,6 +548,15 @@ json::Value StackProfile::Render() const {
   if (m_samples == 0)
     return nullptr;
 
+  // A profile of a program that was never sampled inside its own code says
+  // nothing about that program. Measured on a run that crashed a fifth of a
+  // second after launch: the only samples due were taken while the dynamic loader
+  // was still mapping images, and a section reporting that as where the program
+  // spent its time is worse than no section.
+  if (llvm::all_of(m_sites,
+                   [](const auto &Entry) { return Entry.second.File.empty(); }))
+    return nullptr;
+
   const bool Threaded = m_per_thread.size() > 1;
 
   std::vector<const Site *> Ranked;
@@ -913,6 +922,12 @@ constexpr size_t MaxTerminalFrames = 24;
 
 /// Locals the terminal event reports.
 constexpr size_t MaxTerminalLocals = 32;
+
+/// Characters one capture's value may render as. A capture is read at every hit
+/// and its rendering appears three times in a summary -- as a histogram key, on
+/// each side of a transition, and in the artifact -- so a value that is large
+/// once is large many times over.
+constexpr unsigned MaxCaptureChars = 300;
 
 /// Value-tree nodes the terminal event's locals may spend between them. Sized so
 /// that a frame of scalars and small structs comes back whole, while one local
@@ -1353,6 +1368,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
           ValueObjectNode Node(Result);
           SerializeValueOptions SOpts;
           SOpts.MaxDepth = Obs.Depth;
+          SOpts.MaxRenderedChars = MaxCaptureChars;
           json::Value V = SerializeValue(Node, SOpts);
           std::string Text = AggregateKey(V);
           m_aggregator.Record(Obs.Label, ReturnValueCapture, Text, Seq, Hit);
@@ -1409,6 +1425,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     ValueObjectNode Node(Resolved.Value);
     SerializeValueOptions SOpts;
     SOpts.MaxDepth = Obs.Depth;
+    SOpts.MaxRenderedChars = MaxCaptureChars;
     SOpts.ArtifactRef = formatv("$artifact#seq={0}", Seq).str();
     json::Value V = SerializeValue(Node, SOpts);
 

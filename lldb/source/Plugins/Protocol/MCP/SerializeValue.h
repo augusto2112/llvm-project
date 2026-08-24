@@ -40,6 +40,22 @@ struct SerializeValueOptions {
 
   unsigned MaxStringLength = 128;
 
+  /// Characters a whole rendered value may take before it is reported as its own
+  /// value alone, with the rest left to the artifact.
+  ///
+  /// Depth and node counts bound the walk; they do not bound the reading. A
+  /// capture of one pointer into a compiler's value hierarchy came back as the
+  /// fields of the object it pointed at -- `HasDescriptor`, `MetadataIndex`,
+  /// `SubclassID`, `UseList` -- which named no instruction and cost a kilobyte
+  /// three times over, since a summary repeats a value in its histogram and again
+  /// in its transitions. Past this size the address is the identifying part, and
+  /// what the object holds is a question for a path that names the field.
+  ///
+  /// Zero leaves the reading unbounded, which is what the terminal event's locals
+  /// want: there the shared node budget is the bound and there is no aggregate to
+  /// repeat anything into.
+  unsigned MaxRenderedChars = 0;
+
   /// When set, elision markers point here instead of dead-ending, so going
   /// deeper never requires re-running the program.
   std::string ArtifactRef;

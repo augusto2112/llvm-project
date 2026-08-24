@@ -8,12 +8,14 @@
 
 #include "SerializeValue.h"
 #include "ValueNode.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -67,6 +69,27 @@ bool IsCaretArt(StringRef Line) {
   return Line.find_first_not_of("^~| \t") == StringRef::npos;
 }
 
+/// The reason every one of \p Children could not be read, or empty when any of
+/// them could be, or when they failed for different reasons. A reason shared by
+/// all of them belongs to the node above rather than to each of them.
+StringRef
+SoleUnavailableReason(ArrayRef<std::pair<std::string, json::Value>> Children) {
+  StringRef Shared;
+  for (const auto &[Name, Value] : Children) {
+    const json::Object *Obj = Value.getAsObject();
+    if (!Obj || !Obj->get("unavailable"))
+      return StringRef();
+    std::optional<StringRef> Reason = Obj->getString("reason");
+    if (!Reason || Reason->empty())
+      return StringRef();
+    if (Shared.empty())
+      Shared = *Reason;
+    else if (Shared != *Reason)
+      return StringRef();
+  }
+  return Shared;
+}
+
 struct Serializer {
   const SerializeValueOptions &Opts;
   unsigned Budget;
@@ -87,19 +110,30 @@ struct Serializer {
   }
 
   json::Value Run(ValueNode &N, unsigned Depth) {
+    return Run(N, Depth, StringRef());
+  }
+
+  json::Value Run(ValueNode &N, unsigned Depth, StringRef ParentReason) {
     if (Budget == 0)
       return Elided("node budget");
     --Budget;
 
     Availability A = N.GetAvailability();
+    std::string Why;
     if (A != Availability::Available) {
       json::Object Out{{"unavailable", AvailabilityName(A)}};
       // The kind says which group the failure is in and the reason says which
       // failure it is, which is what decides what the reader does next. It costs
       // nothing per hit: identical renderings collapse in the aggregate, and a
       // capture that keeps failing is switched off after a few hits.
-      if (std::string Why = N.GetUnavailableReason(); !Why.empty())
-        Out["reason"] = Truncate(std::move(Why), Opts.MaxStringLength);
+      //
+      // Said once per cause rather than once per node: every member of an object
+      // read through a null pointer is unreadable for the one reason the pointer
+      // gives, and repeating it produced twelve copies of "parent is NULL" under
+      // one capture.
+      Why = N.GetUnavailableReason();
+      if (!Why.empty() && Why != ParentReason)
+        Out["reason"] = Truncate(Why, Opts.MaxStringLength);
       return Out;
     }
 
@@ -135,6 +169,7 @@ struct Serializer {
       Out["value"] = Truncate(std::move(*V), Opts.MaxStringLength);
 
     size_t Emit = std::min<size_t>(NumChildren, Opts.MaxChildren);
+    SmallVector<std::pair<std::string, json::Value>, 8> Children;
     for (size_t I = 0; I < Emit; ++I) {
       std::unique_ptr<ValueNode> Child = N.GetChildAtIndex(I);
       if (!Child)
@@ -142,9 +177,26 @@ struct Serializer {
       std::string Name = Child->GetName().str();
       if (Name.empty())
         Name = formatv("[{0}]", I).str();
-      json::Value ChildValue = Run(*Child, Depth + 1);
-      Out[std::move(Name)] = std::move(ChildValue);
+      Children.emplace_back(std::move(Name), Run(*Child, Depth + 1, Why));
     }
+
+    // Children that are all unreadable for one reason are one fact rather than
+    // one fact per child. A pointer that is null has an unreadable member for
+    // every member the type has: measured on a capture of one such pointer into a
+    // compiler's value hierarchy, twelve copies of "parent is NULL", none of
+    // which said anything the pointer's own value had not already said.
+    if (!Children.empty()) {
+      StringRef Shared = SoleUnavailableReason(Children);
+      if (!Shared.empty()) {
+        Out["_elided"] =
+            formatv("{0} children, none readable: {1}", NumChildren, Shared)
+                .str();
+        return Out;
+      }
+    }
+
+    for (auto &[Name, Value] : Children)
+      Out[Name] = std::move(Value);
     if (Emit < NumChildren)
       Out["_elided"] = formatv("{0} more children", NumChildren - Emit).str();
     return Out;
@@ -229,5 +281,29 @@ lldb_private::mcp::SerializeValue(ValueNode &Root,
   json::Value Out = S.Run(Root, 0);
   if (Opts.SharedBudget)
     *Opts.SharedBudget = S.Budget;
-  return Out;
+
+  if (Opts.MaxRenderedChars == 0)
+    return Out;
+
+  std::string Rendered;
+  raw_string_ostream OS(Rendered);
+  OS << Out;
+  if (Rendered.size() <= Opts.MaxRenderedChars)
+    return Out;
+
+  // Re-read at depth zero rather than truncated as text, so that what comes back
+  // is a value and not a fragment of one. The second pass walks no children, so
+  // it costs no further reads into the observed process.
+  SerializeValueOptions Shallow = Opts;
+  Shallow.MaxDepth = 0;
+  Shallow.MaxRenderedChars = 0;
+  Shallow.SharedBudget = nullptr;
+  Serializer Reduced(Shallow);
+  json::Value Small = Reduced.Run(Root, 0);
+  if (json::Object *Obj = Small.getAsObject())
+    Obj->try_emplace("_elided", formatv("{0} characters of members; capture a "
+                                        "path naming the one wanted",
+                                        Rendered.size())
+                                    .str());
+  return Small;
 }

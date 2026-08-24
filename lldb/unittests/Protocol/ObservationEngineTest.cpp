@@ -810,3 +810,13 @@ TEST(CollapseTemplateArgumentsTest, AnUnclosedListDoesNotRunAway) {
   // A truncated name is not a reason to lose the part that arrived.
   EXPECT_EQ(CollapseTemplateArguments("f<int"), "f<...>");
 }
+
+TEST(StackProfileTest, SamplesOnlyOutsideTheProgramAreNotAProfile) {
+  // A run that crashed a fifth of a second after launch was sampled once, while
+  // the dynamic loader was still mapping images. Reporting that as where the
+  // program spent its time is worse than reporting nothing.
+  StackProfile Profile;
+  Profile.Record(1, Stack({{"dyld4::prepare", ""}, {"dyld_start", ""}}));
+  EXPECT_EQ(Profile.Samples(), 1u);
+  EXPECT_TRUE(Profile.Render().getAsNull().has_value());
+}

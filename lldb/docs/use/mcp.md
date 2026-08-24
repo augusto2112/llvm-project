@@ -152,8 +152,8 @@ function the profile or the backtrace named to get the repeating block.
 
 #### Sampled stacks
 
-`profile` appears for a run long enough for a sample to be due, whether or not the
-plan had tracepoints — though a plan whose tracepoints are being hit constantly
+`profile` appears for a run long enough for a sample to be due and sampled at least
+once inside the program's own code, whether or not the plan had tracepoints — though a plan whose tracepoints are being hit constantly
 leaves no moment at which the program is running freely, so in practice it is a
 free-running run that gets one.
 
@@ -283,6 +283,15 @@ the run finishes, and a call that proves too expensive is measured and switched
 off partway through so the run stays inside its timeout — yielding partial data
 where the path would have yielded all of it. The report says when this happened
 and names the cheaper spelling.
+
+A capture whose value renders large comes back as the value's own value alone --
+for a pointer, its address -- with a marker saying how much was left out. Depth and
+node budgets bound the walk without bounding the reading, and a capture is read at
+every hit and appears three times in a summary: as a histogram key, on each side of
+a transition, and in the artifact. Past that size the address is the identifying
+part, and what the object holds is a question for a path that names the field
+wanted. Children that are all unreadable for one reason -- every member of an
+object reached through a null pointer -- are reported as that one reason.
 
 Capture more expressions than seems necessary. A capture costs wall clock once
 per run, not tokens per exchange, and the alternative to capturing something now
