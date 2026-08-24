@@ -52,12 +52,16 @@ std::optional<RoutedURI> ParseGlobalURI(llvm::StringRef uri);
 /// multiplexer creates. Managed sessions are its debuggers.
 ///
 /// Requests answered locally (initialize, tools/list) are handled directly.
-/// Listing requests (sessions_list, resources/list) fan out to every backend
-/// and aggregate. Targeted requests (command, observe, resources/read) are
-/// routed by the pid parsed from an instance-qualified URI. Session management
-/// (session_create/session_close) operates on the local backend. Backends only
-/// know their local `lldb-mcp://debugger/{id}` form, so URIs are rewritten in
-/// both directions.
+/// The client-facing tool surface is a single tool, `trace_program`, so a call
+/// to any other name is an error rather than something to forward. It and
+/// resources/read are routed to one backend by the pid parsed from an
+/// instance-qualified URI, and resources/list fans out to every backend and
+/// aggregates. Backends only know their local `lldb-mcp://debugger/{id}` form,
+/// so URIs are rewritten in both directions.
+///
+/// Sessions are opened on demand by the backend handling a `trace_program` call
+/// that named none, and released when this process exits, which is when the
+/// client disconnects. Nothing closes one earlier.
 class Multiplexer {
 public:
   template <typename T> using Reply = lldb_private::transport::Reply<T>;
@@ -114,10 +118,6 @@ private:
   void HandleRoutedCall(llvm::StringRef backend_tool,
                         const lldb_protocol::mcp::CallToolParams &params,
                         Reply<lldb_protocol::mcp::CallToolResult> reply);
-  void HandleSessionsList(Reply<lldb_protocol::mcp::CallToolResult> reply);
-  void HandleSessionCreate(Reply<lldb_protocol::mcp::CallToolResult> reply);
-  void HandleSessionClose(const lldb_protocol::mcp::CallToolParams &params,
-                          Reply<lldb_protocol::mcp::CallToolResult> reply);
   void
   HandleResourcesList(Reply<lldb_protocol::mcp::ListResourcesResult> reply);
   void HandleResourcesRead(const lldb_protocol::mcp::ReadResourceParams &params,

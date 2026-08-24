@@ -86,9 +86,12 @@ Expected<DebuggerSP> findDebugger(StringRef specifier) {
     // Distinct from the message a named-but-missing debugger gets below. Here
     // there is no session at all, and the caller has not said which one it
     // wanted, so the fix is a step it has not taken rather than a bad argument.
+    // It names this server's own tools: a client reaching them through
+    // `lldb-mcp` cannot see them, but that client only gets here through a tool
+    // that opens a session for itself and so never reads this.
     return createStringError(
-        "no debug session exists yet: call session_create to open one, or pass "
-        "\"debugger\" with a uri from sessions_list");
+        "no debug session exists yet: call debugger_create to open one, or pass "
+        "\"debugger\" with a uri from debugger_list");
   }
 
   StringRef id = specifier;
@@ -387,9 +390,9 @@ ObserveTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
 
   // A plan carries the program, its arguments and its environment, so a session
   // adds nothing a caller has to decide: the only thing an empty one is good for
-  // is being observed in. Requiring session_create first bought a round trip and
-  // a question -- what is in a session, is it reusable, does closing it matter --
-  // for a tool whose whole shape is one call per run.
+  // is being observed in. Making the caller open one first bought a round trip
+  // and a question -- what is in a session, is it reusable, does closing it
+  // matter -- for a tool whose whole shape is one call per run.
   if (debugger_argument.empty() && Debugger::GetNumDebuggers() == 0)
     if (Expected<DebuggerSP> created = createManagedDebugger();
         !created)

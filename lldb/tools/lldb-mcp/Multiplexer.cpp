@@ -25,23 +25,13 @@ namespace {
 /// Server name reported to the client during initialization.
 constexpr llvm::StringLiteral kServerName = "lldb-mcp";
 
-/// Client-facing tool names.
-/// @{
-constexpr llvm::StringLiteral kToolCommand = "command";
+/// The one client-facing tool name.
 constexpr llvm::StringLiteral kToolObserve = "trace_program";
-constexpr llvm::StringLiteral kToolSessionsList = "sessions_list";
-constexpr llvm::StringLiteral kToolSessionCreate = "session_create";
-constexpr llvm::StringLiteral kToolSessionClose = "session_close";
-/// @}
 
-/// Backend tool names, as exposed by the LLDB MCP server.
-/// @{
-constexpr llvm::StringLiteral kBackendToolCommand = "command";
+/// The backend tool it forwards to, as exposed by the LLDB MCP server. Named
+/// separately from the client-facing name because the two are free to diverge:
+/// a backend keeps whatever surface its LLDB offers.
 constexpr llvm::StringLiteral kBackendToolObserve = "trace_program";
-constexpr llvm::StringLiteral kBackendToolDebuggerList = "debugger_list";
-constexpr llvm::StringLiteral kBackendToolDebuggerCreate = "debugger_create";
-constexpr llvm::StringLiteral kBackendToolDebuggerDelete = "debugger_delete";
-/// @}
 
 /// Backend-local URI prefixes.
 /// @{
@@ -65,12 +55,6 @@ std::string replaceAll(StringRef text, StringRef from, StringRef to) {
   return result;
 }
 
-CallToolResult makeTextResult(std::string text) {
-  CallToolResult result;
-  result.content.emplace_back(TextContent{{std::move(text)}});
-  return result;
-}
-
 json::Value schemaField(StringRef type, StringRef description) {
   return json::Object{{"type", type}, {"description", description}};
 }
@@ -84,10 +68,12 @@ json::Value observeInputSchema() {
            {"debugger",
             schemaField(
                 "string",
-                "The debugger URI selecting the debug session to run in, as "
-                "reported by sessions_list, e.g. "
-                "lldb-mcp://instance/{pid}/debugger/{id}. Defaults to the "
-                "local session.")},
+                "Optional. Omit it: with no session open and none named, a "
+                "session is opened automatically, and a plan already carries "
+                "the program, its arguments and its environment. Pass "
+                "lldb-mcp://instance/{pid}/debugger/{id} only to run in a "
+                "session you already have a URI for, such as an LLDB someone "
+                "is using interactively.")},
        }},
       {"required", json::Array{"plan"}},
       {"additionalProperties", false},
@@ -241,85 +227,23 @@ Multiplexer::HandleInitialize(const InitializeParams &) {
 Expected<ListToolsResult> Multiplexer::HandleToolsList() {
   ListToolsResult result;
 
-  ToolDefinition command;
-  command.name = kToolCommand;
-  command.description = CommandToolDescription;
-  command.inputSchema = json::Object{
-      {"type", "object"},
-      {"properties",
-       json::Object{
-           {"command",
-            json::Object{{"type", "string"},
-                         {"description", "The LLDB command to run."}}},
-           {"debugger",
-            json::Object{
-                {"type", "string"},
-                {"description",
-                 "The debugger URI selecting the debug session, as reported by "
-                 "sessions_list, e.g. lldb-mcp://instance/{pid}/debugger/{id}. "
-                 "Defaults to the local session."}}},
-       }},
-      {"required", json::Array{"command"}},
-  };
-  result.tools.push_back(std::move(command));
-
+  // The surface is deliberately a single tool. A tool list is read as a
+  // suggestion about how to work, so advertising a session to open, a command
+  // to run in it and a session to close would describe the stepping loop
+  // `trace_program` replaces, and that is the shape a caller reaches for first.
   ToolDefinition observe;
   observe.name = kToolObserve;
   observe.description = ObserveToolDescription;
   observe.inputSchema = observeInputSchema();
   result.tools.push_back(std::move(observe));
 
-  ToolDefinition sessions_list;
-  sessions_list.name = kToolSessionsList;
-  sessions_list.description =
-      "List the active debug sessions across all lldb instances.";
-  sessions_list.inputSchema = json::Object{{"type", "object"}};
-  result.tools.push_back(std::move(sessions_list));
-
-  ToolDefinition session_create;
-  session_create.name = kToolSessionCreate;
-  session_create.description =
-      "Create a new in-process debug session and return its URI. A session is a "
-      "bare debugger with no program in it: what to run is named per call, so one "
-      "session serves any number of programs. Needed only for \"command\", since "
-      "\"trace_program\" opens one when there is none.";
-  session_create.inputSchema = json::Object{{"type", "object"}};
-  result.tools.push_back(std::move(session_create));
-
-  ToolDefinition session_close;
-  session_close.name = kToolSessionClose;
-  session_close.description =
-      "Close a debug session previously created with session_create. Optional: a "
-      "session and everything in it goes away when this server exits, which is "
-      "when the client disconnects. Worth doing to drop a large target early.";
-  session_close.inputSchema = json::Object{
-      {"type", "object"},
-      {"properties",
-       json::Object{
-           {"session", json::Object{{"type", "string"},
-                                    {"description",
-                                     "The session URI to close, as returned by "
-                                     "session_create or sessions_list."}}},
-       }},
-      {"required", json::Array{"session"}},
-  };
-  result.tools.push_back(std::move(session_close));
-
   return result;
 }
 
 void Multiplexer::HandleToolsCall(const CallToolParams &params,
                                   Reply<CallToolResult> reply) {
-  if (params.name == kToolCommand)
-    return HandleRoutedCall(kBackendToolCommand, params, std::move(reply));
   if (params.name == kToolObserve)
     return HandleRoutedCall(kBackendToolObserve, params, std::move(reply));
-  if (params.name == kToolSessionsList)
-    return HandleSessionsList(std::move(reply));
-  if (params.name == kToolSessionCreate)
-    return HandleSessionCreate(std::move(reply));
-  if (params.name == kToolSessionClose)
-    return HandleSessionClose(params, std::move(reply));
   reply(createStringError(formatv("no tool \"{0}\"", params.name)));
 }
 
@@ -357,96 +281,6 @@ void Multiplexer::HandleRoutedCall(StringRef backend_tool,
   backend_params.name = backend_tool;
   backend_params.arguments = json::Value(std::move(args));
   backend->ToolsCall(backend_params, std::move(reply));
-}
-
-void Multiplexer::HandleSessionsList(Reply<CallToolResult> reply) {
-  llvm::SmallVector<Backend *> live = LiveBackends();
-  if (live.empty())
-    return reply(makeTextResult(""));
-
-  // All backends share the multiplexer's MainLoop, so these reply callbacks run
-  // serially on one thread and the aggregation state below needs no locking.
-  struct State {
-    size_t remaining;
-    // Keyed by pid so the aggregated output is deterministic.
-    std::map<lldb::pid_t, std::string> texts;
-    Reply<CallToolResult> reply;
-  };
-  auto state = std::make_shared<State>();
-  state->remaining = live.size();
-  state->reply = std::move(reply);
-
-  for (Backend *backend : live) {
-    lldb::pid_t pid = backend->pid;
-    CallToolParams params;
-    params.name = kBackendToolDebuggerList;
-    backend->client->ToolsCall(
-        params, [state, pid](Expected<CallToolResult> result) {
-          // Best effort: a backend that fails or disconnected is simply omitted
-          // from the aggregate rather than failing the whole listing.
-          if (result) {
-            std::string text;
-            for (const TextContent &content : result->content)
-              text += RewriteURIsToGlobal(content.text, pid);
-            state->texts[pid] = std::move(text);
-          } else {
-            consumeError(result.takeError());
-          }
-
-          if (--state->remaining != 0)
-            return;
-          std::string combined;
-          for (const auto &entry : state->texts)
-            combined += entry.second;
-          state->reply(makeTextResult(combined));
-        });
-  }
-}
-
-void Multiplexer::HandleSessionCreate(Reply<CallToolResult> reply) {
-  Backend *local = LocalBackend();
-  if (!local)
-    return reply(createStringError("no in-process session host available"));
-
-  lldb::pid_t pid = local->pid;
-  CallToolParams params;
-  params.name = kBackendToolDebuggerCreate;
-  local->client->ToolsCall(
-      params,
-      [reply = std::move(reply), pid](Expected<CallToolResult> result) mutable {
-        if (!result)
-          return reply(result.takeError());
-        for (TextContent &content : result->content)
-          content.text = RewriteURIsToGlobal(content.text, pid);
-        reply(std::move(*result));
-      });
-}
-
-void Multiplexer::HandleSessionClose(const CallToolParams &params,
-                                     Reply<CallToolResult> reply) {
-  json::Object args;
-  if (params.arguments)
-    if (const json::Object *object = params.arguments->getAsObject())
-      args = *object;
-
-  std::optional<StringRef> session = args.getString("session");
-  if (!session || session->empty())
-    return reply(createStringError("session_close requires a \"session\" uri"));
-
-  std::optional<RoutedURI> routed = ParseGlobalURI(*session);
-  if (!routed)
-    return reply(
-        createStringError(formatv("malformed session uri \"{0}\"", *session)));
-
-  Backend *local = LocalBackend();
-  if (!local || routed->pid != local->pid)
-    return reply(
-        createStringError("can only close sessions that lldb-mcp created"));
-
-  CallToolParams delete_params;
-  delete_params.name = kBackendToolDebuggerDelete;
-  delete_params.arguments = json::Object{{"debugger", routed->local}};
-  local->client->ToolsCall(delete_params, std::move(reply));
 }
 
 void Multiplexer::HandleResourcesList(Reply<ListResourcesResult> reply) {

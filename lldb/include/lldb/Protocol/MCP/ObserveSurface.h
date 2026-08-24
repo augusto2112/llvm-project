@@ -20,6 +20,10 @@
 // instance-qualified URIs and a backend does not, so that one field is supplied
 // by each server rather than shared.
 //
+// `command` is served by the plugin alone: `lldb-mcp` advertises `trace_program`
+// and nothing else, so its description is shared with no one and sits here only
+// beside the text that explains the boundary between the two.
+//
 //===----------------------------------------------------------------------===//
 
 #ifndef LLDB_PROTOCOL_MCP_OBSERVESURFACE_H
@@ -72,11 +76,13 @@ inline constexpr llvm::StringLiteral ObserveToolDescription =
     "that same plan reports \"profile\" -- where sampled stacks found it, which "
     "answers what is running without being told where to look.\n"
     "\n"
-    "Prefer a capture that is a path, \"I.Ty.TypeID\", over one that is a "
-    "call, \"I->getType()\"; \"->\" and \"[]\" are part of a path. A path is a "
-    "debug-info lookup and a memory read, while a call compiles and runs code "
-    "inside the observed process, and on a hot tracepoint a call is measured "
-    "and turned off partway through the run.\n"
+    "What matters about a capture is whether it is a path or a call, not how "
+    "it is spelled: \"I.Ty.TypeID\" and \"I->Ty.TypeID\" are both paths, and "
+    "\"->\" and \"[]\" are as much a part of one as \".\" is. Prefer a path "
+    "over a call, \"I->getType()\". A path is a debug-info lookup and a memory "
+    "read, while a call compiles and runs code inside the observed process, and "
+    "on a hot tracepoint a call is measured and turned off partway through the "
+    "run.\n"
     "\n"
     "Capture more expressions than you think you need. A capture costs wall "
     "clock once per run, not tokens per round trip, and the alternative to "

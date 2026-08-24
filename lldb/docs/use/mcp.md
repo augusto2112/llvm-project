@@ -38,39 +38,22 @@ when it disconnects, taking any session it created with it.
 ## Tools
 
 Tools are a primitive in the Model Context Protocol that enable servers to
-expose functionality to clients. `lldb-mcp` exposes five.
+expose functionality to clients. `lldb-mcp` exposes one.
 
-### `session_create`
+A tool list is read as a suggestion about how to work, which is why there is
+only one. A surface offering a session to create, a command to run in it and a
+session to close describes the stepping loop `trace_program` exists to replace,
+and it is the shape an agent already believes a debugger has, so it is the one
+that gets reached for.
 
-Creates a new debug session and returns its URI. This is equivalent to launching
-a new instance of `lldb` on the command line: a bare debugger with no program in
-it, since what to run is named per call, so one session serves any number of
-programs. Only `command` needs one — `trace_program` opens a session when there is
-none. Sessions look like this:
-
-```
-lldb-mcp://instance/{pid}/debugger/{id}
-```
-
-The `pid` identifies the process hosting the session and the `id` identifies
-the debugger inside it. Pass the whole URI back to the other tools.
-
-### `command`
-
-Runs an LLDB command in a debug session and returns its output, the same text
-you would see in the LLDB command interpreter. It takes:
-
-- `command` (required): the command to run, for example `breakpoint set --name main`.
-- `debugger` (optional): the URI of the session to run it in. When omitted, the
-  command runs in the first session `lldb-mcp` created.
-
-Commands run one at a time and the result comes back when the command finishes, or
-after two minutes, whichever comes first. A command that waits for the program to
-stop cannot return for a program that does not: `process launch` in a synchronous
-session waits for the first stop, and a program launched with no breakpoints in it
-has none. Reaching the ceiling interrupts the session and halts the program where it
-had got to, which leaves the session usable, and the result says so. To run a
-program to its end, use `trace_program`.
+:::{note}
+The MCP server inside LLDB — the one `protocol-server start MCP` starts, see
+[Attaching to a Running LLDB](#attaching-to-a-running-lldb) — exposes more than
+this: `command`, plus `debugger_list`, `debugger_create` and `debugger_delete`.
+A client that connects straight to it rather than through `lldb-mcp` sees that
+larger surface. This section describes `lldb-mcp`, which is what a client is
+normally pointed at.
+:::
 
 ### `trace_program`
 
@@ -82,10 +65,21 @@ over every hit together with a JSONL file holding the full event stream.
 It takes:
 
 - `plan` (required): what to run and what to watch.
-- `debugger` (optional): the URI of the session to run it in. With no session
-  open and none named, `trace_program` creates one: a plan already carries the program,
-  its arguments and its environment, so an empty session is not a decision a
-  caller has to make first.
+- `debugger` (optional, and normally omitted): the URI of an existing session to
+  run in. With no session open and none named, `trace_program` opens one: a plan
+  already carries the program, its arguments and its environment, so an empty
+  session is not a decision a caller has to make first. Pass this only to run in
+  a session you already have a URI for, such as an LLDB someone is using
+  interactively. Session URIs look like this:
+
+```
+lldb-mcp://instance/{pid}/debugger/{id}
+```
+
+The `pid` identifies the process hosting the session and the `id` identifies the
+debugger inside it. A session `trace_program` opened for itself lives until the
+`lldb-mcp` process exits, which is when the client disconnects; nothing closes
+one earlier, and a later call with no `debugger` reuses it.
 
 The plan is nested rather than sitting beside `debugger` because its fields are
 validated as a closed set: a field the plan does not define is an error, and the
@@ -338,14 +332,19 @@ inline only when the program ended badly, which is when they are wanted.
 
 #### Writing a good plan
 
-Prefer a capture written as a path, `I.Ty.TypeID`, over one written as a call,
-`I->getType()`. `->` and `[]` are part of a path. A path is a debug-info lookup
-and a memory read; a call compiles an expression and runs it inside the observed
-process. On a tracepoint hit thousands of times the difference decides whether
-the run finishes, and a call that proves too expensive is measured and switched
-off partway through so the run stays inside its timeout — yielding partial data
-where the path would have yielded all of it. The report says when this happened
-and names the cheaper spelling.
+What matters about a capture is whether it is a **path** or a **call**, not how
+it is spelled. `I.Ty.TypeID` and `I->Ty.TypeID` are both paths: `->` and `[]` are
+as much a part of a path as `.` is, and unlike `dwim-print`, which accepts only
+`.`, a capture may use them. `I->getType()` is a call, and that is the
+distinction to care about.
+
+Prefer a path. A path is a debug-info lookup and a memory read; a call compiles
+an expression and runs it inside the observed process. On a tracepoint hit
+thousands of times the difference decides whether the run finishes, and a call
+that proves too expensive is measured and switched off partway through so the run
+stays inside its timeout — yielding partial data where the path would have
+yielded all of it. The report says when this happened and names the cheaper
+spelling.
 
 A capture whose value renders large comes back as the value's own value alone --
 for a pointer, its address -- with a marker saying how much was left out. Depth and
@@ -360,48 +359,46 @@ Capture more expressions than seems necessary. A capture costs wall clock once
 per run, not tokens per exchange, and the alternative to capturing something now
 is running the whole program again to ask one more question.
 
-### `sessions_list`
-
-Lists every debug session reachable from this `lldb-mcp`, one URI per line.
-That includes sessions it created itself and sessions in LLDB instances running
-elsewhere on the machine (see [Attaching to a Running LLDB](#attaching-to-a-running-lldb)).
-
-### `session_close`
-
-Closes a session and frees its resources. It takes a single required `session`
-argument, the URI to close. Closing is optional: a session and everything in it
-goes away when the `lldb-mcp` process exits, which is when the client
-disconnects. It is worth doing to drop a large target early. Only sessions that `lldb-mcp` created can be closed
-this way. An interactive LLDB that a person is using belongs to that person, so
-closing it is refused.
-
 ## A Typical Session
 
-Creating a session, debugging in it, and cleaning up looks like this:
+Triage first. An empty `observe` list runs the program untouched and reports how
+it ended, so it is what to send before knowing where to look — no session to open
+first, and nothing to name but the program:
 
-```
-session_create                            -> lldb-mcp://instance/4711/debugger/1
-command "target create /tmp/hello"        -> Current executable set to '/tmp/hello' (arm64).
-command "breakpoint set --name add"       -> Breakpoint 1: 4 locations.
-command "run"                             -> Process 4713 stopped
-                                             * thread #1, stop reason = breakpoint 1.1
-                                                 frame #0: hello`add(a=2, b=3) at hello.c:2
-command "frame variable"                  -> (int) a = 2
-                                             (int) b = 3
-command "continue"                        -> Process 4713 exited with status = 0
-session_close                             -> deleted lldb-mcp://debugger/1
+```json
+{"plan": {"program": "build/bin/opt",
+          "args": ["-passes=instcombine", "-S", "repro.ll"]}}
 ```
 
-:::{note}
-Sessions `session_create` makes run synchronously, so `run` and `continue`
-return once the process has actually stopped, as shown above. A session in an
-LLDB you started yourself keeps whatever mode that LLDB is in; if a command
-there fails with "Command requires a process which is currently stopped", run
-`script lldb.debugger.SetAsync(False)` in it.
-:::
+For a crash that comes back as `outcome: crashed` with a ranked backtrace, the
+locals and the source at the failure. For a program that never finishes it comes
+back as `timed_out` with `profile`: where sampled stacks found it, ranked, which
+answers which code is running without having been told where to look.
 
-The debuggee's own output does not come back through MCP. Only debugger output
-does. Redirect the program's output to a file and read it back if you need it.
+Then ask about the code the first call named. Say `profile` put the run under
+`InstCombinerImpl::visitAdd`; a second call watches it and reads values at every
+hit:
+
+```json
+{"plan": {"program": "build/bin/opt",
+          "args": ["-passes=instcombine", "-S", "repro.ll"],
+          "observe": [
+            {"at": "InstCombinerImpl::visitAdd",
+             "capture": ["I->Ty.TypeID", "I->hasNSW"],
+             "emit": "on_change"},
+            {"at": "InstCombinerImpl::visitAdd", "on": "return",
+             "capture": ["$return"]}]}}
+```
+
+That returns a `plan_report` per observation, an `aggregate` over every hit, and
+the path to a JSONL artifact holding the event stream. Read `aggregate` first,
+and its `outliers` first of all: one value seen twice among four thousand hits,
+with the hit at which it first appeared, is usually the answer. Re-run with
+`only_hit` set to that `first_hit` to record that one hit in full detail, where a
+call is affordable because it runs once.
+
+The debuggee's own output does not come back as debugger output. It is captured
+into `inferior_output` in the result instead.
 
 ## Attaching to a Running LLDB
 
@@ -433,10 +430,24 @@ The server stops when LLDB exits, or explicitly:
 `protocol-server get MCP` reports where a running server is listening. Starting
 a server when one is already running, or stopping one that is not, is an error.
 
-Once the server is up, that LLDB's sessions show up in `sessions_list` and
-accept `command`, exactly like sessions `lldb-mcp` created. You do not need to
-configure a port anywhere: each LLDB with a running MCP server records itself in
-`~/.lldb`, and `lldb-mcp` finds it there.
+Once the server is up, that LLDB's sessions are reachable from `lldb-mcp`
+exactly like the one it opens for itself: pass the session's URI as
+`trace_program`'s `debugger` argument. You do not need to configure a port
+anywhere: each LLDB with a running MCP server records itself in `~/.lldb`, and
+`lldb-mcp` finds it there.
+
+:::{warning}
+**No tool enumerates sessions.** A session is reachable but not discoverable
+through the tool surface, which offers `trace_program` and nothing else, so a
+`debugger` URI has to come from somewhere else.
+
+`resources/list` is that somewhere for a client that reads resources: it lists
+every debugger `lldb-mcp` can reach, across every instance, as
+`lldb://instance/<pid>/debugger/<id>`. The `debugger` argument for the same
+session is that URI under the other scheme,
+`lldb-mcp://instance/<pid>/debugger/<id>`. Failing that, the `pid` is the LLDB
+process's own and the `id` of its first session is `1`.
+:::
 
 :::{note}
 Discovery happens once, when `lldb-mcp` starts. An LLDB you launch afterwards is
@@ -496,21 +507,20 @@ stable and may be reused when a target is removed and a new target is added.
 
 ## Troubleshooting
 
-**"no debug session exists yet" from `command`.** There is no session to run
-in. Call `session_create` first, or pass the URI of an existing session.
-`trace_program` does not report this, because it opens a session when there is none. A `debugger` URI that names a session which is not there reports "no
-debugger found" instead; `sessions_list` says which ones exist.
+**"no debug session available".** `lldb-mcp` has no in-process backend to open a
+session in, which means the local backend failed to start. The stderr log below
+says why.
 
-**"Command requires a process which is currently stopped".** The session is in
-asynchronous mode. Sessions `lldb-mcp` creates are synchronous, so this is an
-LLDB you started yourself; run `script lldb.debugger.SetAsync(False)` in it.
+**"no debugger found" or "malformed debugger specifier".** The `debugger`
+argument names a session that is not there, or is not written as
+`lldb-mcp://instance/<pid>/debugger/<id>`. Nothing enumerates sessions any more —
+see [Attaching to a Running LLDB](#attaching-to-a-running-lldb) for where a URI
+can come from. Omitting `debugger` avoids the question: `trace_program` opens a
+session when there is none.
 
-**"can only close sessions that lldb-mcp created".** `session_close` refuses to
-tear down an interactive LLDB. Quit that LLDB yourself.
-
-**A running LLDB does not show up in `sessions_list`.** Either its MCP server is
-not running, which `protocol-server get MCP` will tell you, or it started after
-`lldb-mcp` did. Restart the MCP server in your client to rediscover.
+**A running LLDB is not reachable.** Either its MCP server is not running, which
+`protocol-server get MCP` will tell you, or it started after `lldb-mcp` did.
+Restart the MCP server in your client to rediscover.
 
 To see the JSON-RPC traffic between your client and `lldb-mcp`, set
 `LLDB_MCP_LOG` in the environment. Messages are written to stderr, since stdout
@@ -549,28 +559,31 @@ and identified by the pid of the process hosting it.
 
 There are two kinds of backend. The **local** backend is an MCP server that
 `lldb-mcp` starts inside its own process, through `SBProtocolServer`. The
-sessions it hosts are the ones `session_create` makes. **Remote** backends are
+sessions it hosts are the ones `trace_program` opens. **Remote** backends are
 the separate LLDB processes discovered through the registry. Both are driven the
 same way, over a socket through an `mcp::Client`, which keeps the tool
 implementations in one place rather than special-casing the in-process path.
 
 Requests are dispatched three ways. `initialize` and `tools/list` are answered
-by the multiplexer directly. `sessions_list` and `resources/list` fan out to
-every live backend and aggregate, keyed by pid so output is deterministic. A
-backend that fails or has disconnected is omitted rather than failing the whole
-listing. `command`, `resources/read`, and `session_close` are routed to a single
-backend by the pid parsed out of the URI.
+by the multiplexer directly. `resources/list` fans out to every live backend and
+aggregates, keyed by pid so output is deterministic; a backend that fails or has
+disconnected is omitted rather than failing the whole listing. `tools/call` and
+`resources/read` are routed to a single backend by the pid parsed out of the URI,
+and a `tools/call` naming anything but `trace_program` is refused rather than
+forwarded — a tool a backend implements does not reach a client until the
+multiplexer decides to advertise it.
 
 Backends only know their own local `lldb-mcp://debugger/{id}` and
 `lldb://debugger/{id}` URIs. The multiplexer rewrites them into the
 instance-qualified form in both directions, so a client never sees an ambiguous
 id and a backend never sees a pid it does not understand.
 
-`session_create` and `session_close` map onto the `debugger_create` and
-`debugger_delete` tools on the local backend. Session ownership is enforced by
-comparing the pid in the URI against the local backend's, which is why closing
-someone else's session is refused. Running a command in one is not: any
-`lldb-mcp` on the machine can drive any discovered session.
+A `trace_program` call that names no `debugger` is forwarded to the local backend
+with that argument stripped, leaving the backend to pick a session or open one.
+Nothing in the multiplexer creates or destroys a session: the process exiting is
+what releases them, which happens when the client disconnects. Running a
+`trace_program` in someone else's session is not restricted — any `lldb-mcp` on
+the machine can drive any discovered session.
 
 ### Discovery
 
@@ -600,12 +613,14 @@ Value resolution is shared with `dwim-print` through
 `lldb/include/lldb/Target/DWIMValueResolution.h`, which decides between a
 variable expression path and the expression evaluator and reports which one ran.
 `dwim-print` keeps its dot-only rule for paths; `trace_program` opts into `->` and
-`[]`, because a codebase of pointers would otherwise send every capture to the
-expression evaluator.
+`[]` (as [Writing a good plan](#writing-a-good-plan) says), because a codebase of
+pointers would otherwise send every capture to the expression evaluator.
 
-Two shapes are deliberate. There is one tool rather than several, and no
-`step`, `continue` or `run_to`: the tool list is a suggestion about how to work,
-and offering those would advertise the loop this replaces. And the aggregate is
+Two shapes are deliberate. There is one tool rather than several — no `step`,
+`continue` or `run_to`, and no session to create, run commands in and close: the
+tool list is a suggestion about how to work, and offering those would advertise
+the loop this replaces. That is why the multiplexer's `tools/list` is one entry
+and its `tools/call` refuses every other name. And the aggregate is
 computed over **every** hit while the event stream is reduced — that invariant
 is what makes a reduction a saving rather than a blind spot, and inverting it
 would make `emit: on_change` lose exactly the rare value it is meant to surface.
@@ -698,7 +713,10 @@ registering it there.
 A tool added this way is exposed by the LLDB MCP server, not automatically by
 `lldb-mcp`. Because the multiplexer owns the client-facing surface, it also
 needs a case in `HandleToolsList` and `HandleToolsCall`, plus a routing decision
-if its arguments carry a URI.
+if its arguments carry a URI. That the two surfaces differ is deliberate rather
+than an oversight: `command` and the `debugger_*` tools are registered here and
+are reachable by a client that connects to an LLDB's own MCP server, and
+`lldb-mcp` advertises `trace_program` alone.
 
 Note that the protocol version LLDB implements is `2024-11-05`, which has no
 structured content. Tools return their output as text.
