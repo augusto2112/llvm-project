@@ -10,6 +10,7 @@
 #define LLDB_SOURCE_PLUGINS_PROTOCOL_MCP_OBSERVATIONPLAN_H
 
 #include "lldb/lldb-forward.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
@@ -154,6 +155,27 @@ llvm::Expected<ObservationPlan>
 ParseObservationPlan(const llvm::json::Value &Plan);
 
 llvm::StringRef ToString(EmitMode Mode);
+
+/// The names closest to \p Wanted, nearest first, at most \p Limit of them, and
+/// only those close enough that naming them says something.
+///
+/// Compared on the last `::`-separated component alone and reported whole, so
+/// that a caller who wrote a bare name is answered with the qualified one it
+/// belongs to rather than with nothing: a scope the caller never wrote is not a
+/// mistake they made. An exact match is never suggested, since repeating the
+/// name back says nothing about why it did not resolve.
+///
+/// \p Names is expected sorted, which is what leaves equally close names in
+/// alphabetical order.
+///
+/// Shared between an unresolved tracepoint location and an unresolved capture
+/// because the ranking is the same question in both -- which of these names did
+/// the caller mean -- while gathering the candidates is not: a location's are
+/// found by probing spellings against the name index, and a capture's are read
+/// out of the frame or the type that failed.
+std::vector<llvm::StringRef> NearestNames(llvm::StringRef Wanted,
+                                          llvm::ArrayRef<std::string> Names,
+                                          size_t Limit);
 
 /// What resolving one observation's location produced.
 struct LocationResolution {

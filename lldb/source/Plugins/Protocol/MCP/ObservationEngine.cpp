@@ -187,6 +187,133 @@ EmitDecision lldb_private::mcp::DecideEmit(const EmitDecisionInput &In) {
 // Expression cost control
 //===----------------------------------------------------------------------===//
 
+StringRef lldb_private::mcp::ToString(CaptureFailure Kind) {
+  switch (Kind) {
+  case CaptureFailure::Situational:
+    return "not_available_here";
+  case CaptureFailure::UnknownName:
+    return "no_such_name";
+  case CaptureFailure::UnknownMember:
+    return "no_such_member";
+  case CaptureFailure::Malformed:
+    return "malformed";
+  }
+  llvm_unreachable("unhandled CaptureFailure");
+}
+
+bool lldb_private::mcp::IsStableFailure(CaptureFailure Kind) {
+  switch (Kind) {
+  case CaptureFailure::Situational:
+    return false;
+  case CaptureFailure::UnknownName:
+  case CaptureFailure::UnknownMember:
+  case CaptureFailure::Malformed:
+    return true;
+  }
+  llvm_unreachable("unhandled CaptureFailure");
+}
+
+CaptureFailure lldb_private::mcp::ClassifyCaptureFailure(StringRef Diagnostic) {
+  // Matched on the compiler's own wording. Fragile against a diagnostic being
+  // reworded, and the failure mode of that is a capture that keeps being
+  // retried rather than one wrongly abandoned -- which is why the default is
+  // Situational and why nothing here decides anything but how soon to stop.
+  auto Says = [&](StringRef Text) { return Diagnostic.contains(Text); };
+
+  // The base of the path resolved; the type it named has no such member. A
+  // library loading later cannot add one.
+  //
+  // Tested before the shape cases because one expression draws both, and the
+  // compiler emits them the other way round: a misspelled member reached with a
+  // dot through a pointer is objected to first as a dot on a pointer and only
+  // then as a member the type does not have. The member name is the fault --
+  // applying the arrow reaches the same type and still finds no such member --
+  // and it is also the reading with somewhere useful to look for candidates.
+  if (Says("no member named") || Says("does not have a member named") ||
+      Says("has no member named"))
+    return CaptureFailure::UnknownMember;
+
+  // A member read out of something with no members, or a subscript of
+  // something that is not indexable: a fault in the shape of the expression
+  // against the types at hand, not in any name in it.
+  if (Says("is not a structure or union") ||
+      Says("is not a class, struct, or union") ||
+      Says("subscripted value is not an array") ||
+      // A pointer/dot confusion carries a fixit, so reaching here means the
+      // fixit did not repair it either.
+      Says("did you mean to use '->'") || Says("did you mean to use '.'") ||
+      Says("expected expression") || Says("expected ')'") ||
+      Says("expected ';'") || Says("expected unqualified-id"))
+    return CaptureFailure::Malformed;
+
+  // Nothing of that name is in scope. Stable for as long as the module list is,
+  // which is what the caller of this has to account for.
+  if (Says("use of undeclared identifier") || Says("undeclared identifier") ||
+      Says("cannot find") || Says("use of unresolved identifier"))
+    return CaptureFailure::UnknownName;
+
+  return CaptureFailure::Situational;
+}
+
+std::string lldb_private::mcp::DescribeCaptureFailure(StringRef Diagnostic,
+                                                      CaptureFailure Kind,
+                                                      unsigned MaxChars) {
+  // The line that decided the class, where the message holds more than one
+  // objection. Reporting the first one instead pairs a reason with a detail
+  // about something else -- "no_such_member" beside a sentence about arrows --
+  // which reads as the classification having gone wrong.
+  SmallVector<StringRef, 8> Lines;
+  Diagnostic.split(Lines, '\n');
+  for (StringRef Line : Lines)
+    if (Line.contains("error:") && ClassifyCaptureFailure(Line) == Kind)
+      return CondenseDiagnostic(Line, MaxChars);
+
+  // No line owns the class on its own -- a Situational failure has no marker to
+  // match, and an execution error is one line that is itself the diagnostic.
+  return CondenseDiagnostic(Diagnostic, MaxChars);
+}
+
+CaptureCandidates
+lldb_private::mcp::RankCaptureCandidates(StringRef Wanted,
+                                         std::vector<std::string> InScope) {
+  CaptureCandidates Result;
+  if (InScope.empty())
+    return Result;
+
+  // Sorted before ranking because the ranking is stable and leaves equally
+  // close names in the order given, which is only a useful order if it is
+  // alphabetical.
+  llvm::sort(InScope);
+  InScope.erase(std::unique(InScope.begin(), InScope.end()), InScope.end());
+  Result.InScope = InScope.size();
+
+  // Only the last component of the capture is compared. A caller who wrote
+  // `Node.chidren` has the base right and the member wrong, and comparing the
+  // whole expression against a bare field name would rank every field equally
+  // far away.
+  StringRef Base = Wanted;
+  const size_t Split = Base.find_last_of(".>[");
+  if (Split != StringRef::npos)
+    Base = Base.drop_front(Split + 1);
+
+  SmallSet<StringRef, 8> Taken;
+  for (StringRef Near : NearestNames(Base, InScope, MaxCaptureCandidates)) {
+    Result.Names.push_back(Near.str());
+    Taken.insert(Near);
+  }
+
+  // Then whatever else was there, up to the bound. A caller who misremembered a
+  // name rather than mistyping it gets no near match at all, and the list of
+  // what the frame actually held is the answer for them.
+  for (const std::string &Name : InScope) {
+    if (Result.Names.size() >= MaxCaptureCandidates)
+      break;
+    if (!Taken.contains(StringRef(Name)))
+      Result.Names.push_back(Name);
+  }
+  return Result;
+}
+
 std::optional<std::string> lldb_private::mcp::SuggestPathForm(StringRef Expr) {
   StringRef Trimmed = Expr.trim();
 
@@ -229,9 +356,28 @@ lldb_private::mcp::AssessCaptureCost(const CaptureCostInput &In) {
   // with advice about cheaper spelling that cannot apply, since a bare
   // identifier is already as cheap as a name gets. Eight such captures in one
   // measured run burned 30 s of a 25 s budget and returned nothing, so stopping
-  // early is worth more than the chance that the name would have resolved later.
-  if (In.Tier == ValueResolutionTier::Unresolved &&
-      In.Errors >= UnresolvableCaptureAttempts && In.Errors == In.ObservedHits) {
+  // early is worth more than the chance that the name would have resolved
+  // later.
+  //
+  // One failure is enough when the failure is stable. The attempts exist to let
+  // a value that is merely absent at this hit appear at the next one, and a
+  // member a type does not have is not absent -- it is not a member. Waiting
+  // three hits to say so costs two more compiles and delays the report of a
+  // fault the caller can fix.
+  //
+  // Except for a name out of scope where the tracepoint has more than one
+  // location: a name is looked up at a program counter, differently inlined
+  // copies of one function have different variables in scope, and a capture
+  // dropped at the first hit would be lost at every later location that did
+  // hold it. Losing data is worse than two compiles, so that case keeps its
+  // attempts.
+  const bool SettledByOneFailure =
+      IsStableFailure(In.Failure) &&
+      (In.Failure != CaptureFailure::UnknownName || In.Locations <= 1);
+  const uint64_t Attempts =
+      SettledByOneFailure ? 1 : UnresolvableCaptureAttempts;
+  if (In.Tier == ValueResolutionTier::Unresolved && In.Errors >= Attempts &&
+      In.Errors == In.ObservedHits) {
     D.Disable = true;
     // A return observation has a known cause, and naming the scope instead would
     // send the caller hunting a declaration that is in the right place. Measured
@@ -247,25 +393,36 @@ lldb_private::mcp::AssessCaptureCost(const CaptureCostInput &In) {
     // them, and a run whose eight captures all failed at a return site spent
     // 2.6 kB saying so eight times, each copy differing only in the name that the
     // key it was filed under already gave.
-    D.Note =
-        In.AtReturn
-            ? formatv("stopped after {0} hits with no value: this observation is "
-                      "taken as the function returns, where its frame has "
-                      "already been popped, so the function's own parameters and "
-                      "locals cannot be read. Capture \"{1}\" for what it "
-                      "produced; read a parameter with \"on\": \"entry\", and a "
-                      "local at a source location past its assignment, \"at\": "
-                      "\"file.cpp:LINE\", since at entry it holds whatever was "
-                      "on the stack.",
-                      In.Errors, "$return")
-                  .str()
-            : formatv("stopped after {0} hits with no value, so the name does "
-                      "not resolve where this observation is taken. Check that "
-                      "it is in scope there -- a local declared further down the "
-                      "function, or a member of another object, resolves nowhere "
-                      "at this line -- rather than spelling it more cheaply.",
-                      In.Errors)
-                  .str();
+    if (In.AtReturn)
+      D.Note =
+          formatv("stopped after {0} hits with no value: this observation is "
+                  "taken as the function returns, where its frame has "
+                  "already been popped, so the function's own parameters and "
+                  "locals cannot be read. Capture \"{1}\" for what it "
+                  "produced; read a parameter with \"on\": \"entry\", and a "
+                  "local at a source location past its assignment, \"at\": "
+                  "\"file.cpp:LINE\", since at entry it holds whatever was "
+                  "on the stack.",
+                  In.Errors, "$return")
+              .str();
+    else if (SettledByOneFailure)
+      // Short, and it does not repeat the compiler. The reason, the candidate
+      // names and the fixit are reported together in "capture_failures", where
+      // they are real JSON rather than prose; saying it twice would put the
+      // longer copy in the place a reader reaches second.
+      D.Note = "stopped at the first failure: this cannot resolve at any hit, "
+               "so retrying it would only cost compiles. See "
+               "\"capture_failures\" for the compiler's reason and the names "
+               "that were in scope.";
+    else
+      D.Note =
+          formatv("stopped after {0} hits with no value, so the name does "
+                  "not resolve where this observation is taken. Check that "
+                  "it is in scope there -- a local declared further down the "
+                  "function, or a member of another object, resolves nowhere "
+                  "at this line -- rather than spelling it more cheaply.",
+                  In.Errors)
+              .str();
     return D;
   }
 
@@ -667,7 +824,8 @@ json::Value CaptureReport::Render() const {
 
   // A capture that resolved as a path and never failed has nothing to say
   // beyond how it resolved, and most captures are that.
-  if (!Disabled && Errors == 0 && Tier == ValueResolutionTier::VariablePath)
+  if (!Disabled && Errors == 0 && FixedExpr.empty() &&
+      Tier == ValueResolutionTier::VariablePath)
     return ToString(Tier);
 
   // Never evaluated is not the same as could not be read: the observation may
@@ -680,7 +838,7 @@ json::Value CaptureReport::Render() const {
   // zero and a capture on an observation that never fired has nothing else to
   // report: `{"evaluations":0,"tier":"not_evaluated","total_ms":0}` is three fields
   // saying what one says.
-  if (Evaluations == 0 && !Disabled && Errors == 0)
+  if (Evaluations == 0 && !Disabled && Errors == 0 && FixedExpr.empty())
     return "not_evaluated";
 
   const std::string TierName = ToString(Tier).str();
@@ -688,10 +846,48 @@ json::Value CaptureReport::Render() const {
   json::Object O{{"tier", TierName},
                  {"evaluations", static_cast<int64_t>(Evaluations)},
                  {"total_ms", Round2(TotalMs)}};
+
+  // The run is not evaluating what the caller wrote, and nothing else in the
+  // response says so. Beside the key, which is the caller's own spelling, this
+  // is what connects the two.
+  if (!FixedExpr.empty())
+    O["fixed_as"] = FixedExpr;
   if (Errors != 0)
     O["errors"] = static_cast<int64_t>(Errors);
   if (Disabled)
     O["disabled"] = Disabled->Render();
+  return O;
+}
+
+json::Value CaptureFailureReport::Render() const {
+  json::Object O{
+      {"observation", Label}, {"capture", Expr}, {"reason", ToString(Kind)}};
+
+  // A condition is not a capture: it decides whether a hit is recorded at all,
+  // so one that cannot be evaluated leaves an observation looking like code
+  // that never ran. Named rather than implied.
+  if (IsCondition)
+    O["field"] = "when";
+
+  if (!Reason.empty())
+    O["detail"] = Reason;
+  if (!FixedExpr.empty()) {
+    O["fixed_as"] = FixedExpr;
+    // A fixit that was suggested and failed as well is not a fix, and a caller
+    // who read it as one would adopt a spelling that never resolved.
+    O["fix_applied"] = FixApplied;
+  }
+  if (!Candidates.Names.empty()) {
+    json::Array Names;
+    for (const std::string &Name : Candidates.Names)
+      Names.push_back(Name);
+    O["candidates"] = std::move(Names);
+    // What the list was drawn from, so that six names read as a selection from
+    // forty rather than as everything there was.
+    if (Candidates.InScope > Candidates.Names.size())
+      O["candidates_of"] = static_cast<int64_t>(Candidates.InScope);
+  }
+  O["disabled"] = Disabled;
   return O;
 }
 
@@ -827,6 +1023,18 @@ json::Value ObservationResult::Render() const {
   if (const json::Object *Agg = Aggregate.getAsObject(); Agg && !Agg->empty())
     O["aggregate"] = Aggregate;
 
+  // Above the aggregate in the reading order that matters: a capture that could
+  // not be read is a fault in the request, and the aggregate is where a caller
+  // goes for an answer rather than for a correction. Reached the other way it
+  // is an escaped JSON document nested under a label, which is where reading
+  // stops.
+  if (!CaptureFailures.empty()) {
+    json::Array Rendered;
+    for (const CaptureFailureReport &Failure : CaptureFailures)
+      Rendered.push_back(Failure.Render());
+    O["capture_failures"] = std::move(Rendered);
+  }
+
   if (!Profile.getAsNull())
     O["profile"] = Profile;
 
@@ -912,13 +1120,65 @@ struct ObservationSite {
 
   struct CaptureState {
     std::string Expr;
+
+    /// The spelling actually evaluated, once a fixit has repaired the one given
+    /// and the repair has resolved. Set at most once per run: the rewrite is a
+    /// property of the expression and the types around it, and re-deciding it
+    /// per hit would let the effective spelling drift.
+    ///
+    /// The aggregate and the hit tuples stay keyed on \ref Expr. A key is the
+    /// caller's handle on what they asked for, it is fixed before the run
+    /// starts, and keying on the fixed spelling would both introduce a key
+    /// nobody wrote and split one histogram in two at whichever hit the fixit
+    /// was found.
+    std::string FixedExpr;
+
+    /// A fixit that was offered and did not resolve either. Kept apart from
+    /// \ref FixedExpr because it must not be adopted -- it is a suggestion the
+    /// compiler could not make work -- and reported, because it is still the
+    /// closest thing to a correction anyone has.
+    std::string SuggestedFix;
+
     ValueResolutionTier Tier = ValueResolutionTier::Unresolved;
     uint64_t Evaluations = 0;
     uint64_t Errors = 0;
     Micros Spent{0};
     std::optional<CaptureCostDecision> Disabled;
+
+    /// How the most recent failure was classified, and the evaluator's own
+    /// account of it.
+    CaptureFailure Failure = CaptureFailure::Situational;
+    std::string FailureReason;
+
+    /// Names that were in scope, gathered once at the first stable failure. Not
+    /// per hit: the gathering walks debug info, and a capture failing the same
+    /// way at every hit would pay for the same answer every time.
+    CaptureCandidates Candidates;
+    bool Diagnosed = false;
+
+    /// Modules loaded when the capture was turned off.
+    ///
+    /// A name that resolves nowhere now resolves once the library defining it
+    /// is loaded, and that is the one thing that can make a stable failure stop
+    /// being one. So the answer is allowed to change exactly when the thing
+    /// that could change it does: a capture turned off is tried again after a
+    /// module arrives, and reported as resolved if it then resolves. That is
+    /// the rule an unresolved tracepoint location already follows by re-reading
+    /// its location count after the run rather than before it.
+    size_t DisabledAtModules = 0;
   };
   std::vector<CaptureState> Captures;
+
+  /// The `when` condition's adopted fixit, and how it last failed. A condition
+  /// decides whether a hit is recorded at all, so one that cannot be evaluated
+  /// leaves the observation reporting hits and no values -- which reads as code
+  /// that ran and held nothing rather than as a condition that never worked.
+  std::string WhenFixedExpr;
+  std::string WhenSuggestedFix;
+  CaptureFailure WhenFailure = CaptureFailure::Situational;
+  std::string WhenFailureReason;
+  CaptureCandidates WhenCandidates;
+  bool WhenDiagnosed = false;
 
   /// Where an `on: return` observation is taken.
   ReturnSet Returns;
@@ -982,6 +1242,17 @@ constexpr size_t MaxTerminalLocals = 32;
 /// each side of a transition, and in the artifact -- so a value that is large
 /// once is large many times over.
 constexpr unsigned MaxCaptureChars = 300;
+
+/// Characters of the evaluator's account of a failure that are reported.
+///
+/// A clang parse failure carries the evaluator describing itself, the source
+/// line, caret art and one diagnostic per objection, of which the `error:` line
+/// is the answer. \ref CondenseDiagnostic reduces it to that line; this bounds
+/// what is left, because one objection can still name a fully-qualified
+/// template type twice. Said once per failing capture rather than once per hit,
+/// so the bound is about a reader's attention rather than about the response
+/// size.
+constexpr unsigned MaxFailureReasonChars = 400;
 
 /// Value-tree nodes the terminal event's locals may spend between them. Sized so
 /// that a frame of scalars and small structs comes back whole, while one local
@@ -1266,6 +1537,86 @@ ValueResolutionOptions ObservationEngine::CaptureOptions() const {
   return Opts;
 }
 
+CaptureCandidates ObservationEngine::CandidatesFor(StringRef Expr,
+                                                   CaptureFailure Kind,
+                                                   StackFrame *Frame) {
+  std::vector<std::string> InScope;
+
+  switch (Kind) {
+  case CaptureFailure::Situational:
+  case CaptureFailure::Malformed:
+    // A value that is merely absent here, or an expression that does not parse,
+    // is not a name anything could be suggested against.
+    return {};
+
+  case CaptureFailure::UnknownName: {
+    if (!Frame)
+      return {};
+    // Globals excluded: the frame's own parameters and locals are what a caller
+    // writing a bare name at a source location almost always meant, and the
+    // file's globals are a much longer list that would crowd them out of a
+    // bounded one. Synthetic variables likewise: a name a formatter invented is
+    // not one the caller can be told to write.
+    VariableList *Vars =
+        Frame->GetVariableList(/*get_file_globals=*/false,
+                               /*include_synthetic_vars=*/false,
+                               /*error_ptr=*/nullptr);
+    if (!Vars)
+      return {};
+    for (size_t I = 0, E = Vars->GetSize(); I != E; ++I)
+      if (lldb::VariableSP Var = Vars->GetVariableAtIndex(I))
+        if (StringRef Name = Var->GetName().GetStringRef(); !Name.empty())
+          InScope.push_back(Name.str());
+    break;
+  }
+
+  case CaptureFailure::UnknownMember: {
+    // The part of the path before the member that failed. It resolved -- that
+    // is why the compiler got as far as objecting to the member -- so resolving
+    // it again reaches the same object, and its children are the type's fields.
+    const size_t Split = Expr.find_last_of(".>");
+    if (Split == StringRef::npos || !Frame)
+      return {};
+    StringRef Prefix = Expr.take_front(Split + 1).rtrim(".>-");
+    if (Prefix.empty())
+      return {};
+
+    // Resolved through the frame's path parser directly rather than through
+    // ResolveValueDWIM, which falls through to the expression evaluator when
+    // the path tier fails. Compiling here would spend the run's wall clock on a
+    // capture that has already been given up, which is the opposite of what
+    // stopping a stable failure early is for.
+    const bool AllowPointerPaths = CaptureOptions().AllowPointerPaths;
+    if (!IsVariablePathEligible(Prefix, AllowPointerPaths))
+      return {};
+
+    lldb::VariableSP Unused;
+    Status PathStatus;
+    lldb::ValueObjectSP Base = Frame->GetValueForVariableExpressionPath(
+        Prefix, lldb::eDynamicDontRunTarget,
+        StackFrame::eExpressionPathOptionsAllowDirectIVarAccess |
+            StackFrame::eExpressionPathOptionsDisallowGlobals,
+        Unused, PathStatus,
+        AllowPointerPaths ? lldb::eDILModeLegacy : lldb::eDILModeSimple);
+    if (!Base || PathStatus.Fail() || Base->GetError().Fail())
+      return {};
+
+    // A pointer to an aggregate exposes the pointee's members as its own
+    // children, so the fields are reached without a dereference step. Errors
+    // are ignored: a type whose children cannot all be counted still has the
+    // ones that were, and the names are all that is wanted.
+    const uint32_t NumChildren = Base->GetNumChildrenIgnoringErrors();
+    for (uint32_t I = 0; I != NumChildren; ++I)
+      if (lldb::ValueObjectSP Child = Base->GetChildAtIndex(I))
+        if (StringRef Name = Child->GetName().GetStringRef(); !Name.empty())
+          InScope.push_back(Name.str());
+    break;
+  }
+  }
+
+  return RankCaptureCandidates(Expr, std::move(InScope));
+}
+
 Micros ObservationEngine::Remaining() const {
   const Micros Budget = std::chrono::seconds(m_plan.TimeoutSeconds);
   // Measured from the launch rather than from the call, so that reading a
@@ -1362,21 +1713,68 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
   const Observation &Obs = *Site.Obs;
 
   if (Obs.WhenExpr) {
+    // As for a capture: once a fixit has repaired the condition and the repair
+    // has run, that is what gets evaluated for the rest of the run.
+    StringRef Effective = Site.WhenFixedExpr.empty()
+                              ? StringRef(*Obs.WhenExpr)
+                              : StringRef(Site.WhenFixedExpr);
+
     const Clock::time_point Started = Clock::now();
-    ValueResolution Resolved = ResolveValueDWIM(*Obs.WhenExpr, Frame, *m_target,
-                                                Frame, CaptureOptions());
+    ValueResolution Resolved =
+        ResolveValueDWIM(Effective, Frame, *m_target, Frame, CaptureOptions());
     Site.ConditionSpent +=
         std::chrono::duration_cast<Micros>(Clock::now() - Started);
 
+    if (Resolved.Tier == ValueResolutionTier::Unresolved) {
+      // Diagnosed at the first failure only. A condition is never turned off,
+      // so it is evaluated at every hit of the run, and condensing a diagnostic
+      // and gathering candidates at each one would repeat that work a hundred
+      // times over to report it once.
+      if (!Site.WhenDiagnosed) {
+        Site.WhenDiagnosed = true;
+        // Classified and described the way the capture loop does it, for the
+        // same reason.
+        const char *Raw = Resolved.Error.AsCString("");
+        Site.WhenFailure = ClassifyCaptureFailure(Raw);
+        Site.WhenFailureReason = DescribeCaptureFailure(Raw, Site.WhenFailure,
+                                                        MaxFailureReasonChars);
+        if (!Resolved.FixedExpression.empty() &&
+            Resolved.FixedExpression != Effective)
+          Site.WhenSuggestedFix = Resolved.FixedExpression;
+        if (IsStableFailure(Site.WhenFailure))
+          Site.WhenCandidates =
+              CandidatesFor(Effective, Site.WhenFailure, Frame);
+      }
+    } else if (Site.WhenFixedExpr.empty() &&
+               !Resolved.FixedExpression.empty() &&
+               Resolved.FixedExpression != *Obs.WhenExpr) {
+      Site.WhenFixedExpr = Resolved.FixedExpression;
+    }
+
     // A condition is never turned off by cost control. Dropping it would start
     // recording the hits it exists to exclude, which is a different run rather
-    // than a cheaper one.
+    // than a cheaper one. That holds for a condition that cannot resolve as
+    // well: a condition assumed true would record every hit, and one assumed
+    // false would record none, and neither is the run that was asked for. So a
+    // stable failure here is reported rather than acted on -- which is why it
+    // has to be reported somewhere a caller reads.
     std::optional<bool> Held;
     if (Resolved.Value) {
       Expected<bool> AsBool = Resolved.Value->GetValueAsBool();
       if (AsBool)
         Held = *AsBool;
-      else
+      else if (!Site.WhenDiagnosed) {
+        // A condition that resolved and is not a truth value -- `"when":
+        // "Node"` where Node is a struct -- fails for a reason the resolution
+        // never saw, so the diagnostic has to be taken from here or the report
+        // has none. Left Situational, and the class set rather than left alone,
+        // so the reason and the detail beside it cannot come from different
+        // hits.
+        Site.WhenDiagnosed = true;
+        Site.WhenFailure = CaptureFailure::Situational;
+        Site.WhenFailureReason = CondenseDiagnostic(
+            toString(AsBool.takeError()), MaxFailureReasonChars);
+      } else
         consumeError(AsBool.takeError());
     }
     if (!Held) {
@@ -1437,11 +1835,28 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     }
   }
 
+  // Read once per hit rather than per capture, and only where a capture has
+  // been turned off and so has something to re-check.
+  std::optional<size_t> Modules;
+  auto LoadedModules = [&]() -> size_t {
+    if (!Modules)
+      Modules = m_target ? m_target->GetImages().GetSize() : 0;
+    return *Modules;
+  };
+
   for (ObservationSite::CaptureState &Capture : Site.Captures) {
     if (!ReadState)
       break;
-    if (Capture.Disabled)
-      continue;
+    if (Capture.Disabled) {
+      // A name resolves nowhere until the library defining it is loaded, and
+      // then it resolves. That is the one event that can make a settled failure
+      // unsettled, so it is the one event that undoes the decision -- and
+      // nothing else does, which is what keeps a capture that was given up from
+      // being paid for again at every hit.
+      if (LoadedModules() <= Capture.DisabledAtModules)
+        continue;
+      Capture.Disabled.reset();
+    }
 
     // The return value is produced above, from the ABI rather than from a
     // variable of that name. Resolving it here as well would record a second
@@ -1462,22 +1877,63 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     // local to be found in.
     ExecutionContextScope *Scope = Frame;
     if (Obs.OnReturn) {
-      lldb::ThreadSP T = Frame ? Frame->GetThread() : nullptr;
+      lldb::ThreadSP T = Frame ? Frame->GetThread() : lldb::ThreadSP();
       Scope = T ? static_cast<ExecutionContextScope *>(T.get())
                 : static_cast<ExecutionContextScope *>(m_target.get());
     }
 
+    // A fixit already adopted is what gets evaluated. The evaluator applies one
+    // itself and retries, so leaving the original in place would pay a failed
+    // parse plus the retry at every remaining hit to reach the same expression.
+    StringRef Effective = Capture.FixedExpr.empty()
+                              ? StringRef(Capture.Expr)
+                              : StringRef(Capture.FixedExpr);
+
     const Clock::time_point Started = Clock::now();
     ValueResolution Resolved =
-        ResolveValueDWIM(Capture.Expr, Obs.OnReturn ? nullptr : Frame,
-                         *m_target, Scope, CaptureOptions());
+        ResolveValueDWIM(Effective, Obs.OnReturn ? nullptr : Frame, *m_target,
+                         Scope, CaptureOptions());
     const Micros Elapsed =
         std::chrono::duration_cast<Micros>(Clock::now() - Started);
     Capture.Spent += Elapsed;
     ++Capture.Evaluations;
     Capture.Tier = Resolved.Tier;
-    if (Resolved.Tier == ValueResolutionTier::Unresolved)
+
+    if (Resolved.Tier == ValueResolutionTier::Unresolved) {
       ++Capture.Errors;
+      // Classified against the whole diagnostic, and described from the line
+      // that decided the class. A single expression draws more than one
+      // objection -- a misspelled member reached with a dot through a pointer
+      // draws both "is a pointer; did you mean to use '->'" and "no member
+      // named", in that order -- so taking either the class or the wording from
+      // the first line alone gets one of the two wrong.
+      const char *Raw = Resolved.Error.AsCString("");
+      Capture.Failure = ClassifyCaptureFailure(Raw);
+      Capture.FailureReason =
+          DescribeCaptureFailure(Raw, Capture.Failure, MaxFailureReasonChars);
+
+      // A fixit offered against an expression that still did not resolve is a
+      // suggestion, not a repair. Reported, never adopted: adopting it would
+      // pin the capture to a spelling that has been shown not to work.
+      if (!Resolved.FixedExpression.empty() &&
+          Resolved.FixedExpression != Effective)
+        Capture.SuggestedFix = Resolved.FixedExpression;
+
+      // Gathered at the first failure worth explaining, and once. The names do
+      // not change between hits of the same location, and walking for them at
+      // every hit would cost the run what stopping early just saved it.
+      if (!Capture.Diagnosed && IsStableFailure(Capture.Failure)) {
+        Capture.Candidates = CandidatesFor(Effective, Capture.Failure,
+                                           Obs.OnReturn ? nullptr : Frame);
+        Capture.Diagnosed = true;
+      }
+    } else if (Capture.FixedExpr.empty() && !Resolved.FixedExpression.empty() &&
+               Resolved.FixedExpression != Capture.Expr) {
+      // The evaluator repaired the expression and the repair ran. Adopting it
+      // is what makes the rest of the run cost one parse per hit instead of
+      // two; the aggregate stays keyed on what the caller wrote.
+      Capture.FixedExpr = Resolved.FixedExpression;
+    }
 
     ValueObjectNode Node(Resolved.Value);
     SerializeValueOptions SOpts;
@@ -1515,10 +1971,20 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     Cost.Remaining = Remaining();
     Cost.Errors = Capture.Errors;
     Cost.AtReturn = Obs.OnReturn;
+    Cost.Failure = Capture.Failure;
+    // Read from the breakpoint rather than from the pre-launch report, since a
+    // location that arrived with a library counts: it is another program
+    // counter this name may be in scope at.
+    if (Site.Breakpoint)
+      Cost.Locations =
+          static_cast<uint32_t>(Site.Breakpoint->GetNumLocations());
+    // The caller's own spelling, matching the key this capture is filed under.
     Cost.Expr = Capture.Expr;
     if (CaptureCostDecision Decision = AssessCaptureCost(Cost);
-        Decision.Disable)
+        Decision.Disable) {
       Capture.Disabled = std::move(Decision);
+      Capture.DisabledAtModules = LoadedModules();
+    }
   }
 
   m_tail_labels.push_back(Obs.Label);
@@ -2152,6 +2618,7 @@ Expected<ObservationResult> ObservationEngine::Run() {
     for (const ObservationSite::CaptureState &Capture : Site->Captures) {
       CaptureReport Rendered;
       Rendered.Expr = Capture.Expr;
+      Rendered.FixedExpr = Capture.FixedExpr;
       Rendered.Tier = Capture.Tier;
       Rendered.Evaluations = Capture.Evaluations;
       Rendered.Errors = Capture.Errors;
@@ -2160,6 +2627,69 @@ Expected<ObservationResult> ObservationEngine::Run() {
       Rendered.FromABI =
           Site->Obs->OnReturn && Capture.Expr == ReturnValueCapture;
       Report.Captures.push_back(std::move(Rendered));
+
+      // Read after the run rather than at the failure, which is the same rule
+      // an unresolved tracepoint location follows just above: a capture that
+      // failed early and resolved later is reported as resolved, because what
+      // the caller needs to know is whether the value was ever readable and not
+      // whether the first attempt worked. So a capture still failing at every
+      // one of its evaluations is what earns an entry, and one that recovered
+      // silently drops out.
+      if (Capture.Evaluations == 0 || Capture.Errors != Capture.Evaluations)
+        continue;
+      if (Site->Obs->OnReturn && Capture.Expr == ReturnValueCapture)
+        continue;
+
+      CaptureFailureReport Failure;
+      Failure.Label = Site->Obs->Label;
+      Failure.Expr = Capture.Expr;
+      Failure.Kind = Capture.Failure;
+      Failure.Reason = Capture.FailureReason;
+      Failure.Candidates = Capture.Candidates;
+      Failure.Disabled = Capture.Disabled.has_value();
+      // An adopted fixit and a merely suggested one are both worth reporting
+      // and must not read alike: one is what ran, the other is what the
+      // compiler guessed and could not make work either.
+      if (!Capture.FixedExpr.empty()) {
+        Failure.FixedExpr = Capture.FixedExpr;
+        Failure.FixApplied = true;
+      } else if (!Capture.SuggestedFix.empty()) {
+        Failure.FixedExpr = Capture.SuggestedFix;
+      }
+      m_result.CaptureFailures.push_back(std::move(Failure));
+    }
+
+    // A condition that never once evaluated is not a condition that never held.
+    // The first reads as an observation whose code ran and whose values were
+    // all uninteresting, which is the one conclusion it must not be allowed to
+    // support, since a hit whose condition failed is neither captured nor
+    // emitted.
+    //
+    // Counted against the times the condition was evaluated rather than against
+    // the observation's hits: the two differ by `skip_first`, whose hits never
+    // reach the condition at all, and comparing with the hits would silently
+    // drop the report for any plan that skipped one.
+    const uint64_t ConditionEvaluated =
+        Site->ConditionTrue + Site->ConditionErrors;
+    if (Site->Obs->WhenExpr && ConditionEvaluated != 0 &&
+        Site->ConditionErrors == ConditionEvaluated) {
+      CaptureFailureReport Failure;
+      Failure.Label = Site->Obs->Label;
+      Failure.Expr = *Site->Obs->WhenExpr;
+      Failure.Kind = Site->WhenFailure;
+      Failure.Reason = Site->WhenFailureReason;
+      Failure.Candidates = Site->WhenCandidates;
+      Failure.IsCondition = true;
+      // Never: a condition is not turned off, because a run that stopped
+      // evaluating it would be recording different hits rather than fewer.
+      Failure.Disabled = false;
+      if (!Site->WhenFixedExpr.empty()) {
+        Failure.FixedExpr = Site->WhenFixedExpr;
+        Failure.FixApplied = true;
+      } else if (!Site->WhenSuggestedFix.empty()) {
+        Failure.FixedExpr = Site->WhenSuggestedFix;
+      }
+      m_result.CaptureFailures.push_back(std::move(Failure));
     }
 
     // A capture that failed at every hit of a return observation is almost

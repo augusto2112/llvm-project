@@ -604,42 +604,6 @@ Suggestions CollectCandidateNames(Target &Tgt, StringRef At) {
   return Result;
 }
 
-/// The names closest to \p Wanted, nearest first, at most \p Limit of them.
-///
-/// Compared on the last component alone and reported whole, so that a caller who
-/// wrote a bare name is answered with the qualified one it belongs to rather than
-/// with nothing: a scope the caller never wrote is not a mistake they made.
-std::vector<StringRef> NearestNames(StringRef Wanted,
-                                    ArrayRef<std::string> Names, size_t Limit) {
-  const StringRef WantedBase = BaseName(Wanted);
-  const unsigned Tolerance = NameTolerance(WantedBase);
-
-  SmallVector<std::pair<unsigned, StringRef>, 8> Ranked;
-  for (StringRef Name : Names) {
-    unsigned Distance = WantedBase.edit_distance(
-        BaseName(Name), /*AllowReplacements=*/true, Tolerance);
-    // An exact match is not a suggestion: repeating the name back says nothing
-    // about why it did not resolve.
-    if (Distance != 0 && Distance <= Tolerance)
-      Ranked.emplace_back(Distance, Name);
-  }
-
-  // Names arrive sorted, so a stable sort leaves equally close names in
-  // alphabetical order.
-  llvm::stable_sort(Ranked, [](const std::pair<unsigned, StringRef> &A,
-                               const std::pair<unsigned, StringRef> &B) {
-    return A.first < B.first;
-  });
-
-  std::vector<StringRef> Nearest;
-  for (const std::pair<unsigned, StringRef> &Candidate : Ranked) {
-    if (Nearest.size() >= Limit)
-      break;
-    Nearest.push_back(Candidate.second);
-  }
-  return Nearest;
-}
-
 std::string DescribeUnresolved(StringRef At, const Suggestions &Found) {
   std::vector<StringRef> Nearest = NearestNames(At, Found.Names, /*Limit=*/3);
 
@@ -671,6 +635,38 @@ std::string DescribeUnresolved(StringRef At, const Suggestions &Found) {
 }
 
 } // namespace
+
+std::vector<StringRef>
+lldb_private::mcp::NearestNames(StringRef Wanted, ArrayRef<std::string> Names,
+                                size_t Limit) {
+  const StringRef WantedBase = BaseName(Wanted);
+  const unsigned Tolerance = NameTolerance(WantedBase);
+
+  SmallVector<std::pair<unsigned, StringRef>, 8> Ranked;
+  for (StringRef Name : Names) {
+    unsigned Distance = WantedBase.edit_distance(
+        BaseName(Name), /*AllowReplacements=*/true, Tolerance);
+    // An exact match is not a suggestion: repeating the name back says nothing
+    // about why it did not resolve.
+    if (Distance != 0 && Distance <= Tolerance)
+      Ranked.emplace_back(Distance, Name);
+  }
+
+  // Names arrive sorted, so a stable sort leaves equally close names in
+  // alphabetical order.
+  llvm::stable_sort(Ranked, [](const std::pair<unsigned, StringRef> &A,
+                               const std::pair<unsigned, StringRef> &B) {
+    return A.first < B.first;
+  });
+
+  std::vector<StringRef> Nearest;
+  for (const std::pair<unsigned, StringRef> &Candidate : Ranked) {
+    if (Nearest.size() >= Limit)
+      break;
+    Nearest.push_back(Candidate.second);
+  }
+  return Nearest;
+}
 
 StringRef lldb_private::mcp::ToString(EmitMode Mode) {
   switch (Mode) {

@@ -299,6 +299,38 @@ covers. The usual reason is a fact about where the observation is taken rather
 than about any one expression — at a return site none of the function's own names
 can be read — and stating it per capture repeated one sentence once per name.
 
+A capture that could not be read *at all* is reported at top level in
+`capture_failures`, not only as a count beside the expression. Each entry names
+the observation, the capture as it was written, a `reason` — `no_such_name`,
+`no_such_member`, `malformed` or `not_available_here` — the `detail` the compiler
+gave, whether the capture was `disabled`, and `candidates`: names that were in
+scope, drawn from the frame's own parameters and locals for a name that does not
+resolve and from the type's fields for a member it does not have. A `when`
+condition that failed appears the same way, marked `field: "when"`. The list is
+bounded and reports `candidates_of` — how many names it was selected from — so a
+short list is not read as everything there was.
+
+The distinction that decides how soon a capture is given up on is whether its
+failure can come out differently later. A member a type does not have, a name
+nothing declares, an expression that does not parse: these fail identically at
+every hit, so they are stopped at the first one rather than after three, and
+retrying them would only buy compiles. A value optimised out here, or reached
+through a pointer that is null just now, is a different question at the next hit
+and is kept. A capture given up on is tried again if a module loads, because a
+name in a library that has not been loaded yet is spelled correctly and does not
+resolve — and a capture that failed early and resolved later is reported as
+resolved, since what is read is the state after the run rather than the first
+attempt.
+
+Where the expression evaluator repairs a capture with a fix-it and the repair
+works, the fixed spelling is adopted for the rest of the run — otherwise every
+remaining hit pays a failed parse and then the retry — and reported as `fixed_as`
+beside the capture. The `aggregate` and `plan_report` stay keyed on the spelling
+that was *sent*, so a request can be correlated with its histogram; `fixed_as` is
+what connects the two. A fix-it that was offered and still did not resolve is
+reported with `fix_applied: false` and is not adopted: it is a suggestion the
+compiler could not make work either.
+
 Function names in a backtrace have their template arguments replaced with an
 ellipsis. What those arguments distinguish is one instantiation from another, and
 the file and line reported beside the name already do that; in template-heavy code
@@ -357,7 +389,10 @@ object reached through a null pointer -- are reported as that one reason.
 
 Capture more expressions than seems necessary. A capture costs wall clock once
 per run, not tokens per exchange, and the alternative to capturing something now
-is running the whole program again to ask one more question.
+is running the whole program again to ask one more question. A guess that was
+wrong is cheap: a capture that cannot resolve is stopped at its first hit and
+reported in `capture_failures` with the names that were in scope, so
+over-capturing costs one compile per bad guess rather than one per hit.
 
 ## A Typical Session
 
@@ -694,7 +729,8 @@ means choosing the DIL mode to match, or every pointer path fails under
 
 `lldb/unittests/Protocol/` holds the unit tests: the plan parser, the
 serializer, the aggregate, the artifact, and the engine's pure decisions —
-emission, expression-cost control, frame arming, and frame ranking. Everything
+emission, expression-cost control, capture-failure classification and candidate
+ranking, frame arming, and frame ranking. Everything
 needing a live process is in `lldb/test/API/tools/lldb-mcp/observe/`, which
 drives the tool over a Unix socket the way a real client does. That test needs to
 bind a socket, so a sandbox that forbids it will fail the whole file at

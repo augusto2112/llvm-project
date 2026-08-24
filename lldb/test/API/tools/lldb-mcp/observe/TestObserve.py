@@ -1156,3 +1156,183 @@ class ObserveTestCase(TestBase):
         self.assertEqual(len(events), 1, str(events))
         # The one hit that came back is the one the aggregate pointed at.
         self.assertEqual(events[0]["values"]["value"]["value"], "99", str(events))
+
+    def capture_failure(self, document, capture):
+        """The top-level failure entry for one capture, asserted to exist."""
+        failures = document.get("capture_failures", [])
+        for failure in failures:
+            if failure["capture"] == capture:
+                return failure
+        raise AssertionError(
+            f"no capture_failures entry for {capture!r} in {failures}"
+        )
+
+    def test_a_fixit_is_applied_and_reported_once(self):
+        """A dot written on a pointer resolves after the fixit, and the report
+        says which spelling actually ran."""
+        self.build()
+
+        # `o` is an `Outer *`, so `o.c` is not a path and the evaluator repairs it
+        # to `o->c`. That repair happens whether or not anything reports it; what
+        # is under test is that the caller can see it and that the run stops
+        # paying for a failed parse at every hit.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "nested", "capture": ["o.c"]}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["nested"]
+        capture = report["captures"]["o.c"]
+        self.assertEqual(capture["fixed_as"], "o->c", str(capture))
+
+        # Keyed on what the caller wrote, in the report and in the aggregate
+        # alike, so that a request can be correlated with its histogram.
+        self.assertIn("o.c", report["captures"], str(report))
+        self.assertNotIn("o->c", report["captures"], str(report))
+        aggregate = document["aggregate"]["nested"]
+        self.assertIn("o.c", aggregate, str(aggregate))
+        self.assertNotIn("o->c", aggregate, str(aggregate))
+
+        # And the capture worked, so it is not a failure.
+        self.assertNotIn("capture_failures", document, str(document))
+        self.assertEqual(serialized_scalar(list(aggregate["o.c"]["values"])[0]), "3")
+
+    def test_a_stable_failure_is_reported_and_not_retried(self):
+        """A capture naming nothing in scope is reported at top level, disabled,
+        and evaluated exactly once however many hits follow."""
+        self.build()
+
+        # record_value is hit a hundred times, so a capture still being tried
+        # would show it. `valu` is a slip for the parameter `value`.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "record_value", "capture": ["valu"]}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["record_value"]
+        self.assertEqual(report["hits"], 100, str(report))
+
+        # One location, so one program counter, so one scope for the name to be
+        # absent from. A name out of scope where the tracepoint has several
+        # locations keeps its attempts, because differently inlined copies have
+        # different variables in scope -- so this assertion depends on there
+        # being exactly one, and says so rather than failing obscurely.
+        self.assertEqual(report["resolved_locations"], 1, str(report))
+
+        # The claim is about cost, so it is asserted on the count of evaluations
+        # rather than on the wording of the report: one compile, not a hundred.
+        capture = report["captures"]["valu"]
+        self.assertEqual(capture["evaluations"], 1, str(capture))
+        self.assertEqual(capture["errors"], 1, str(capture))
+        self.assertIn("disabled", capture, str(capture))
+
+        failure = self.capture_failure(document, "valu")
+        self.assertEqual(failure["observation"], "record_value", str(failure))
+        self.assertEqual(failure["reason"], "no_such_name", str(failure))
+        self.assertTrue(failure["disabled"], str(failure))
+        # The compiler's own words, not a paraphrase of them.
+        self.assertIn("undeclared identifier", failure["detail"], str(failure))
+        # A bad local is answered with the frame's own names.
+        self.assertEqual(failure["candidates"][0], "value", str(failure))
+
+    def test_a_bad_member_is_answered_with_the_types_fields(self):
+        """A member the type does not have lists the members it does."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "nested", "capture": ["o.chidren", "o.nmae"]}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+
+        # `o.chidren` draws both "is a pointer; did you mean '->'" and "no member
+        # named", and the member name is the fault: applying the arrow reaches the
+        # same type and still finds no such member.
+        missing = self.capture_failure(document, "o.chidren")
+        self.assertEqual(missing["reason"], "no_such_member", str(missing))
+        self.assertEqual(sorted(missing["candidates"]), ["c", "in", "name"])
+
+        # A near miss is ranked ahead of the rest rather than merely included.
+        typo = self.capture_failure(document, "o.nmae")
+        self.assertEqual(typo["reason"], "no_such_member", str(typo))
+        self.assertEqual(typo["candidates"][0], "name", str(typo))
+
+    def test_a_situational_failure_is_kept_and_reported_as_resolved(self):
+        """A capture unavailable at some hits and available at others is not
+        given up on, and is not reported as a failure."""
+        self.build()
+
+        # sometimes_null is called three times with a null pointer and three
+        # times with a real one, so the capture fails first and then works.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "sometimes_null", "capture": ["o->c"]}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["sometimes_null"]
+        self.assertEqual(report["hits"], 6, str(report))
+
+        capture = report["captures"]["o->c"]
+        # Every hit was tried: giving up here would have lost the three readings
+        # that worked.
+        self.assertEqual(capture["evaluations"], 6, str(capture))
+        self.assertNotIn("disabled", capture, str(capture))
+        self.assertGreater(capture["errors"], 0, str(capture))
+
+        # Read after the run, the same rule an unresolved tracepoint location
+        # follows: a capture that recovered is reported as resolved rather than as
+        # the failure its first hit was.
+        for failure in document.get("capture_failures", []):
+            self.assertNotEqual(failure["capture"], "o->c", str(failure))
+
+        # And the values that were readable are in the aggregate.
+        values = document["aggregate"]["sometimes_null"]["o->c"]["values"]
+        self.assertIn("3", [serialized_scalar(key) for key in values], str(values))
+
+    def test_a_condition_that_cannot_be_evaluated_says_so(self):
+        """A `when` that never resolves is reported as a condition, not left as
+        an observation that recorded nothing."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"at": "record_value", "when": "valu == 7", "capture": ["value"]}
+                ],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["record_value"]
+        # The counts that already existed: the code ran, and the condition was
+        # never once evaluable.
+        self.assertEqual(report["hits"], 100, str(report))
+        self.assertEqual(report["condition_true"], 0, str(report))
+        self.assertEqual(report["condition_errors"], 100, str(report))
+
+        # None of which says the condition was the problem, which is what the
+        # top-level entry is for.
+        failure = self.capture_failure(document, "valu == 7")
+        self.assertEqual(failure["field"], "when", str(failure))
+        self.assertEqual(failure["reason"], "no_such_name", str(failure))
+        # A condition is never turned off: a run that stopped evaluating it would
+        # be recording different hits rather than fewer.
+        self.assertFalse(failure["disabled"], str(failure))

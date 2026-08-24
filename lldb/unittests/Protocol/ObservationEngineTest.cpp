@@ -894,3 +894,333 @@ TEST(ObservationEngineTest, ACaptureOnAnObservationThatNeverFiredIsAWord) {
   Capture.Tier = ValueResolutionTier::Unresolved;
   EXPECT_NE(Render(Capture.Render()).find("unavailable"), std::string::npos);
 }
+
+//===----------------------------------------------------------------------===//
+// Capture failure classification
+//===----------------------------------------------------------------------===//
+
+TEST(ObservationEngineTest, AMemberATypeDoesNotHaveIsAStableFailure) {
+  // The base of the path resolved, or the compiler would not have got as far as
+  // objecting to the member. A type's members come from its own definition, so
+  // no later hit and no library loading can add the one that is missing.
+  EXPECT_EQ(ClassifyCaptureFailure(
+                "error: no member named 'chidren' in 'llvm::SDNode'"),
+            CaptureFailure::UnknownMember);
+  EXPECT_TRUE(IsStableFailure(CaptureFailure::UnknownMember));
+}
+
+TEST(ObservationEngineTest, ANameThatIsNotInScopeIsAStableFailure) {
+  EXPECT_EQ(ClassifyCaptureFailure("error: use of undeclared identifier 'Idx'"),
+            CaptureFailure::UnknownName);
+  EXPECT_TRUE(IsStableFailure(CaptureFailure::UnknownName));
+}
+
+TEST(ObservationEngineTest, AFixitThatDidNotRepairTheShapeIsAStableFailure) {
+  // A pointer/dot confusion carries a fixit, and the evaluator applies it and
+  // retries by itself. Reaching a failure with this wording means the retry
+  // failed too, so the expression is wrong about the types rather than merely
+  // misspelled.
+  EXPECT_EQ(ClassifyCaptureFailure("error: member reference type 'SDNode *' is "
+                                   "a pointer; did you mean to use '->'?"),
+            CaptureFailure::Malformed);
+  EXPECT_EQ(ClassifyCaptureFailure(
+                "error: member reference base type 'int' is not a structure or "
+                "union"),
+            CaptureFailure::Malformed);
+  EXPECT_TRUE(IsStableFailure(CaptureFailure::Malformed));
+}
+
+TEST(ObservationEngineTest, AValueMerelyAbsentHereIsNotAStableFailure) {
+  // Optimised out at this location, or reached through a pointer that is null
+  // just now: the next hit is a fresh question and the capture is kept.
+  EXPECT_EQ(ClassifyCaptureFailure("variable not available"),
+            CaptureFailure::Situational);
+  EXPECT_EQ(ClassifyCaptureFailure("parent is NULL"),
+            CaptureFailure::Situational);
+  EXPECT_FALSE(IsStableFailure(CaptureFailure::Situational));
+}
+
+TEST(ObservationEngineTest, AnUnrecognisedDiagnosticIsTreatedAsSituational) {
+  // The classification reads compiler wording, which changes. Failing that way
+  // has to cost a capture some retries rather than abandon one that would have
+  // worked, so anything unknown is the class that is never given up on.
+  EXPECT_EQ(ClassifyCaptureFailure("error: something nobody has seen yet"),
+            CaptureFailure::Situational);
+  EXPECT_EQ(ClassifyCaptureFailure(""), CaptureFailure::Situational);
+}
+
+TEST(ObservationEngineTest, AStableFailureIsStoppedAtTheFirstHit) {
+  // Well inside the time budget, so this cannot be the cost test firing.
+  CaptureCostInput In = Cost(Ms(1), 1, Ms(100000));
+  In.Tier = ValueResolutionTier::Unresolved;
+  In.Errors = 1;
+  In.Failure = CaptureFailure::UnknownMember;
+
+  CaptureCostDecision Off = AssessCaptureCost(In);
+  ASSERT_TRUE(Off.Disable);
+  // The reason and the candidate names are real JSON at top level, so the note
+  // points there rather than saying it again at length in prose.
+  EXPECT_NE(Off.Note.find("capture_failures"), std::string::npos) << Off.Note;
+}
+
+TEST(ObservationEngineTest, ASituationalFailureStillGetsItsAttempts) {
+  // The three attempts exist for a pointer that is null at the first hit and
+  // set at the second, and classifying a failure does not take them away.
+  CaptureCostInput In = Cost(Ms(1), 1, Ms(100000));
+  In.Tier = ValueResolutionTier::Unresolved;
+  In.Errors = 1;
+  In.Failure = CaptureFailure::Situational;
+  EXPECT_FALSE(AssessCaptureCost(In).Disable);
+
+  In.ObservedHits = UnresolvableCaptureAttempts;
+  In.TotalHits = UnresolvableCaptureAttempts;
+  In.Errors = UnresolvableCaptureAttempts;
+  EXPECT_TRUE(AssessCaptureCost(In).Disable);
+}
+
+TEST(ObservationEngineTest, AReturnSiteKeepsItsOwnExplanation) {
+  // A capture of a function's own local, taken at its return, fails stably --
+  // and "no such name" is the wrong thing to tell that caller, whose
+  // declaration is in exactly the right place. The more specific cause wins.
+  CaptureCostInput In = Cost(Ms(1), 1, Ms(100000), /*Errors=*/1,
+                             /*AtReturn=*/true);
+  In.Failure = CaptureFailure::UnknownName;
+
+  CaptureCostDecision Off = AssessCaptureCost(In);
+  ASSERT_TRUE(Off.Disable);
+  EXPECT_NE(Off.Note.find("already been popped"), std::string::npos)
+      << Off.Note;
+}
+
+TEST(ObservationEngineTest, TheMemberNameWinsWhenAnExpressionDrawsBoth) {
+  // Measured on `o.chidren` where `o` is an `Outer *`: the evaluator objects
+  // both that the dot should be an arrow and that the member does not exist,
+  // and emits them in that order. Applying the arrow reaches the same type and
+  // still finds no such member, so the member name is the fault -- and it is
+  // the reading with somewhere useful to look for candidates.
+  const llvm::StringRef Both =
+      "error: <user expression 0>:1:2: member reference type 'Outer *' is a "
+      "pointer; did you mean to use '->'?\n"
+      "error: <user expression 0>:1:3: no member named 'chidren' in 'Outer'";
+  EXPECT_EQ(ClassifyCaptureFailure(Both), CaptureFailure::UnknownMember);
+
+  // And the detail reported beside that reason is about the same thing. Taking
+  // the first error line would pair "no_such_member" with a sentence about
+  // arrows, which reads as the classification having gone wrong.
+  const std::string Described =
+      DescribeCaptureFailure(Both, CaptureFailure::UnknownMember, 400);
+  EXPECT_NE(Described.find("no member named"), std::string::npos) << Described;
+  EXPECT_EQ(Described.find("did you mean"), std::string::npos) << Described;
+}
+
+TEST(ObservationEngineTest, ADescriptionWithNoDecidingLineFallsBackToTheWhole) {
+  // An execution failure is one line that is itself the diagnostic, with no
+  // marker for any class to match, and it still has to be reported.
+  const std::string Described = DescribeCaptureFailure(
+      "Couldn't apply expression side effects : couldn't read its memory",
+      CaptureFailure::Situational, 400);
+  EXPECT_NE(Described.find("side effects"), std::string::npos) << Described;
+}
+
+//===----------------------------------------------------------------------===//
+// Capture candidates
+//===----------------------------------------------------------------------===//
+
+TEST(ObservationEngineTest, CandidatesPutAPlausibleMisspellingFirst) {
+  CaptureCandidates Found = RankCaptureCandidates(
+      "Node.chidren", {"parent", "children", "name", "flags"});
+  ASSERT_FALSE(Found.Names.empty());
+  EXPECT_EQ(Found.Names.front(), "children");
+  EXPECT_EQ(Found.InScope, 4u);
+}
+
+TEST(ObservationEngineTest, CandidatesCompareOnTheLastComponentAlone) {
+  // Compared whole, every field of the type is equally far from the expression
+  // and the ranking says nothing. `->` and `[` divide a path as `.` does.
+  EXPECT_EQ(
+      RankCaptureCandidates("I->Ty->TypeI", {"TypeID", "Bits"}).Names.front(),
+      "TypeID");
+  EXPECT_EQ(RankCaptureCandidates("Ops[0].Vals", {"Val", "User"}).Names.front(),
+            "Val");
+}
+
+TEST(ObservationEngineTest, CandidatesFallBackToWhatWasActuallyInScope) {
+  // A caller who misremembered a name rather than mistyping it gets no near
+  // match, and a ranking that answered them with nothing would waste the one
+  // piece of evidence there is.
+  CaptureCandidates Found =
+      RankCaptureCandidates("Count", {"Ty", "Ops", "Flags"});
+  EXPECT_EQ(Found.Names, std::vector<std::string>({"Flags", "Ops", "Ty"}));
+}
+
+TEST(ObservationEngineTest, CandidatesAreBoundedAndSayWhatTheyAreDrawnFrom) {
+  std::vector<std::string> Wide;
+  for (unsigned I = 0; I != 40; ++I)
+    Wide.push_back(("Field" + std::to_string(I)).c_str());
+
+  CaptureCandidates Found = RankCaptureCandidates("Missing", Wide);
+  EXPECT_EQ(Found.Names.size(), MaxCaptureCandidates);
+  // Otherwise six names read as everything the type had.
+  EXPECT_EQ(Found.InScope, 40u);
+}
+
+TEST(ObservationEngineTest, CandidatesFromNothingAreNothing) {
+  CaptureCandidates Found = RankCaptureCandidates("Anything", {});
+  EXPECT_TRUE(Found.Names.empty());
+  EXPECT_EQ(Found.InScope, 0u);
+}
+
+//===----------------------------------------------------------------------===//
+// Failure reporting
+//===----------------------------------------------------------------------===//
+
+TEST(ObservationEngineTest, AnAdoptedFixitIsReportedBesideTheCallersSpelling) {
+  // The run is not evaluating what the caller wrote. Beside the key, which is
+  // their own spelling, this is what connects the value to the expression.
+  CaptureReport Capture;
+  Capture.Expr = "I.Ty";
+  Capture.FixedExpr = "I->Ty";
+  Capture.Tier = ValueResolutionTier::Expression;
+  Capture.Evaluations = 12;
+
+  std::string S = Render(Capture.Render());
+  EXPECT_NE(S.find("\"fixed_as\":\"I->Ty\""), std::string::npos) << S;
+}
+
+TEST(ObservationEngineTest, AFixitSurvivesTheShortcutsForAQuietCapture) {
+  // A capture that resolved cheaply and never failed renders as one word. A
+  // rewrite is not something a word can carry, so the shortcut must not swallow
+  // it.
+  CaptureReport Capture;
+  Capture.Expr = "I.Ty";
+  Capture.FixedExpr = "I->Ty";
+  Capture.Tier = ValueResolutionTier::VariablePath;
+  Capture.Evaluations = 3;
+  EXPECT_NE(Render(Capture.Render()).find("fixed_as"), std::string::npos);
+
+  // And a capture on an observation that never fired still renders as a word.
+  CaptureReport Never;
+  Never.Expr = "I.Ty";
+  EXPECT_EQ(Render(Never.Render()), R"("not_evaluated")");
+}
+
+TEST(ObservationEngineTest, AStableFailureIsRealJSONAtTopLevel) {
+  // The shape this replaces is a JSON document escaped into a string nested two
+  // levels under a label, which is where a reader stops reading.
+  ObservationResult Result;
+  Result.Terminal.Description = "exited";
+
+  CaptureFailureReport Failure;
+  Failure.Label = "visit";
+  Failure.Expr = "Node.chidren";
+  Failure.Kind = CaptureFailure::UnknownMember;
+  Failure.Reason = "no member named 'chidren' in 'llvm::SDNode'";
+  Failure.Candidates.Names = {"children", "parent"};
+  Failure.Candidates.InScope = 9;
+  Failure.Disabled = true;
+  Result.CaptureFailures.push_back(std::move(Failure));
+
+  const llvm::json::Value Rendered = Result.Render();
+  const llvm::json::Array *Failures =
+      Rendered.getAsObject()->getArray("capture_failures");
+  ASSERT_NE(Failures, nullptr);
+  ASSERT_EQ(Failures->size(), 1u);
+
+  const llvm::json::Object *Entry = (*Failures)[0].getAsObject();
+  ASSERT_NE(Entry, nullptr);
+  EXPECT_EQ(Entry->getString("observation"),
+            std::optional<llvm::StringRef>("visit"));
+  // Keyed on what the caller wrote, so this entry and the aggregate name the
+  // same thing.
+  EXPECT_EQ(Entry->getString("capture"),
+            std::optional<llvm::StringRef>("Node.chidren"));
+  EXPECT_EQ(Entry->getString("reason"),
+            std::optional<llvm::StringRef>("no_such_member"));
+  EXPECT_EQ(Entry->getBoolean("disabled"), std::optional<bool>(true));
+  // Candidates are a JSON array of names, not a sentence to be parsed.
+  ASSERT_NE(Entry->getArray("candidates"), nullptr);
+  EXPECT_EQ(Render(llvm::json::Value(
+                llvm::json::Array(*Entry->getArray("candidates")))),
+            R"(["children","parent"])");
+  EXPECT_EQ(Entry->getInteger("candidates_of"), std::optional<int64_t>(9));
+}
+
+TEST(ObservationEngineTest, ASuggestedFixitDoesNotReadLikeAnAppliedOne) {
+  // A fixit the compiler could not make work either must not be adopted, and a
+  // caller who read it as what ran would rewrite a capture to a spelling that
+  // has been shown to fail.
+  CaptureFailureReport Failure;
+  Failure.Label = "visit";
+  Failure.Expr = "I.Ty";
+  Failure.FixedExpr = "I->Ty";
+  Failure.FixApplied = false;
+
+  std::string S = Render(Failure.Render());
+  EXPECT_NE(S.find("\"fixed_as\":\"I->Ty\""), std::string::npos) << S;
+  EXPECT_NE(S.find("\"fix_applied\":false"), std::string::npos) << S;
+}
+
+TEST(ObservationEngineTest, AConditionThatNeverEvaluatedSaysSoAsACondition) {
+  // A condition that cannot be evaluated records no hits, which looks exactly
+  // like an observation whose values were all uninteresting.
+  CaptureFailureReport Failure;
+  Failure.Label = "visit";
+  Failure.Expr = "Node.knd == 3";
+  Failure.IsCondition = true;
+
+  EXPECT_NE(Render(Failure.Render()).find("\"field\":\"when\""),
+            std::string::npos);
+}
+
+TEST(ObservationEngineTest, APassingPlanRendersNoFailureArrayAtAll) {
+  // The array is additive. A plan whose captures all resolved has to render
+  // exactly as it did before, or every consumer of the aggregate breaks.
+  ObservationResult Result;
+  Result.Terminal.Description = "exited";
+  ObservationReport Report;
+  Report.Label = "visit";
+  Report.At = "visit";
+  Report.ResolvedLocations = 1;
+  Report.Hits = 12;
+  CaptureReport Capture;
+  Capture.Expr = "I.Ty";
+  Capture.Tier = ValueResolutionTier::VariablePath;
+  Capture.Evaluations = 12;
+  Report.Captures.push_back(std::move(Capture));
+  Result.Observations.push_back(std::move(Report));
+
+  std::string S = Render(Result.Render());
+  EXPECT_EQ(S.find("capture_failures"), std::string::npos) << S;
+  // And the nested per-capture rendering is untouched.
+  EXPECT_NE(S.find("\"captures\":{\"I.Ty\":\"path\"}"), std::string::npos) << S;
+}
+
+TEST(ObservationEngineTest, AnOutOfScopeNameKeepsItsAttemptsAcrossLocations) {
+  // A name is looked up at a program counter, and an observation on a function
+  // name resolves to one location per inlined copy -- each with its own
+  // variables in scope. Dropping the capture at the first hit would lose it at
+  // every later location that did hold it, and losing data is worse than two
+  // more compiles.
+  CaptureCostInput In = Cost(Ms(1), 1, Ms(100000));
+  In.Tier = ValueResolutionTier::Unresolved;
+  In.Errors = 1;
+  In.Failure = CaptureFailure::UnknownName;
+  In.Locations = 27;
+  EXPECT_FALSE(AssessCaptureCost(In).Disable);
+
+  // One location fixes the program counter, so there is no later scope for the
+  // name to appear in and the first failure settles it.
+  In.Locations = 1;
+  EXPECT_TRUE(AssessCaptureCost(In).Disable);
+}
+
+TEST(ObservationEngineTest, AMissingMemberSettlesAtOneFailureAnywhere) {
+  // A type's members are not a fact about a location, so however many locations
+  // the tracepoint has, no later one has a different answer.
+  CaptureCostInput In = Cost(Ms(1), 1, Ms(100000));
+  In.Tier = ValueResolutionTier::Unresolved;
+  In.Errors = 1;
+  In.Failure = CaptureFailure::UnknownMember;
+  In.Locations = 27;
+  EXPECT_TRUE(AssessCaptureCost(In).Disable);
+}

@@ -46,6 +46,12 @@ struct Outer {
 
 int nested(struct Outer *o) { return o->in.a + o->in.b + o->c; }
 
+/* Called with a null pointer at its first calls and a real one at the rest, so
+   that a capture reaching through it is unavailable at some hits and available
+   at others. That is the case a capture must not be given up on: the value is
+   readable, just not yet. */
+int sometimes_null(struct Outer *o) { return o ? o->c : 0; }
+
 /* Recursion gives a backtrace runs of identical frames to collapse. */
 int recurse(int n) { return n <= 0 ? 0 : recurse(n - 1) + 1; }
 
@@ -190,6 +196,8 @@ int main(int argc, char **argv) {
   for (i = 0; i < 5; ++i)
     total += returns_value(i);
   total += nested(&o);
+  for (i = 0; i < 6; ++i)
+    total += sometimes_null(i < 3 ? NULL : &o);
   total += recurse(4);
 
   printf("total=%d\n", total);

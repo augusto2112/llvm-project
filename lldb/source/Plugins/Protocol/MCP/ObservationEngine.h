@@ -124,6 +124,90 @@ EmitDecision DecideEmit(const EmitDecisionInput &In);
 // Expression cost control
 //===----------------------------------------------------------------------===//
 
+/// Why a capture produced no value, in the only two terms that decide what to
+/// do about it: whether asking again can ever answer differently, and where the
+/// names that would have worked are to be read from.
+enum class CaptureFailure {
+  /// Resolvable in principle, but not from where this hit was taken: a value
+  /// optimised out, a different inlined location, a null pointer part-way along
+  /// a path. The next hit is a fresh question, so the capture is kept.
+  Situational,
+
+  /// Nothing of that name is in scope. Candidates are the frame's own
+  /// parameters and locals.
+  ///
+  /// Stable, but only for as long as the loaded modules are: a global defined
+  /// in a library that has not been dlopened yet is spelled correctly and does
+  /// not resolve, which is why disabling on this must be undone when a module
+  /// arrives.
+  UnknownName,
+
+  /// The base of the path resolved and the type it resolved to has no such
+  /// member. Candidates are that type's fields.
+  ///
+  /// Stable against module loading as well as against hits: a type's members
+  /// come from its own definition, and a library loading later does not add
+  /// any.
+  UnknownMember,
+
+  /// The expression cannot be parsed, or a member is being read out of
+  /// something that has no members at all. No candidate list applies, because
+  /// the fault is in the shape of the expression rather than in a name.
+  Malformed,
+};
+
+llvm::StringRef ToString(CaptureFailure Kind);
+
+/// Whether a failure of \p Kind will recur identically at every remaining hit,
+/// which is what makes evaluating it again a cost with no possible return.
+bool IsStableFailure(CaptureFailure Kind);
+
+/// Reads \p Diagnostic, the evaluator's account of why a capture failed, as one
+/// of the four cases.
+///
+/// Classified from the diagnostic text because that is the only evidence
+/// present: the evaluator reports a parse failure as one `ExpressionResults`
+/// value whatever the compiler objected to, and what the compiler objected to
+/// is the whole distinction here. Anything unrecognised is \ref Situational, so
+/// a diagnostic this does not know is a capture that keeps being tried rather
+/// than one wrongly abandoned.
+CaptureFailure ClassifyCaptureFailure(llvm::StringRef Diagnostic);
+
+/// The part of \p Diagnostic worth reporting beside \p Kind, bounded to
+/// \p MaxChars.
+///
+/// The line that decided the class, where the message carries more than one
+/// objection, so that the reason and the detail beside it are about the same
+/// thing. Falls back to the condensed message where no single line owns the
+/// class.
+std::string DescribeCaptureFailure(llvm::StringRef Diagnostic,
+                                   CaptureFailure Kind, unsigned MaxChars);
+
+/// Names offered against a capture that did not resolve.
+struct CaptureCandidates {
+  std::vector<std::string> Names;
+
+  /// Names there were to choose from, against which \ref Names is a selection.
+  /// Reported so that a short list is read as a selection and not as the whole
+  /// of what was in scope.
+  uint64_t InScope = 0;
+};
+
+/// Names offered against one unresolved capture. A wide struct or a frame in a
+/// long function has more names than a reader will weigh, and the count of the
+/// rest is what keeps a bounded list honest.
+constexpr size_t MaxCaptureCandidates = 6;
+
+/// Selects from \p InScope the names worth offering against \p Wanted.
+///
+/// Those close enough to be a plausible misspelling come first, nearest-first,
+/// ranked by the same comparison an unresolved tracepoint location gets. The
+/// remainder follow in the order given, because a caller who named something
+/// nothing resembles is still answered best by what was actually there --
+/// which is the case a pure nearest-name ranking answers with silence.
+CaptureCandidates RankCaptureCandidates(llvm::StringRef Wanted,
+                                        std::vector<std::string> InScope);
+
 /// The share of the time left before the timeout that one capture's projected
 /// cost may take up before the capture is turned off.
 constexpr unsigned CaptureCostBudgetDivisor = 4;
@@ -153,6 +237,24 @@ struct CaptureCostInput {
   /// taken, which is a different fault from costing too much and wants a
   /// different remedy.
   uint64_t Errors = 0;
+
+  /// How the most recent failure was classified. A capture whose failure is
+  /// stable is stopped at the first one rather than after
+  /// \ref UnresolvableCaptureAttempts of them: the attempts exist to give a
+  /// value that is merely absent here a chance to appear, and a member a type
+  /// does not have will not grow one. Meaningful only for the Unresolved tier.
+  CaptureFailure Failure = CaptureFailure::Situational;
+
+  /// Locations the observation resolved to.
+  ///
+  /// A name is looked up at a program counter, and an observation on a function
+  /// name can resolve to several -- differently inlined copies of it, each with
+  /// its own set of variables in scope. So one failure does not settle a name
+  /// that is out of scope: it may be in scope at the next location the
+  /// tracepoint fires at, and giving up at the first hit would lose it there.
+  /// A member a type does not have, and an expression that does not parse, are
+  /// not facts about a location and settle at the first failure regardless.
+  uint32_t Locations = 1;
 
   /// Whether the observation is taken as the function returns, where its frame
   /// is already gone. That is the likeliest reason a capture resolves nowhere,
@@ -448,6 +550,18 @@ private:
 /// What one capture resolved to and what it cost.
 struct CaptureReport {
   std::string Expr;
+
+  /// The spelling actually evaluated, when a fixit repaired the one given and
+  /// the repair worked. Empty otherwise, including when a fixit was suggested
+  /// and the suggestion failed too -- adopting one of those would pin the
+  /// capture to a spelling that never resolved.
+  ///
+  /// Reported because the run is not evaluating what the caller wrote, and a
+  /// caller who cannot see that has no way to correlate a value with the
+  /// expression that produced it. Stated once here rather than per hit: the
+  /// rewrite is decided at the first resolution and holds for the run.
+  std::string FixedExpr;
+
   ValueResolutionTier Tier = ValueResolutionTier::Unresolved;
 
   /// Hits the capture was evaluated at.
@@ -530,6 +644,50 @@ struct ObservationReport {
   llvm::json::Value Render() const;
 };
 
+/// One capture that could not be read, reported where a caller reads it rather
+/// than only as a count beside the expression that failed.
+///
+/// This is a top-level array on the result and not a field on the capture,
+/// because a capture that cannot resolve is a fault in the request and the
+/// caller has to see it without going looking. Reached through the aggregate it
+/// is a JSON document escaped into a string nested two levels under a label,
+/// which is where a reader stops reading.
+struct CaptureFailureReport {
+  /// The observation the capture belongs to, since an expression alone does not
+  /// say where it was being read.
+  std::string Label;
+
+  /// The expression as the caller wrote it. What the aggregate is keyed on, so
+  /// that this entry and that histogram name the same thing.
+  std::string Expr;
+
+  /// The spelling a fixit produced, empty when there was none. Set whether or
+  /// not the repair worked; \ref FixApplied is what says which.
+  std::string FixedExpr;
+
+  /// Whether \ref FixedExpr resolved and was adopted for the run, as against
+  /// having been suggested and failed as well.
+  bool FixApplied = false;
+
+  CaptureFailure Kind = CaptureFailure::Situational;
+
+  /// The evaluator's own account, truncated. What the compiler objected to is
+  /// more use than any paraphrase of it.
+  std::string Reason;
+
+  CaptureCandidates Candidates;
+
+  /// Whether the capture was turned off for the rest of the run.
+  bool Disabled = false;
+
+  /// Whether this was the observation's `when` condition rather than one of its
+  /// captures. A condition that cannot be evaluated silently records no hits at
+  /// all, which looks exactly like code that never ran.
+  bool IsCondition = false;
+
+  llvm::json::Value Render() const;
+};
+
 /// Where the program was when the run ended.
 ///
 /// A timeout and a stall get exactly what a crash gets. A hang is a terminal
@@ -590,6 +748,10 @@ struct ObservationResult {
   Outcome Result = Outcome::Exited;
 
   std::vector<ObservationReport> Observations;
+
+  /// Captures and conditions that could not be read, at top level because a
+  /// fault in the request is not something a caller should have to find.
+  std::vector<CaptureFailureReport> CaptureFailures;
 
   /// What every capture was observed to hold, over every hit rather than over
   /// the emitted events.
@@ -727,6 +889,26 @@ private:
   void NoteProgress();
 
   ValueResolutionOptions CaptureOptions() const;
+
+  /// Names \p Expr could have used instead, read out of debug info alone.
+  ///
+  /// Nothing is compiled and no module is walked for symbols. An unresolved
+  /// name is exactly the situation in which a run cannot afford either, and the
+  /// point of stopping a stable failure at its first hit is not to spend the
+  /// run establishing it. So the sources are the two already to hand: the
+  /// frame's own variable list for a name that is not in scope, and the
+  /// children of the resolved path prefix for a member the type does not have
+  /// -- reached through the frame's path parser rather than through \ref
+  /// ResolveValueDWIM, which falls through to the expression evaluator when a
+  /// path fails.
+  ///
+  /// Returns nothing without a frame, which is the case at a return site: the
+  /// current frame there belongs to the caller, and its names are not the ones
+  /// the capture was reaching for.
+  ///
+  /// Called once per failing capture rather than once per hit.
+  CaptureCandidates CandidatesFor(llvm::StringRef Expr, CaptureFailure Kind,
+                                  StackFrame *Frame);
 
   std::chrono::microseconds Remaining() const;
 
