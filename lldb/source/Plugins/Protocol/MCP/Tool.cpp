@@ -211,11 +211,23 @@ CommandTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
       // interrupts are documented as inactive on the command-interpreter thread,
       // which is the thread that would be asking.
       interrupted = true;
-      Dbg.RequestInterrupt();
-      if (lldb::TargetSP Target = Dbg.GetTargetList().GetSelectedTarget())
-        if (lldb::ProcessSP Process = Target->GetProcessSP())
-          if (Process->IsAlive() && StateIsRunningState(Process->GetState()))
-            Process->Halt(/*clear_thread_plans=*/false);
+
+      // Kept up until the command returns, rather than tried once. A program
+      // under a breakpoint with a large ignore count spends most of its time
+      // stopped -- it is the stop processing that resumes it -- so a single look
+      // finds it stopped, sends nothing, and lets it run on: measured on a
+      // `continue` past an ignore count of two million, which went on for the
+      // 1800 seconds the client allowed with a watchdog that had already fired.
+      // A halt only has an effect on a running process, so the retry is what
+      // catches one of the moments it is.
+      while (!Finished.load(std::memory_order_acquire)) {
+        Dbg.RequestInterrupt();
+        if (lldb::TargetSP Target = Dbg.GetTargetList().GetSelectedTarget())
+          if (lldb::ProcessSP Process = Target->GetProcessSP())
+            if (Process->IsAlive() && StateIsRunningState(Process->GetState()))
+              Process->Halt(/*clear_thread_plans=*/false);
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
     });
 
     Dbg.GetCommandInterpreter().HandleCommand(arguments.command.c_str(),
