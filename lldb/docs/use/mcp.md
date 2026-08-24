@@ -201,8 +201,10 @@ looked for, not a reason to fail the call.
 
 #### Sampled stacks
 
-`profile` appears for a run long enough for a sample to be due and sampled at least
-once inside the program's own code, whether or not the plan had tracepoints — though a plan whose tracepoints are being hit constantly
+`profile` appears for a run sampled enough times to have a shape -- one sample is
+where the program happened to be a fifth of a second in, which for a program that
+fails early is inside its command-line parser -- and at least once inside the
+program's own code, whether or not the plan had tracepoints — though a plan whose tracepoints are being hit constantly
 leaves no moment at which the program is running freely, so in practice it is a
 free-running run that gets one.
 

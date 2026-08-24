@@ -545,7 +545,8 @@ void StackProfile::Record(lldb::tid_t Tid, ArrayRef<RawFrame> InnermostFirst) {
 }
 
 json::Value StackProfile::Render() const {
-  if (m_samples == 0)
+  // Too few samples to be a profile rather than a coincidence.
+  if (m_samples < MinProfileSamples)
     return nullptr;
 
   // A profile of a program that was never sampled inside its own code says
@@ -2243,10 +2244,14 @@ Expected<ObservationResult> ObservationEngine::Run() {
       Artifact.Events = m_artifact->GetEventCount();
       Artifact.Truncated = m_artifact->HitInternalLimit();
     }
-    // Inlined only when the program ended badly. A run that ended badly is read
-    // backwards from the end; one that ended well is read through its
-    // aggregate, and the events are a file away either way.
-    if (IsAbnormal(Result))
+    // Inlined only when the program ended badly, and only when there is a
+    // sequence to read. A run that ended badly is read backwards from the end;
+    // one that ended well is read through its aggregate, and the events are a
+    // file away either way. A single event is not a sequence: the aggregate of
+    // one hit already holds every value it holds, so inlining it repeats the
+    // densest part of the response -- measured at 647 characters of a
+    // single-hit run, saying what its 295-character aggregate had said.
+    if (IsAbnormal(Result) && m_tail_events.size() > 1)
       Artifact.Tail = m_tail_events;
     Artifact.CarriesBacktrace = any_of(m_sites, [](const auto &Site) {
       return Site->Obs->Backtrace > 0;

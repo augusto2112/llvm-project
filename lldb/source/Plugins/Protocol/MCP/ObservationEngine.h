@@ -384,6 +384,14 @@ public:
   /// distinguishes this run from any other is at the other end.
   static constexpr size_t MaxUnder = 8;
 
+  /// Samples a run needs before where they landed says anything about it. One
+  /// sample is where the program happened to be a fifth of a second in, which for
+  /// a program that crashes early is inside the command-line parser: measured on
+  /// one such run, 1478 characters reporting `llvm::cl::apply`, which was the
+  /// largest section of the response after the backtrace and had nothing to do
+  /// with the fault.
+  static constexpr uint64_t MinProfileSamples = 4;
+
   /// The share of samples a function has to appear in to be on that path, as a
   /// reciprocal. Half: a function on the stack for half a run is where the run is,
   /// and a threshold of every sample is broken by one sample taken in the dynamic
