@@ -53,7 +53,8 @@ llvm::StringRef ProtocolServerMCP::GetPluginDescriptionStatic() {
 
 void lldb_private::mcp::PopulateServer(lldb_protocol::mcp::Server &server) {
   server.AddTool(
-      std::make_unique<CommandTool>("command", "Run an lldb command."));
+      std::make_unique<CommandTool>(
+          "command", std::string(CommandToolDescription)));
   server.AddTool(std::make_unique<ObserveTool>(
       "observe", std::string(ObserveToolDescription)));
   server.AddTool(std::make_unique<DebuggerListTool>(

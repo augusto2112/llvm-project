@@ -918,7 +918,14 @@ constexpr StringLiteral VoidValue = "(void)";
 /// Frames the terminal event reports after ranking. Deep enough to cross a
 /// framework boundary, short enough that a pass-manager stack does not become
 /// the response.
-constexpr size_t MaxTerminalFrames = 24;
+///
+/// Measured on a compiler stopped at an assertion: of 20 frames, the 7 innermost
+/// were the fault and the rest were the pass manager reaching them through
+/// alternating adaptor layers, which fold into nothing because no two are the same
+/// function. Two agents asked for the top four. `frames_total` and
+/// `frames_omitted` say what a bound left out, so a shorter list is not a quieter
+/// one.
+constexpr size_t MaxTerminalFrames = 16;
 
 /// Locals the terminal event reports.
 constexpr size_t MaxTerminalLocals = 32;

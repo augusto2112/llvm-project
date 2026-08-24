@@ -81,6 +81,25 @@ inline constexpr llvm::StringLiteral ObserveToolDescription =
     "detail: captures are read there alone, so a call is affordable, and what "
     "one prints comes back in \"inferior_output\".";
 
+/// What the `command` tool is for, and how it divides the work with `observe`.
+///
+/// Three agents in a row reported that they could not tell which of the two to
+/// reach for; one of them never called `command` at all, saying it could not work
+/// out whether there was a stopped process for it to act on. The boundary is what
+/// each one owns: a command acts on the session as it is, and an observation owns a
+/// run from launch to exit.
+inline constexpr llvm::StringLiteral CommandToolDescription =
+    "Run one LLDB command in a debug session and return its output, the same "
+    "text the LLDB command interpreter would print.\n"
+    "\n"
+    "This is the interactive surface. It acts on whatever state the session is "
+    "already in and leaves that state behind for the next call, so it is what to "
+    "use to look around a process that is stopped, or to set a target up by hand.\n"
+    "\n"
+    "To run a program and collect state while it runs, use \"observe\" instead: it "
+    "does the launch, the tracepoints and the run in one call, and owns the process "
+    "it started -- nothing is left stopped for a command to inspect afterwards.";
+
 /// The schema of one entry in the plan's "observe" list.
 llvm::json::Value ObservationSchema();
 

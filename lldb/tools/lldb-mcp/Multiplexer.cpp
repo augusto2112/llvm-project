@@ -243,7 +243,7 @@ Expected<ListToolsResult> Multiplexer::HandleToolsList() {
 
   ToolDefinition command;
   command.name = kToolCommand;
-  command.description = "Run an LLDB command in a debug session.";
+  command.description = CommandToolDescription;
   command.inputSchema = json::Object{
       {"type", "object"},
       {"properties",

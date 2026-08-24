@@ -69,9 +69,12 @@ json::Value lldb_protocol::mcp::ObservationSchema() {
             schemaStringArray(
                 "Expressions to read at each hit, in the language of the "
                 "program: a member path like \"I.Ty.TypeID\" or \"N->Opcode\", "
-                "or a call like \"describe(N)\". Empty is a bare tracepoint "
-                "recording only hit counts, which already answers whether the "
-                "code runs at all.")},
+                "or a call like \"describe(N)\". A call to the program's own "
+                "printer, \"N->dump()\", is how an object that knows how to "
+                "describe itself is read; what it prints comes back in "
+                "\"inferior_output\" rather than as the capture's value. Empty is "
+                "a bare tracepoint recording only hit counts, which already "
+                "answers whether the code runs at all.")},
            {"when",
             schemaField("string",
                         "A condition evaluated at each hit, written like a "
