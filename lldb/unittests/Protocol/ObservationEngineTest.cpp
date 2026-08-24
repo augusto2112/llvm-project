@@ -564,9 +564,10 @@ TEST(ObservationEngineTest, NeverEvaluatedCaptureIsNotCalledUnavailable) {
   Capture.Expr = "I.Ty.TypeID";
   Capture.Evaluations = 0;
 
+  // The default tier renders "unavailable", which is the word a capture that was
+  // read and failed gets. A capture that was never read must not borrow it.
   std::string S = Render(Capture.Render());
-  EXPECT_NE(S.find("\"tier\":\"not_evaluated\""), std::string::npos) << S;
-  EXPECT_NE(S.find("\"evaluations\":0"), std::string::npos) << S;
+  EXPECT_EQ(S, R"("not_evaluated")") << S;
   EXPECT_EQ(S.find("unavailable"), std::string::npos) << S;
 }
 
@@ -876,4 +877,20 @@ TEST(StackProfileTest, WhereNoPlaceDominatesOneStandsForTheList) {
   EXPECT_EQ(Render(llvm::json::Value(
                 llvm::json::Array(*O->getArray("under")))),
             R"(["foldShuffleToIdentity"])");
+}
+
+TEST(ObservationEngineTest, ACaptureOnAnObservationThatNeverFiredIsAWord) {
+  // A tracepoint that was never hit has captures with nothing to report, and their
+  // numbers are all zero. Measured on a plan whose three observations included two
+  // that never fired: six fields saying what two words say.
+  CaptureReport Capture;
+  Capture.Expr = "ALoad->dump()";
+  EXPECT_EQ(Render(Capture.Render()), R"("not_evaluated")");
+
+  // Still distinct from a capture that was evaluated and could not be read, which
+  // is the distinction the rest of the report is built to keep.
+  Capture.Evaluations = 3;
+  Capture.Errors = 3;
+  Capture.Tier = ValueResolutionTier::Unresolved;
+  EXPECT_NE(Render(Capture.Render()).find("unavailable"), std::string::npos);
 }

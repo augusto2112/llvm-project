@@ -673,11 +673,16 @@ json::Value CaptureReport::Render() const {
   // never have been hit, or its condition never held. The default tier renders
   // "unavailable", which is the word an expression that genuinely failed gets,
   // so reporting it here would collapse the distinction the rest of plan_report
-  // is built to keep. The counts stay beside it either way -- `evaluations: 0`
-  // is what says which of the two this is.
-  const std::string TierName = Evaluations == 0 && !Disabled
-                                   ? std::string("not_evaluated")
-                                   : ToString(Tier).str();
+  // is built to keep.
+  //
+  // Said as a word rather than as an object, because the numbers beside it are all
+  // zero and a capture on an observation that never fired has nothing else to
+  // report: `{"evaluations":0,"tier":"not_evaluated","total_ms":0}` is three fields
+  // saying what one says.
+  if (Evaluations == 0 && !Disabled && Errors == 0)
+    return "not_evaluated";
+
+  const std::string TierName = ToString(Tier).str();
 
   json::Object O{{"tier", TierName},
                  {"evaluations", static_cast<int64_t>(Evaluations)},
