@@ -305,6 +305,22 @@ struct RankedFrame {
 /// definition is one the caller can change.
 bool IsSystemSourcePath(llvm::StringRef File);
 
+/// Replaces the contents of each template argument list in \p Function with an
+/// ellipsis, leaving everything a reader identifies the frame by.
+///
+/// A demangled C++ frame carries its template arguments in full, and in
+/// template-heavy code that is most of its length: measured on one frame of a
+/// compiler's instruction selector, 323 characters of which 250 were two
+/// spellings of an intrusive list iterator, in a backtrace of 23 such frames
+/// beside the four that a reader wanted. What the arguments distinguish is one
+/// instantiation from another, and the file and line reported next to the name
+/// already do that.
+///
+/// Nesting is tracked rather than matched greedily, so a nested list collapses
+/// with the one enclosing it, and `operator<` and `operator<<` keep their names:
+/// their angle brackets do not open an argument list.
+std::string CollapseTemplateArguments(llvm::StringRef Function);
+
 /// Orders a backtrace so that the frames worth reading come first.
 ///
 /// Raw unwinder order is close to useless once a stack is deep: an assertion

@@ -231,26 +231,30 @@ lldb_private::mcp::AssessCaptureCost(const CaptureCostInput &In) {
     // the name is, and "on": "entry" is only right for a parameter: a local is
     // not assigned yet at entry, where it reads as uninitialised stack or as the
     // previous call's leftover value, which is plausible and wrong.
+    // Phrased without naming the expression, so that captures stopped for the
+    // same reason share one note and are listed against it. The reason here is a
+    // fact about where the observation is taken rather than about any one of
+    // them, and a run whose eight captures all failed at a return site spent
+    // 2.6 kB saying so eight times, each copy differing only in the name that the
+    // key it was filed under already gave.
     D.Note =
         In.AtReturn
-            ? formatv("stopped evaluating \"{0}\": it produced no value at any "
-                      "of its {1} hits. This observation is taken as the "
-                      "function returns, where its frame has already been "
-                      "popped, so its parameters and locals cannot be read "
-                      "there. Capture \"{2}\" for what it produced; read a "
-                      "parameter with \"on\": \"entry\", and a local at a source "
-                      "location after it is assigned, \"at\": "
+            ? formatv("stopped after {0} hits with no value: this observation is "
+                      "taken as the function returns, where its frame has "
+                      "already been popped, so the function's own parameters and "
+                      "locals cannot be read. Capture \"{1}\" for what it "
+                      "produced; read a parameter with \"on\": \"entry\", and a "
+                      "local at a source location past its assignment, \"at\": "
                       "\"file.cpp:LINE\", since at entry it holds whatever was "
                       "on the stack.",
-                      In.Expr, In.Errors, "$return")
+                      In.Errors, "$return")
                   .str()
-            : formatv("stopped evaluating \"{0}\": it produced no value at any "
-                      "of its {1} hits, so the name does not resolve where this "
-                      "observation is taken. Check that it is in scope there -- "
-                      "a local declared further down the function, or a member "
-                      "of another object, resolves nowhere at this line -- "
-                      "rather than spelling it more cheaply.",
-                      In.Expr, In.Errors)
+            : formatv("stopped after {0} hits with no value, so the name does "
+                      "not resolve where this observation is taken. Check that "
+                      "it is in scope there -- a local declared further down the "
+                      "function, or a member of another object, resolves nowhere "
+                      "at this line -- rather than spelling it more cheaply.",
+                      In.Errors)
                   .str();
     return D;
   }
@@ -289,12 +293,16 @@ lldb_private::mcp::AssessCaptureCost(const CaptureCostInput &In) {
 }
 
 json::Value CaptureCostDecision::Render() const {
+  // Without the note, which is rendered once per observation rather than once
+  // per capture. Measured on an observation whose eight captures were all
+  // stopped for the same reason: 2.6 kB of one sentence, said eight times over,
+  // differing only in the expression each quoted -- which is the key it was
+  // filed under.
   return json::Object{
       {"observed_hits", static_cast<int64_t>(ObservedHits)},
       {"total_hits", static_cast<int64_t>(TotalHits)},
       {"per_hit_ms", Round2(PerHitMs)},
       {"projected_ms", Round2(ProjectedMs)},
-      {"note", Note},
   };
 }
 
@@ -441,6 +449,40 @@ lldb_private::mcp::RankFrames(ArrayRef<RawFrame> Frames) {
     return static_cast<int>(A.IsSystem) < static_cast<int>(B.IsSystem);
   });
   return Kept;
+}
+
+std::string lldb_private::mcp::CollapseTemplateArguments(StringRef Function) {
+  std::string Out;
+  Out.reserve(Function.size());
+  unsigned Depth = 0;
+  for (size_t I = 0, E = Function.size(); I != E; ++I) {
+    const char C = Function[I];
+
+    // `operator<`, `operator<=>` and `operator<<` are names, not argument lists,
+    // and a `<` that opens a list is always preceded by an identifier character.
+    if (C == '<' && Depth == 0) {
+      StringRef Before = Function.take_front(I);
+      if (Before.ends_with("operator") || Before.ends_with("operator<"))
+        Out += C;
+      else {
+        Out += "<...>";
+        ++Depth;
+      }
+      continue;
+    }
+
+    if (Depth != 0) {
+      // Counted rather than matched, so that a nested list is elided along with
+      // the one that encloses it instead of ending it early.
+      if (C == '<')
+        ++Depth;
+      else if (C == '>')
+        --Depth;
+      continue;
+    }
+    Out += C;
+  }
+  return Out;
 }
 
 json::Value RankedFrame::Render() const {
@@ -632,6 +674,32 @@ json::Value ObservationReport::Render() const {
     for (const CaptureReport &Capture : Captures)
       Rendered[Capture.Expr] = Capture.Render();
     O["captures"] = std::move(Rendered);
+
+    // Grouped by reason, in the order the captures were given, so that a reason
+    // holding for several of them is stated once and names them. The reason a
+    // capture was stopped is usually a fact about where the observation is taken
+    // rather than about the expression -- at a return site none of the
+    // function's own names can be read -- and a per-capture rendering repeats it
+    // once per name.
+    std::vector<std::pair<std::string, json::Array>> ByReason;
+    for (const CaptureReport &Capture : Captures) {
+      if (!Capture.Disabled || Capture.Disabled->Note.empty())
+        continue;
+      auto It = llvm::find_if(ByReason, [&](const auto &Entry) {
+        return Entry.first == Capture.Disabled->Note;
+      });
+      if (It == ByReason.end())
+        ByReason.push_back({Capture.Disabled->Note, json::Array{Capture.Expr}});
+      else
+        It->second.push_back(Capture.Expr);
+    }
+    if (!ByReason.empty()) {
+      json::Array Stopped;
+      for (auto &[Note, Exprs] : ByReason)
+        Stopped.push_back(
+            json::Object{{"captures", std::move(Exprs)}, {"note", Note}});
+      O["stopped"] = std::move(Stopped);
+    }
   }
   return O;
 }
@@ -963,8 +1031,13 @@ FrameIdentity IdentifyFrame(StackFrame *Frame, Target &Tgt) {
 RawFrame DescribeFrame(StackFrame &Frame) {
   RawFrame Described;
   SymbolContext SC = Frame.GetSymbolContext(lldb::eSymbolContextEverything);
+  // Collapsed here, where a name enters the engine, so that the terminal event,
+  // a hit's frame, an event backtrace and the profile all report the same
+  // spelling. Two instantiations of one function template fold together as a
+  // consequence -- in a backtrace as a run of repeats, in the profile as one
+  // entry -- which is what a reader asking where the program is wants of them.
   if (const char *Name = Frame.GetFunctionName())
-    Described.Function = Name;
+    Described.Function = CollapseTemplateArguments(Name);
   if (SC.line_entry.IsValid()) {
     Described.File = SC.line_entry.GetFile().GetPath();
     Described.Line = SC.line_entry.line;

@@ -10,6 +10,7 @@
 #include "lldb/Breakpoint/Breakpoint.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Core/ModuleList.h"
+#include "lldb/Core/Mangled.h"
 #include "lldb/Symbol/SymbolContext.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/ConstString.h"
@@ -470,10 +471,19 @@ std::vector<std::string> CollectFunctionNames(Target &Tgt) {
   RegularExpression AnyName(".");
   Tgt.GetImages().FindFunctions(AnyName, Options, Found);
 
+  // Without the argument list, because that is the form a caller writes. A
+  // demangled C++ name carries its parameters -- "leaf(Big*, int)" -- which puts
+  // every C++ function in the program eleven or more edits away from the bare
+  // name that was asked for, while a C function's symbol is its name and matches.
+  // The result was that a misspelling of a C++ function was answered with
+  // whichever libc functions happened to be spelled similarly: "lief" was met
+  // with "link", "logf" and "sinf", and not with the "leaf" it was one
+  // transposition away from in the same file.
   std::vector<std::string> Names;
   Names.reserve(Found.GetSize());
   for (const SymbolContext &SC : Found)
-    if (ConstString Name = SC.GetFunctionName())
+    if (ConstString Name =
+            SC.GetFunctionName(Mangled::ePreferDemangledWithoutArguments))
       Names.push_back(Name.GetStringRef().str());
 
   llvm::sort(Names);

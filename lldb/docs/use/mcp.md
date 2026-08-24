@@ -239,12 +239,25 @@ location, or stop asking. A capture that ran and produced nothing — a call
 returning void, which is how a compiler is asked to dump a node — reads `(void)`
 rather than as a failure, and what it printed is in `inferior_output`.
 
+A capture that was stopped keeps its numbers, and the reason it was stopped is
+reported once per observation under `stopped`, against the list of captures it
+covers. The usual reason is a fact about where the observation is taken rather
+than about any one expression — at a return site none of the function's own names
+can be read — and stating it per capture repeated one sentence once per name.
+
+Function names in a backtrace have their template arguments replaced with an
+ellipsis. What those arguments distinguish is one instantiation from another, and
+the file and line reported beside the name already do that; in template-heavy code
+they are most of its length.
+
 `plan_report` keeps four numbers apart on purpose: how many locations the name
 resolved to, how many times the tracepoint was hit, how many of those hits had a
 true condition, and how many events were emitted. A misspelled function name, a
 condition that never held, and code that never ran all produce no events, and
 these numbers are what tell them apart. A name that resolved to nothing comes
-back with the nearest names that do exist; a name that resolved when its library
+back with the nearest names that do exist, matched without their argument lists so
+that a misspelled C++ function is answered with the function and not with whichever
+C library symbols happen to be spelled similarly; a name that resolved when its library
 loaded partway through the run comes back resolved, since the count is read after
 the run rather than before it.
 

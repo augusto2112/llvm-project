@@ -53,13 +53,17 @@ Replay(EmitMode Mode, llvm::ArrayRef<std::string> Values,
   return Decisions;
 }
 
-CaptureCostInput Cost(Ms Spent, uint64_t ObservedHits, Ms Remaining) {
+CaptureCostInput Cost(Ms Spent, uint64_t ObservedHits, Ms Remaining,
+                      uint64_t Errors = 0, bool AtReturn = false) {
   CaptureCostInput In;
-  In.Tier = ValueResolutionTier::Expression;
+  In.Tier = Errors != 0 ? ValueResolutionTier::Unresolved
+                        : ValueResolutionTier::Expression;
   In.Spent = Spent;
   In.ObservedHits = ObservedHits;
   In.TotalHits = ObservedHits;
   In.Remaining = Remaining;
+  In.Errors = Errors;
+  In.AtReturn = AtReturn;
   In.Expr = "I->getName()";
   return In;
 }
@@ -578,7 +582,8 @@ TEST(ObservationEngineTest, ReturnValueCaptureReportsThatItCameFromTheABI) {
   EXPECT_EQ(Render(Capture.Render()), "\"abi\"");
 }
 
-TEST(ObservationEngineTest, DisabledCaptureCarriesItsNumbersAndTheFix) {  CaptureReport Capture;
+TEST(ObservationEngineTest, DisabledCaptureCarriesItsNumbers) {
+  CaptureReport Capture;
   Capture.Expr = "I->getName()";
   Capture.Tier = ValueResolutionTier::Expression;
   Capture.Evaluations = 10;
@@ -588,7 +593,39 @@ TEST(ObservationEngineTest, DisabledCaptureCarriesItsNumbersAndTheFix) {  Captur
   std::string S = Render(Capture.Render());
   EXPECT_NE(S.find("\"observed_hits\":10"), std::string::npos);
   EXPECT_NE(S.find("\"per_hit_ms\":90"), std::string::npos);
-  EXPECT_NE(S.find("I->Name"), std::string::npos);
+  // The fix is named once per observation and not once per capture, so it is not
+  // here. What the capture itself has to say is what it cost.
+  EXPECT_EQ(S.find("note"), std::string::npos) << S;
+}
+
+TEST(ObservationEngineTest, OneReasonCoveringSeveralCapturesIsStatedOnce) {
+  // Measured on an observation taken at a function's return, where none of the
+  // eight captures naming its locals could be read: the same sentence eight
+  // times, 2.6 kB, differing only in the expression each quoted -- which is the
+  // key it was already filed under.
+  ObservationReport Report;
+  Report.At = "guard";
+  for (llvm::StringRef Expr : {"Low16", "Hi16", "OpIs16Bit"}) {
+    CaptureReport Capture;
+    Capture.Expr = Expr.str();
+    Capture.Tier = ValueResolutionTier::Unresolved;
+    Capture.Evaluations = 3;
+    Capture.Errors = 3;
+    Capture.Disabled = AssessCaptureCost(Cost(Ms(30), 3, Ms(1000), 3, true));
+    Report.Captures.push_back(std::move(Capture));
+  }
+
+  const llvm::json::Value Rendered = Report.Render();
+  const llvm::json::Array *Stopped =
+      Rendered.getAsObject()->getArray("stopped");
+  ASSERT_NE(Stopped, nullptr) << Render(Rendered);
+  ASSERT_EQ(Stopped->size(), 1u) << Render(Rendered);
+  const llvm::json::Object *Entry = (*Stopped)[0].getAsObject();
+  EXPECT_EQ(Render(llvm::json::Value(llvm::json::Array(*Entry->getArray(
+                "captures")))),
+            R"(["Low16","Hi16","OpIs16Bit"])");
+  EXPECT_NE(Entry->getString("note")->find("on\": \"entry"),
+            llvm::StringRef::npos);
 }
 
 TEST(ObservationEngineTest, CycleIsReportedWhenOneWasFound) {
@@ -735,4 +772,41 @@ TEST(StackProfileTest, ASingleThreadIsNotWorthNaming) {
   const std::string S = Render(Profile.Render());
   EXPECT_EQ(S.find("tid"), std::string::npos) << S;
   EXPECT_EQ(S.find("threads"), std::string::npos) << S;
+}
+
+TEST(CollapseTemplateArgumentsTest, ArgumentsGoAndTheNameStays) {
+  // Measured on one frame of a compiler's instruction selector: 323 characters,
+  // of which 250 were two spellings of an intrusive list iterator.
+  EXPECT_EQ(CollapseTemplateArguments(
+                "llvm::SelectionDAGISel::SelectBasicBlock(llvm::ilist_iterator_"
+                "w_bits<llvm::ilist_detail::node_options<llvm::Instruction, "
+                "true, false, void, true, llvm::BasicBlock>, false, true>, "
+                "bool&)"),
+            "llvm::SelectionDAGISel::SelectBasicBlock(llvm::ilist_iterator_w_"
+            "bits<...>, bool&)");
+}
+
+TEST(CollapseTemplateArgumentsTest, NestedListsCollapseWithTheirEnclosingOne) {
+  EXPECT_EQ(CollapseTemplateArguments("f(std::map<int, std::vector<char>>&)"),
+            "f(std::map<...>&)");
+}
+
+TEST(CollapseTemplateArgumentsTest, AnOperatorKeepsItsAngleBrackets) {
+  // `operator<` and `operator<<` are names. A collapser that took every `<` as
+  // opening an argument list would eat the rest of the frame.
+  EXPECT_EQ(CollapseTemplateArguments("llvm::operator<<(llvm::raw_ostream&)"),
+            "llvm::operator<<(llvm::raw_ostream&)");
+  EXPECT_EQ(CollapseTemplateArguments("Foo::operator<(Foo const&) const"),
+            "Foo::operator<(Foo const&) const");
+}
+
+TEST(CollapseTemplateArgumentsTest, ANameWithNoTemplatesIsUnchanged) {
+  EXPECT_EQ(CollapseTemplateArguments("matchPERM(llvm::SDNode*)"),
+            "matchPERM(llvm::SDNode*)");
+  EXPECT_EQ(CollapseTemplateArguments(""), "");
+}
+
+TEST(CollapseTemplateArgumentsTest, AnUnclosedListDoesNotRunAway) {
+  // A truncated name is not a reason to lose the part that arrived.
+  EXPECT_EQ(CollapseTemplateArguments("f<int"), "f<...>");
 }
