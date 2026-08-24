@@ -388,6 +388,93 @@ at startup and connects to each entry, pruning any that fails to connect, since
 that means the instance died without cleaning up. `lldb-mcp` registers itself
 too, so its managed sessions are visible to other `lldb-mcp` processes.
 
+### Inside `observe`
+
+The tool lives in `lldb/source/Plugins/Protocol/MCP/` and is built from pieces
+that can each be understood on their own:
+
+| File | Responsibility |
+|---|---|
+| `ObservationPlan.{h,cpp}` | Parses and validates the plan; resolves each `at` to breakpoint locations and produces the did-you-mean for a name that matched nothing. |
+| `ObservationEngine.{h,cpp}` | Launches the program, installs the tracepoints, records hits, and reports how the run ended. |
+| `SerializeValue.{h,cpp}` | Renders a value tree to JSON under depth, node and cycle budgets. |
+| `ValueNode.h`, `ValueObjectNode.{h,cpp}` | The interface the serializer works against, and the `ValueObject` adapter for it. The indirection is what makes the serializer testable without a process. |
+| `Aggregate.{h,cpp}` | Accumulates the summary over every hit, and finds a repeating tail. |
+| `EventArtifact.{h,cpp}` | Writes the JSONL event stream, under a bound. |
+| `Tool.{h,cpp}` | The MCP tool: schema, description, and the call into the engine. |
+
+Value resolution is shared with `dwim-print` through
+`lldb/include/lldb/Target/DWIMValueResolution.h`, which decides between a
+variable expression path and the expression evaluator and reports which one ran.
+`dwim-print` keeps its dot-only rule for paths; `observe` opts into `->` and
+`[]`, because a codebase of pointers would otherwise send every capture to the
+expression evaluator.
+
+Two shapes are deliberate. There is one tool rather than several, and no
+`step`, `continue` or `run_to`: the tool list is a suggestion about how to work,
+and offering those would advertise the loop this replaces. And the aggregate is
+computed over **every** hit while the event stream is reduced — that invariant
+is what makes a reduction a saving rather than a blind spot, and inverting it
+would make `emit: on_change` lose exactly the rare value it is meant to surface.
+
+#### LLDB behaviours worth knowing before changing this
+
+Several plausible implementations compile and then silently do nothing. Each of
+these was found the hard way.
+
+**An ignore count does not work from a synchronous callback.**
+`BreakpointLocation::IgnoreCountShouldStop` is reached only from
+`StopInfoBreakpoint::PerformAction`, the asynchronous half of stop processing. A
+synchronous callback that returns `false` makes `Thread::ShouldStop` bail before
+`PerformAction` runs, so `Breakpoint::SetIgnoreCount` never takes effect.
+`skip_first` is therefore counted in the callback.
+
+**A breakpoint condition does not either**, for the same reason: conditions are
+evaluated in `PerformAction`. `when` is evaluated by the callback itself.
+
+**A one-shot breakpoint does not retire.** `PerformAction` removes it only when
+the callback asks to stop, which a tracepoint never does. The engine reuses one
+breakpoint per distinct return address and arms it with a counter, so the set is
+bounded by call sites rather than by hits.
+
+**Evaluating an expression from a synchronous callback costs a thread.**
+`Breakpoint::SetCallback`'s own documentation warns against it. It does work —
+`Process::RunThreadPlan` notices it is on the private state thread and spins up
+a temporary one — but at roughly 20ms per evaluation, measured. That cost is the
+whole reason for the adaptive control that disables an expensive capture partway
+through a run.
+
+**`Target::Launch` has no timeout.** It waits for the first stop with
+`WaitForProcessToStop(std::nullopt, ...)` unconditionally, so `timeout_seconds`
+covers the run but not the launch, and a debuggee that cannot start hangs the
+tool. Bounding it needs `Target::Launch` to accept a timeout.
+
+**`json::Value` built from a `StringRef` stores it by reference.** Passing a
+temporary — `formatv(...).str()` is the usual way — leaves the value pointing at
+freed memory. Build from `std::string`.
+
+**`DenseMapInfo<uint64_t>` reserves `~0ULL`**, which is `LLDB_INVALID_ADDRESS`.
+A `DenseSet<uint64_t>` of addresses asserts the first time it is handed one.
+
+**A load address is not an identity.** A struct, its first member, and that
+member's first member all begin at the same address, so address-only cycle
+detection reports a nested aggregate as a cycle and loses the value it stood
+for. `ValueObjectNode` combines the address with the type.
+
+**`eDILModeSimple` parses only `.`**, so widening the set of accepted paths
+means choosing the DIL mode to match, or every pointer path fails under
+`target.experimental.use-DIL`.
+
+#### Tests
+
+`lldb/unittests/Protocol/` holds the unit tests: the plan parser, the
+serializer, the aggregate, the artifact, and the engine's pure decisions —
+emission, expression-cost control, and frame ranking. Everything needing a live
+process is in `lldb/test/API/tools/lldb-mcp/observe/`, which drives the tool
+over a Unix socket the way a real client does. That test needs to bind a socket,
+so a sandbox that forbids it will fail the whole file at
+`protocol-server start`.
+
 ### Adding Tools and Resources
 
 The tool and resource-provider set lives in
