@@ -718,11 +718,33 @@ TEST(StackProfileTest, AWaitingThreadDoesNotOutrankAWorkingOne) {
             std::optional<int64_t>(2));
 }
 
-TEST(StackProfileTest, SharedPathIsPerSiteSoOneStraySampleDoesNotRuinIt) {
-  // A run whose thread was in the dynamic loader for one sample out of twenty
-  // had nothing in common across all of them but the outermost frame, while the
-  // samples inside the hot function shared their whole way in. Keeping the path
-  // per site is what makes it survive.
+TEST(StackProfileTest, TheCoveringPathIsWhereTheRunIsRatherThanWhereTheLeafIs) {
+  // Measured on a compiler looping inside one analysis: the eight hottest sites
+  // were one-line accessors with one or two samples each, and the function
+  // actually spinning was in every sample and the leaf of none. Self time answers
+  // the wrong question for an unoptimized build; what covers the samples answers
+  // the right one.
+  StackProfile Profile;
+  const llvm::StringRef Leaves[] = {"isPresent", "capacity", "getValueID"};
+  for (int I = 0; I < 9; ++I)
+    Profile.Record(1, Stack({{Leaves[I % 3], "Casting.h"},
+                             {"digRecurrence", "p.cpp"},
+                             {"getRecurrences", "p.cpp"},
+                             {"main", "p.cpp"}}));
+
+  const llvm::json::Value Rendered = Profile.Render();
+  const llvm::json::Array *Under = Rendered.getAsObject()->getArray("under");
+  ASSERT_NE(Under, nullptr);
+  // Innermost first, and the accessors are not on it: none of them covers half
+  // the run.
+  EXPECT_EQ(Render(llvm::json::Value(llvm::json::Array(*Under))),
+            R"(["digRecurrence","getRecurrences","main"])");
+}
+
+TEST(StackProfileTest, OneStraySampleDoesNotEmptyTheCoveringPath) {
+  // A run whose thread was in the dynamic loader for one sample out of ten shares
+  // nothing across all of them, so a path defined as what every sample holds
+  // collapses to nothing. A share of them is what it takes.
   StackProfile Profile;
   Profile.Record(1, Stack({{"dyld_start", ""}}));
   for (int I = 0; I < 9; ++I)
@@ -734,21 +756,29 @@ TEST(StackProfileTest, SharedPathIsPerSiteSoOneStraySampleDoesNotRuinIt) {
   const llvm::json::Value Rendered = Profile.Render();
   const llvm::json::Array *Under = Rendered.getAsObject()->getArray("under");
   ASSERT_NE(Under, nullptr);
-  // Innermost first, and without the site's own function, which `hot` names.
   EXPECT_EQ(Render(llvm::json::Value(llvm::json::Array(*Under))),
-            R"(["loop","middle","main"])");
+            R"(["mix","loop","middle","main"])");
 }
 
-TEST(StackProfileTest, DivergingCallersLeaveOnlyWhatTheyShare) {
+TEST(StackProfileTest, ARecursiveFunctionCountsOncePerSample) {
+  // Otherwise a function twenty frames deep in its own recursion covers a run of
+  // one sample twenty times over, and every threshold on coverage is meaningless.
   StackProfile Profile;
-  Profile.Record(1, Stack({{"mix", "p.cpp"}, {"left", "p.cpp"}, {"main", "p.cpp"}}));
-  Profile.Record(1, Stack({{"mix", "p.cpp"}, {"right", "p.cpp"}, {"main", "p.cpp"}}));
+  for (int I = 0; I < 3; ++I)
+    Profile.Record(1, Stack({{"recurse", "p.cpp"},
+                             {"recurse", "p.cpp"},
+                             {"recurse", "p.cpp"},
+                             {"main", "p.cpp"}}));
+  for (int I = 0; I < 5; ++I)
+    Profile.Record(1, Stack({{"other", "p.cpp"}, {"main", "p.cpp"}}));
 
   const llvm::json::Value Rendered = Profile.Render();
   const llvm::json::Array *Under = Rendered.getAsObject()->getArray("under");
   ASSERT_NE(Under, nullptr);
+  // `recurse` covers three samples of eight and is left off; counted per frame it
+  // would have covered nine of eight, and led the path.
   EXPECT_EQ(Render(llvm::json::Value(llvm::json::Array(*Under))),
-            R"(["main"])");
+            R"(["other","main"])");
 }
 
 TEST(StackProfileTest, HotIsBoundedAndSaysHowManyWereDropped) {

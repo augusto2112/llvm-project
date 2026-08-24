@@ -226,7 +226,7 @@ ObserveTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   const json::Object *arguments = std::get<json::Value>(args).getAsObject();
   if (!arguments)
     return createStringError(
-        "observe: the arguments must be an object carrying \"plan\", the "
+        "trace_program: the arguments must be an object carrying \"plan\", the "
         "observation plan to run.");
 
   const json::Value *plan_value = arguments->get("plan");
@@ -236,12 +236,12 @@ ObserveTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
     // rejected fields.
     if (arguments->get("program") || arguments->get("observe"))
       return createStringError(
-          "observe: the plan goes inside \"plan\", not beside it. Wrap what "
+          "trace_program: the plan goes inside \"plan\", not beside it. Wrap what "
           "you passed: {\"plan\": {\"program\": \"...\", \"observe\": [...]}}. "
           "Only \"debugger\" stays outside the plan, because it selects the "
           "session rather than describing the run.");
     return createStringError(
-        "observe: \"plan\" is required. It is an observation plan, whose only "
+        "trace_program: \"plan\" is required. It is an observation plan, whose only "
         "required field is \"program\", the path to the program to run; the "
         "\"observe\" list of tracepoints is optional, and leaving it out runs "
         "the program and reports only how it ended.");
@@ -256,7 +256,7 @@ ObserveTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
     // it reproducible for the same arguments.
     llvm::sort(unknown);
     return createStringError(
-        formatv("observe: unrecognized argument{0} \"{1}\". The arguments are "
+        formatv("trace_program: unrecognized argument{0} \"{1}\". The arguments are "
                 "\"plan\" and \"debugger\"; every field describing the run "
                 "belongs inside \"plan\".",
                 unknown.size() == 1 ? "" : "s", join(unknown, "\", \"")));

@@ -157,7 +157,7 @@ class ObserveTestCase(TestBase):
         reply = self.connect().request(
             "tools/call",
             {
-                "name": "observe",
+                "name": "trace_program",
                 # The debugger is named rather than defaulted, so the plan runs
                 # in this test's own debugger whatever else exists.
                 "arguments": {"debugger": str(self.dbg.GetID()), "plan": plan},

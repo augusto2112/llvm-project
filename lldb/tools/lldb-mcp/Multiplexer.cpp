@@ -28,7 +28,7 @@ constexpr llvm::StringLiteral kServerName = "lldb-mcp";
 /// Client-facing tool names.
 /// @{
 constexpr llvm::StringLiteral kToolCommand = "command";
-constexpr llvm::StringLiteral kToolObserve = "observe";
+constexpr llvm::StringLiteral kToolObserve = "trace_program";
 constexpr llvm::StringLiteral kToolSessionsList = "sessions_list";
 constexpr llvm::StringLiteral kToolSessionCreate = "session_create";
 constexpr llvm::StringLiteral kToolSessionClose = "session_close";
@@ -37,7 +37,7 @@ constexpr llvm::StringLiteral kToolSessionClose = "session_close";
 /// Backend tool names, as exposed by the LLDB MCP server.
 /// @{
 constexpr llvm::StringLiteral kBackendToolCommand = "command";
-constexpr llvm::StringLiteral kBackendToolObserve = "observe";
+constexpr llvm::StringLiteral kBackendToolObserve = "trace_program";
 constexpr llvm::StringLiteral kBackendToolDebuggerList = "debugger_list";
 constexpr llvm::StringLiteral kBackendToolDebuggerCreate = "debugger_create";
 constexpr llvm::StringLiteral kBackendToolDebuggerDelete = "debugger_delete";

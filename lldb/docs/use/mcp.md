@@ -64,7 +64,7 @@ you would see in the LLDB command interpreter. It takes:
 
 Commands run one at a time and the result comes back when the command finishes.
 
-### `observe`
+### `trace_program`
 
 Runs a program under a set of tracepoints and reports what happened, rather than
 stepping through it. One call launches the program, reads the expressions named
@@ -75,7 +75,7 @@ It takes:
 
 - `plan` (required): what to run and what to watch.
 - `debugger` (optional): the URI of the session to run it in. With no session
-  open and none named, `observe` creates one: a plan already carries the program,
+  open and none named, `trace_program` creates one: a plan already carries the program,
   its arguments and its environment, so an empty session is not a decision a
   caller has to make first.
 
@@ -438,7 +438,7 @@ stable and may be reused when a target is removed and a new target is added.
 
 **"no debug session exists yet" from `command`.** There is no session to run
 in. Call `session_create` first, or pass the URI of an existing session.
-`observe` does not report this, because it opens a session when there is none. A `debugger` URI that names a session which is not there reports "no
+`trace_program` does not report this, because it opens a session when there is none. A `debugger` URI that names a session which is not there reports "no
 debugger found" instead; `sessions_list` says which ones exist.
 
 **"Command requires a process which is currently stopped".** The session is in
@@ -521,7 +521,7 @@ at startup and connects to each entry, pruning any that fails to connect, since
 that means the instance died without cleaning up. `lldb-mcp` registers itself
 too, so its managed sessions are visible to other `lldb-mcp` processes.
 
-### Inside `observe`
+### Inside `trace_program`
 
 The tool lives in `lldb/source/Plugins/Protocol/MCP/` and is built from pieces
 that can each be understood on their own:
@@ -539,7 +539,7 @@ that can each be understood on their own:
 Value resolution is shared with `dwim-print` through
 `lldb/include/lldb/Target/DWIMValueResolution.h`, which decides between a
 variable expression path and the expression evaluator and reports which one ran.
-`dwim-print` keeps its dot-only rule for paths; `observe` opts into `->` and
+`dwim-print` keeps its dot-only rule for paths; `trace_program` opts into `->` and
 `[]`, because a codebase of pointers would otherwise send every capture to the
 expression evaluator.
 

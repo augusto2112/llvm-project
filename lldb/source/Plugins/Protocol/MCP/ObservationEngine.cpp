@@ -522,8 +522,7 @@ void StackProfile::Record(lldb::tid_t Tid, ArrayRef<RawFrame> InnermostFirst) {
 
   const RawFrame &Innermost = InnermostFirst.front();
   Site &S = m_sites[{Tid, Innermost.Function}];
-  const bool First = S.Samples == 0;
-  if (First) {
+  if (S.Samples == 0) {
     S.Function = Innermost.Function;
     S.File = Innermost.File;
     S.Line = Innermost.Line;
@@ -532,26 +531,17 @@ void StackProfile::Record(lldb::tid_t Tid, ArrayRef<RawFrame> InnermostFirst) {
   }
   ++S.Samples;
 
-  // The callers, outermost first, so that intersecting is taking a common
-  // prefix: the frames a stack shares with another are the ones nearest the
-  // bottom, since two stacks agree about how the program got here and disagree
-  // about where here is. The innermost frame is left out because it is the site
-  // itself, which `hot` names -- and because after an intersection it may not be
-  // there to recognise, two paths into one function sharing only `main`.
-  std::vector<std::string> Outermost;
-  Outermost.reserve(InnermostFirst.size());
-  for (const RawFrame &Frame : reverse(InnermostFirst.drop_front()))
-    Outermost.push_back(Frame.Function);
-
-  if (First) {
-    S.Shared = std::move(Outermost);
-    return;
+  // Counted once per sample however many frames of it a recursive function holds,
+  // so that "in nine samples out of ten" means that rather than "on the stack
+  // ninety times".
+  SmallSet<StringRef, 32> Counted;
+  for (const auto &[Depth, Frame] : llvm::enumerate(InnermostFirst)) {
+    if (!Counted.insert(Frame.Function).second)
+      continue;
+    Coverage &C = m_coverage[{Tid, Frame.Function}];
+    ++C.Samples;
+    C.DepthSum += Depth;
   }
-  size_t Common = 0;
-  while (Common < S.Shared.size() && Common < Outermost.size() &&
-         S.Shared[Common] == Outermost[Common])
-    ++Common;
-  S.Shared.resize(Common);
 }
 
 json::Value StackProfile::Render() const {
@@ -612,16 +602,46 @@ json::Value StackProfile::Render() const {
   if (Threaded)
     O["threads"] = static_cast<int64_t>(m_per_thread.size());
 
-  // How the program reached the place it was found in most often. One path, for
-  // the first entry above, because the entries under it are mostly its callers
-  // and callees and would repeat most of it.
-  ArrayRef<std::string> Shared(Ranked.front()->Shared);
-  // Innermost first, matching the order a backtrace is reported in, and keeping
-  // that end when the bound cuts.
-  Shared = Shared.take_back(std::min<size_t>(Shared.size(), MaxUnder));
+  // Where the run was, which is a different question from which function the
+  // innermost frame was in. A function on the stack for half the samples is where
+  // the program is spending itself whether or not it is ever the leaf, and in an
+  // unoptimized build it never is: measured on a compiler looping inside one
+  // analysis, the eight hottest sites were `isPresent`, `capacity`, `getValueID`
+  // and other one-line accessors with one or two samples each, while the function
+  // actually spinning appeared in every sample and in none of them as the leaf.
+  //
+  // Of the busiest thread's samples, because two threads share nothing but the
+  // bottom of the stack and a path common to both would describe neither.
+  lldb::tid_t Busiest = 0;
+  uint64_t Best = 0;
+  for (const auto &[Tid, Count] : m_per_thread)
+    if (Count > Best) {
+      Best = Count;
+      Busiest = Tid;
+    }
+
+  struct Covering {
+    StringRef Function;
+    double MeanDepth;
+  };
+  std::vector<Covering> Path;
+  for (const auto &[Key, C] : m_coverage) {
+    if (Key.first != Busiest || C.Samples * UnderShareDivisor < Best)
+      continue;
+    Path.push_back({Key.second, static_cast<double>(C.DepthSum) /
+                                    static_cast<double>(C.Samples)});
+  }
+  // Innermost first, matching the order a backtrace is reported in. A callee is
+  // deeper than its caller in every sample holding both, so the means order the
+  // chain even where the counts tie.
+  llvm::stable_sort(Path, [](const Covering &LHS, const Covering &RHS) {
+    return LHS.MeanDepth < RHS.MeanDepth;
+  });
+  if (Path.size() > MaxUnder)
+    Path.resize(MaxUnder);
   json::Array Under;
-  for (const std::string &Function : reverse(Shared))
-    Under.push_back(Function);
+  for (const Covering &Frame : Path)
+    Under.push_back(Frame.Function);
   if (!Under.empty())
     O["under"] = std::move(Under);
   return O;

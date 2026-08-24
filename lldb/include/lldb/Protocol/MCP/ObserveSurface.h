@@ -32,8 +32,16 @@
 
 namespace lldb_protocol::mcp {
 
-/// What the `observe` tool is for, in the terms a caller cannot infer from the
-/// schema.
+/// What the `trace_program` tool is for, in the terms a caller cannot infer from
+/// the schema.
+///
+/// The name carries more of this than the text does. Measured on an agent given a
+/// hang to fix: the tools reached it as names in a deferred list with their schemas
+/// unloaded, it judged "from its names alone" that a debugger was a poor fit for a
+/// nonterminating pass, and it never spent the call that would have shown it any of
+/// what follows. A name that says the tool runs a program and traces it is
+/// therefore load-bearing in a way a description cannot be, because the description
+/// is read after the decision it would have informed.
 ///
 /// It opens with a plan rather than with prose. Measured on two agents given
 /// this tool on two different tasks: both reported that they could not tell what
@@ -81,7 +89,8 @@ inline constexpr llvm::StringLiteral ObserveToolDescription =
     "detail: captures are read there alone, so a call is affordable, and what "
     "one prints comes back in \"inferior_output\".";
 
-/// What the `command` tool is for, and how it divides the work with `observe`.
+/// What the `command` tool is for, and how it divides the work with
+/// `trace_program`.
 ///
 /// Three agents in a row reported that they could not tell which of the two to
 /// reach for; one of them never called `command` at all, saying it could not work
@@ -96,7 +105,8 @@ inline constexpr llvm::StringLiteral CommandToolDescription =
     "already in and leaves that state behind for the next call, so it is what to "
     "use to look around a process that is stopped, or to set a target up by hand.\n"
     "\n"
-    "To run a program and collect state while it runs, use \"observe\" instead: it "
+    "To run a program and collect state while it runs, use \"trace_program\" "
+    "instead: it "
     "does the launch, the tracepoints and the run in one call, and owns the process "
     "it started -- nothing is left stopped for a command to inspect afterwards.";
 

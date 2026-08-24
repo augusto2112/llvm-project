@@ -365,10 +365,16 @@ public:
   /// found in, and past a handful the tail is noise however long the run.
   static constexpr size_t MaxHot = 8;
 
-  /// Frames of the shared path reported. The innermost are kept: a deep shared
-  /// path in a compiler is mostly the pass manager that every stack ends in, and
-  /// what distinguishes this run from any other is at the other end.
+  /// Frames of the covering path reported. The innermost are kept: a deep path in
+  /// a compiler is mostly the pass manager that every stack ends in, and what
+  /// distinguishes this run from any other is at the other end.
   static constexpr size_t MaxUnder = 8;
+
+  /// The share of samples a function has to appear in to be on that path, as a
+  /// reciprocal. Half: a function on the stack for half a run is where the run is,
+  /// and a threshold of every sample is broken by one sample taken in the dynamic
+  /// loader before the program reached its own code.
+  static constexpr uint64_t UnderShareDivisor = 2;
 private:
   struct Site {
     std::string Function;
@@ -381,13 +387,24 @@ private:
     /// that does not depend on how the map was built.
     uint64_t FirstSample = 0;
 
-    /// The frames every sample in this site shared, outermost first.
-    ///
-    /// Held per site rather than per thread because one stray sample ruins a
-    /// path: a run whose thread was in dyld's startup for one sample out of
-    /// twenty had nothing in common across all of them but `start`, while the
-    /// eleven samples inside the hot function shared their whole way in.
-    std::vector<std::string> Shared;
+  };
+
+  /// How many samples a function was anywhere on the stack of, and how deep it sat
+  /// in them.
+  ///
+  /// This is what says where a run is. Self time -- which function the innermost
+  /// frame was in -- is the wrong question for an unoptimized build: measured on a
+  /// compiler looping inside one analysis, the eight hottest sites were
+  /// `isPresent`, `capacity`, `getValueID` and other one-line accessors with one or
+  /// two samples each, while the function that was actually spinning appeared in
+  /// every sample and in none of them as the innermost frame.
+  struct Coverage {
+    uint64_t Samples = 0;
+
+    /// Summed so that the mean orders the functions the way a backtrace is
+    /// ordered. Two functions on one stack cannot both be innermost, so the means
+    /// separate a caller from its callee even where their sample counts agree.
+    uint64_t DepthSum = 0;
   };
 
   /// Keyed by thread and innermost function, because a program with one thread
@@ -395,6 +412,9 @@ private:
   std::map<std::pair<lldb::tid_t, std::string>, Site> m_sites;
 
   std::map<lldb::tid_t, uint64_t> m_per_thread;
+
+  /// Keyed by thread and function, for the same reason the sites are.
+  std::map<std::pair<lldb::tid_t, std::string>, Coverage> m_coverage;
 
   uint64_t m_samples = 0;
 };

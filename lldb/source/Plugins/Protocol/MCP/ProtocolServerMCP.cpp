@@ -56,7 +56,7 @@ void lldb_private::mcp::PopulateServer(lldb_protocol::mcp::Server &server) {
       std::make_unique<CommandTool>(
           "command", std::string(CommandToolDescription)));
   server.AddTool(std::make_unique<ObserveTool>(
-      "observe", std::string(ObserveToolDescription)));
+      "trace_program", std::string(ObserveToolDescription)));
   server.AddTool(std::make_unique<DebuggerListTool>(
       "debugger_list", "List debugger instances with their debugger_id."));
   server.AddTool(std::make_unique<DebuggerCreateTool>(

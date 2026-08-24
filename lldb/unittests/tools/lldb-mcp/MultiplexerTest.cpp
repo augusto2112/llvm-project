@@ -177,7 +177,7 @@ public:
     auto server = std::make_unique<Server>("fake", "0.1.0");
     server->AddTool(std::make_unique<FakeCommandTool>(label));
     server->AddTool(
-        std::make_unique<FakeCommandTool>(std::move(label), "observe"));
+        std::make_unique<FakeCommandTool>(std::move(label), "trace_program"));
     server->AddTool(std::make_unique<FakeDebuggerListTool>());
     server->AddTool(std::make_unique<FakeDebuggerCreateTool>());
     server->AddTool(std::make_unique<FakeDebuggerDeleteTool>());
@@ -333,7 +333,7 @@ TEST_F(MultiplexerTest, ToolsListIsUnifiedSurface) {
   for (const ToolDefinition &tool : result->tools)
     names.push_back(tool.name);
   EXPECT_THAT(names, testing::UnorderedElementsAre(
-                         "command", "observe", "sessions_list",
+                         "command", "trace_program", "sessions_list",
                          "session_create", "session_close"));
 }
 
@@ -389,7 +389,7 @@ TEST_F(MultiplexerTest, ObserveRoutesByInstance) {
           {"plan", json::Object{{"program", "/bin/true"}}},
           {"debugger",
            formatv("lldb-mcp://instance/{0}/debugger/1", pid).str()}};
-      client->ToolsCall(CallToolParams{"observe", json::Value(std::move(args))},
+      client->ToolsCall(CallToolParams{"trace_program", json::Value(std::move(args))},
                         std::move(reply));
     });
   };

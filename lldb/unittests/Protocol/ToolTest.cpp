@@ -23,7 +23,7 @@ using namespace lldb_protocol::mcp;
 namespace {
 
 ObserveTool MakeTool() {
-  return ObserveTool("observe", std::string(ObserveToolDescription));
+  return ObserveTool("trace_program", std::string(ObserveToolDescription));
 }
 
 /// The message a call failed with, so that a long piece of guidance can be
