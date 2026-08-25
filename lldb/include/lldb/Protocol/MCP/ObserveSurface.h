@@ -54,6 +54,20 @@ namespace lldb_protocol::mcp {
 /// time -- one of them having already used three of its fields correctly. A
 /// nested schema is read, and an example is understood, so the example is what
 /// leads.
+///
+/// Which makes the example the most load-bearing string here, and it has to be
+/// right about two things a caller cannot check. It is copied for its *shape*,
+/// so a capture spelled in a way that does not resolve is a failure handed to
+/// everyone who copies it: an earlier example read a field off a class where the
+/// real declaration had none, and the captures agents wrote afterwards imitated
+/// it name for name, drawing "no member named" from the compiler each time. And
+/// an example naming real code names it for every caller, whatever they are
+/// working on, so it stays away from code anyone might be sent here to fix.
+///
+/// Both are settled the same way: the example names the program the observe API
+/// test builds, and that test runs the example out of this string as it is
+/// written, replacing "program" and nothing else. A spelling that stops
+/// resolving fails a test rather than a caller.
 inline constexpr llvm::StringLiteral ObserveToolDescription =
     "Run a program under a set of tracepoints and report what happened, "
     "instead of stepping through it. One call launches the program, reads the "
@@ -62,13 +76,16 @@ inline constexpr llvm::StringLiteral ObserveToolDescription =
     "holding the full event stream.\n"
     "\n"
     "A plan with two tracepoints on it:\n"
-    "{\"plan\": {\"program\": \"build/bin/opt\",\n"
-    "           \"args\": [\"-passes=sroa\", \"-S\", \"in.ll\"],\n"
+    "{\"plan\": {\"program\": \"build/bin/analyze\",\n"
+    "           \"args\": [\"input.txt\"],\n"
     "           \"observe\": [\n"
-    "             {\"at\": \"SSAUpdater.cpp:450\",\n"
-    "              \"capture\": [\"L.Name\", \"StoredValue.Ty.TypeID\"]},\n"
-    "             {\"at\": \"llvm::SROA::runOnAlloca\", \"on\": \"return\",\n"
+    "             {\"at\": \"classify_token\",\n"
+    "              \"capture\": [\"tok->kind\", \"tok->text\", \"depth\"]},\n"
+    "             {\"at\": \"parse_expr\", \"on\": \"return\",\n"
     "              \"capture\": [\"$return\"], \"emit\": \"on_change\"}]}}\n"
+    "\n"
+    "An \"at\" is a function name, qualified or not, or a source location "
+    "written as \"file.cpp:1189\".\n"
     "\n"
     "An empty \"observe\" list is crash triage: the program runs untouched, "
     "and the result is how it ended, with a ranked backtrace, locals and "
@@ -77,12 +94,18 @@ inline constexpr llvm::StringLiteral ObserveToolDescription =
     "answers what is running without being told where to look.\n"
     "\n"
     "What matters about a capture is whether it is a path or a call, not how "
-    "it is spelled: \"I.Ty.TypeID\" and \"I->Ty.TypeID\" are both paths, and "
+    "it is spelled: \"tok.kind\" and \"tok->kind\" are both paths, and "
     "\"->\" and \"[]\" are as much a part of one as \".\" is. Prefer a path "
-    "over a call, \"I->getType()\". A path is a debug-info lookup and a memory "
-    "read, while a call compiles and runs code inside the observed process, and "
-    "on a hot tracepoint a call is measured and turned off partway through the "
-    "run.\n"
+    "over a call, \"tok->describe()\". A path is a debug-info lookup and a "
+    "memory read, while a call compiles and runs code inside the observed "
+    "process, and on a hot tracepoint a call is measured and turned off "
+    "partway through the run.\n"
+    "\n"
+    "A path names what the type declares, which is not what it exposes: where a "
+    "class offers \"getName()\", the path is the field that accessor reads, "
+    "private or not, because debug info describes storage rather than an API. "
+    "Reading a field name off an accessor is the common way a capture fails, so "
+    "where a name is a guess, capture the accessor call as well.\n"
     "\n"
     "Capture more expressions than you think you need. A capture costs wall "
     "clock once per run, not tokens per round trip, and the alternative to "

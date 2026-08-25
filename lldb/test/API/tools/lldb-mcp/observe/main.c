@@ -52,6 +52,23 @@ int nested(struct Outer *o) { return o->in.a + o->in.b + o->c; }
    readable, just not yet. */
 int sometimes_null(struct Outer *o) { return o ? o->c : 0; }
 
+/* The worked example in trace_program's own description names these two
+   functions and reads exactly these members, and TestObserve runs that example
+   as it is written. A rename here is a rename there, which is the point: an
+   example a test does not execute drifts away from the code it describes, and
+   the description is the one string a caller copies before it has read anything
+   else. */
+struct Token {
+  int kind;
+  const char *text;
+};
+
+int classify_token(struct Token *tok, int depth) { return tok->kind + depth; }
+
+/* Returns a different value at every call, so that a return observation in
+   on_change mode has a change to emit at each one. */
+int parse_expr(int depth) { return depth * depth + 1; }
+
 /* Recursion gives a backtrace runs of identical frames to collapse. */
 int recurse(int n) { return n <= 0 ? 0 : recurse(n - 1) + 1; }
 
@@ -199,6 +216,16 @@ int main(int argc, char **argv) {
   for (i = 0; i < 6; ++i)
     total += sometimes_null(i < 3 ? NULL : &o);
   total += recurse(4);
+
+  /* The description's example observes these two, so the run it describes has to
+     reach them on the path a plan naming no mode takes. */
+  {
+    struct Token tokens[3] = {{1, "let"}, {2, "x"}, {4, "="}};
+    for (i = 0; i < 3; ++i)
+      total += classify_token(&tokens[i], i);
+    for (i = 0; i < 4; ++i)
+      total += parse_expr(i);
+  }
 
   printf("total=%d\n", total);
 

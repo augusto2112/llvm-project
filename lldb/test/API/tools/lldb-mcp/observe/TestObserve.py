@@ -42,6 +42,28 @@ def serialized_scalar(rendered):
     return rendered
 
 
+def documented_example(description):
+    """The worked plan out of a tool description, as an object.
+
+    Brace-matched from the first `{"plan"` rather than found by line or by a
+    fixed slice, so rewrapping the prose around the example changes nothing
+    here. The example carries no brace inside a string, and one added later
+    fails this rather than being matched wrongly.
+    """
+    start = description.find('{"plan"')
+    if start < 0:
+        raise AssertionError(f"no worked example in {description!r}")
+    depth = 0
+    for end in range(start, len(description)):
+        if description[end] == "{":
+            depth += 1
+        elif description[end] == "}":
+            depth -= 1
+            if depth == 0:
+                return json.loads(description[start : end + 1])
+    raise AssertionError("the example's braces are unbalanced")
+
+
 def capture_tier(capture):
     """The tier out of a rendered capture report.
 
@@ -183,6 +205,18 @@ class ObserveTestCase(TestBase):
             )
         return document
 
+    def tool_description(self, name):
+        """What the server advertises for one tool.
+
+        Read over the protocol rather than out of the header, because the string
+        a caller acts on is the one that arrives in tools/list.
+        """
+        reply = self.connect().request("tools/list")
+        for tool in reply["result"]["tools"]:
+            if tool["name"] == name:
+                return tool["description"]
+        raise AssertionError(f"no tool named {name}: {reply}")
+
     def events(self, document):
         """The artifact's events, one per line, as objects."""
         path = document["artifact"]["path"]
@@ -224,6 +258,56 @@ class ObserveTestCase(TestBase):
 
         self.assertIn("null_pointer", terminal["locals"], str(terminal["locals"]))
         self.assertIn("crash_now", terminal["source"])
+
+    def test_the_documented_example_runs(self):
+        """The worked example in the tool's own description resolves every
+        capture it names.
+
+        This is the one string a caller reads before it has read anything else,
+        and it is copied for its shape, so a capture spelled in a way that does
+        not resolve is a failure handed to everyone who copies it. Two fields are
+        replaced -- the program, which is this suite's binary rather than the
+        description's plausible one, and a ceiling generous enough for a slow
+        bot. Everything else runs as the description writes it, so drift on
+        either side lands here.
+        """
+        self.build()
+
+        example = documented_example(self.tool_description("trace_program"))
+        plan = example["plan"]
+        plan["program"] = self.getBuildArtifact("a.out")
+        plan["timeout_seconds"] = 300
+
+        document = self.observe(plan)
+        self.assertEqual(document["outcome"], "exited", str(document))
+
+        # The claim the example makes by being an example: nothing in it needs
+        # repairing, and nothing in it names something that is not there.
+        self.assertEqual(document.get("capture_failures", []), [], str(document))
+
+        entry = document["plan_report"]["classify_token"]
+        self.assertEqual(entry["hits"], 3, str(entry))
+        for expression in ["tok->kind", "tok->text", "depth"]:
+            capture = entry["captures"][expression]
+            # A capture that resolved as a path and never failed collapses to the
+            # tier alone, so this asserts both that it worked and that reaching
+            # through the pointer did not cost an expression evaluation.
+            self.assertEqual(capture_tier(capture), "path", str(capture))
+
+        kinds = document["aggregate"]["classify_token"]["tok->kind"]["values"]
+        self.assertEqual(
+            {serialized_scalar(key): count for key, count in kinds.items()},
+            {"1": 1, "2": 1, "4": 1},
+        )
+
+        # The second tracepoint: a return value in on_change mode, over four
+        # calls that each return something different.
+        returns = document["plan_report"]["parse_expr"]
+        self.assertEqual(returns["hits"], 4, str(returns))
+        self.assertEqual(returns["emitted"], 4, str(returns))
+        self.assertEqual(
+            document["aggregate"]["parse_expr"]["$return"]["distinct"], 4, str(returns)
+        )
 
     def test_on_change_collapses_a_loop(self):
         """on_change emits once per run of identical hits, and the aggregate

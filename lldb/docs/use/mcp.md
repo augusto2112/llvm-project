@@ -97,7 +97,7 @@ A plan describes the program:
     "observe": [
       {
         "at": "InstCombinerImpl::visitAdd",
-        "capture": ["I.Ty.TypeID", "I.hasNSW"],
+        "capture": ["I.VTy->ID", "I.SubclassID"],
         "emit": "on_change"
       }
     ]
@@ -161,7 +161,7 @@ function the profile or the backtrace named to get the repeating block.
 ```json
 {"plan": {"program": "build/bin/opt",
           "args": ["-passes=vector-combine", "-S", "in.ll"],
-          "observe": [{"at": "foldShuffleToIdentity", "capture": ["I->Name"]}],
+          "observe": [{"at": "foldShuffleToIdentity", "capture": ["I.VTy->ID"]}],
           "compare": [{"label": "fixed"},
                       {"label": "before", "program": "/tmp/opt.before"}]}}
 ```
@@ -365,7 +365,7 @@ inline only when the program ended badly, which is when they are wanted.
 #### Writing a good plan
 
 What matters about a capture is whether it is a **path** or a **call**, not how
-it is spelled. `I.Ty.TypeID` and `I->Ty.TypeID` are both paths: `->` and `[]` are
+it is spelled. `I.VTy->ID` and `I->VTy->ID` are both paths: `->` and `[]` are
 as much a part of a path as `.` is, and unlike `dwim-print`, which accepts only
 `.`, a capture may use them. `I->getType()` is a call, and that is the
 distinction to care about.
@@ -377,6 +377,14 @@ that proves too expensive is measured and switched off partway through so the ru
 stays inside its timeout — yielding partial data where the path would have
 yielded all of it. The report says when this happened and names the cheaper
 spelling.
+
+A path names what the type **declares**, which for a C++ class is not what it
+exposes. Debug info describes storage, so where `llvm::Value` offers
+`getType()` the path beside it is `VTy`, and access control does not enter into
+it: a private field is as readable as a public one. Reading a field name off an
+accessor is how a capture most often fails — `getName()` does not imply a `Name`,
+and `size()` does not imply a `Size`. Where a member name is a guess, capture the
+accessor call as well and let the cheaper of the two be the one that resolves.
 
 A capture whose value renders large comes back as the value's own value alone --
 for a pointer, its address -- with a marker saying how much was left out. Depth and
@@ -419,7 +427,7 @@ hit:
           "args": ["-passes=instcombine", "-S", "repro.ll"],
           "observe": [
             {"at": "InstCombinerImpl::visitAdd",
-             "capture": ["I->Ty.TypeID", "I->hasNSW"],
+             "capture": ["I.VTy->ID", "I.SubclassID", "I.getName()"],
              "emit": "on_change"},
             {"at": "InstCombinerImpl::visitAdd", "on": "return",
              "capture": ["$return"]}]}}

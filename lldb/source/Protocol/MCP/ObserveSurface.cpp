@@ -49,7 +49,7 @@ json::Value lldb_protocol::mcp::ObservationSchema() {
            {"at",
             schemaField("string",
                         "Where to observe, as a function name -- qualified or "
-                        "not, \"llvm::SROA::runOnAlloca\" -- or a source "
+                        "not, \"Parser::parseExpr\" -- or a source "
                         "location written as \"file.cpp:1189\". An address is "
                         "rejected because it cannot be carried from one run "
                         "into the next.")},
@@ -68,10 +68,12 @@ json::Value lldb_protocol::mcp::ObservationSchema() {
            {"capture",
             schemaStringArray(
                 "Expressions to read at each hit, in the language of the "
-                "program: a member path like \"I.Ty.TypeID\" or \"N->Opcode\", "
-                "or a call like \"describe(N)\". A call to the program's own "
-                "printer, \"N->dump()\", is how an object that knows how to "
-                "describe itself is read; what it prints comes back in "
+                "program: a member path like \"tok.kind\" or \"tok->text\", "
+                "or a call like \"describe(tok)\". A path names what the type "
+                "declares rather than what it exposes, so the field behind an "
+                "accessor and not the accessor's name. A call to the program's "
+                "own printer, \"tok->dump()\", is how an object that knows how "
+                "to describe itself is read; what it prints comes back in "
                 "\"inferior_output\" rather than as the capture's value. Empty is "
                 "a bare tracepoint recording only hit counts, which already "
                 "answers whether the code runs at all.")},
