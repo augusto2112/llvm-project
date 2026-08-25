@@ -3064,47 +3064,87 @@ Three places, per the spec, and none of them is a poll:
 2. Any stop the consumer already takes. `Drain()` is idempotent, so calling it more often than necessary costs a memory read.
 3. Process exit. Set an internal breakpoint on `exit` and `_exit` when the first capture site is installed, and drain from it. If neither symbol resolves, report the undrained count instead of dropping it — a run whose captures never reached the debugger must say so rather than report an empty list.
 
-- [ ] **Step 4: Write the failing test**
+- [ ] **Step 4: Make the width handling testable, and test it**
 
-Add to `TestFastConditions.py`:
+Installing a capture-only site needs no public API and this prototype should not add one to the SB API, so the end-to-end coverage of captures lives in Task 11's MCP test. What *can* be covered here is the part most likely to be wrong: turning a record's eight bytes back into a value of the capture's own width.
 
-```python
-    @skipUnlessDarwin
-    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
-    def test_scalar_capture_reaches_the_debugger_without_stopping(self):
-        """Captured values arrive without a stop per hit.
-
-        The program calls the function 100,000 times, so a stop per captured
-        value is what this is measuring the absence of.
-        """
-        target = self.setup()
-        bp = target.BreakpointCreateBySourceRegex(
-            "return total;", lldb.SBFileSpec("main.c")
-        )
-        # Recording without stopping is what a capture-only site is for, so the
-        # condition is absent rather than false.
-        site = target.GetFunctionPatchManagerCaptureForTest(bp, ["total", "seed"])
-        process = target.LaunchSimple(None, None, self.get_process_working_directory())
-        self.assertState(process.GetState(), lldb.eStateExited)
-        self.assertEqual(bp.GetHitCount(), 0, "no hit stopped the process")
-```
-
-That test needs a way to install a capture-only site from Python, which no public API offers and which this prototype should not add to the SB API. So instead, assert the capture path through the MCP `observe` tool in Task 11, and cover the drain arithmetic here with a unit test on the parts that do not need a process.
-
-Replace the test above with a unit test in `FunctionPatchTest.cpp` covering the byte-width question, which is the part most likely to be wrong:
+Do not test that by reading `PatchRecord::Value` in a test and asserting on it — that asserts nothing about this code. Extract the width handling into a pure helper and test the helper. Add to `FunctionPatch.h`:
 
 ```cpp
-// The inferior zero-extends every scalar into eight bytes, so the width to read
-// back comes from the type, not from the record. Reading eight bytes for a
-// `char` would pick up the padding beside it.
-TEST(FunctionPatchTest, ReadsACaptureAtItsOwnWidth) {
-  PatchRecord Rec{1, 0, 0x00000000000000FF};
-  EXPECT_EQ(0xFFu, Rec.Value & 0xFF);
-  EXPECT_EQ(0xFFu, Rec.Value & 0xFFFFFFFFFFFFFFFFull);
+/// The bytes of a recorded capture, at the width its type says it has.
+///
+/// The inferior copies a value into a fixed eight-byte field, so a narrower
+/// scalar arrives zero-extended. Reading all eight bytes back would report the
+/// padding beside a `char` as part of its value, and a byte order that differed
+/// from the inferior's would reorder every multi-byte scalar.
+llvm::SmallVector<uint8_t, 8> CaptureValueBytes(uint64_t Value, size_t ByteSize,
+                                               lldb::ByteOrder Order);
+```
+
+and to `FunctionPatch.cpp`:
+
+```cpp
+llvm::SmallVector<uint8_t, 8>
+lldb_private::CaptureValueBytes(uint64_t Value, size_t ByteSize,
+                                lldb::ByteOrder Order) {
+  const size_t Width = std::min<size_t>(ByteSize, sizeof(uint64_t));
+  llvm::SmallVector<uint8_t, 8> Bytes(Width, 0);
+  for (size_t I = 0; I < Width; ++I) {
+    const uint8_t Byte = static_cast<uint8_t>(Value >> (8 * I));
+    Bytes[Order == lldb::eByteOrderBig ? Width - 1 - I : I] = Byte;
+  }
+  return Bytes;
 }
 ```
 
-That assertion is weak on its own, which is the honest state of unit-testing this piece: the interesting behaviour is the interaction with a live JIT and debug info. Task 11's end-to-end test is what actually covers it, and this task's real verification is step 5.
+Then the tests in `FunctionPatchTest.cpp` assert real behaviour:
+
+```cpp
+TEST(FunctionPatchTest, ReadsANarrowCaptureWithoutItsPadding) {
+  // A one-byte capture arrives zero-extended into eight. Reading all eight
+  // would report seven bytes of padding as part of the value.
+  auto Bytes = CaptureValueBytes(0xFF, 1, lldb::eByteOrderLittle);
+  ASSERT_EQ(1u, Bytes.size());
+  EXPECT_EQ(0xFF, Bytes[0]);
+}
+
+TEST(FunctionPatchTest, ReadsAFourByteCaptureWithoutTheHighHalf) {
+  auto Bytes = CaptureValueBytes(0x00000000AABBCCDD, 4,
+                                 lldb::eByteOrderLittle);
+  ASSERT_EQ(4u, Bytes.size());
+  EXPECT_EQ(0xDD, Bytes[0]);
+  EXPECT_EQ(0xAA, Bytes[3]);
+}
+
+// A double reaches the record through a memcpy rather than a cast, so its bits
+// are the bits the program held. They have to survive the trip back too.
+TEST(FunctionPatchTest, RoundTripsADoublesBits) {
+  const double Original = -1.5e-300;
+  uint64_t Raw = 0;
+  std::memcpy(&Raw, &Original, sizeof Raw);
+  auto Bytes = CaptureValueBytes(Raw, sizeof(double), lldb::eByteOrderLittle);
+  ASSERT_EQ(8u, Bytes.size());
+  double Back = 0;
+  std::memcpy(&Back, Bytes.data(), sizeof Back);
+  EXPECT_EQ(Original, Back);
+}
+
+TEST(FunctionPatchTest, OrdersBytesForABigEndianReader) {
+  auto Bytes = CaptureValueBytes(0x0000000000ABCDEF, 4, lldb::eByteOrderBig);
+  ASSERT_EQ(4u, Bytes.size());
+  EXPECT_EQ(0x00, Bytes[0]);
+  EXPECT_EQ(0xEF, Bytes[3]);
+}
+
+// A type wider than the field cannot have fitted through it, so clamping is
+// what keeps a bad type from reading past the record.
+TEST(FunctionPatchTest, ClampsAWidthWiderThanTheField) {
+  auto Bytes = CaptureValueBytes(~0ull, 16, lldb::eByteOrderLittle);
+  EXPECT_EQ(8u, Bytes.size());
+}
+```
+
+Step 2's `ValueObjectConstResult::Create` call then builds its `DataExtractor` from `CaptureValueBytes(Rec.Value, ByteSize, Order)` rather than from `&Rec.Value` directly.
 
 - [ ] **Step 5: Verify against a real process**
 
@@ -3290,7 +3330,7 @@ comparing hit counts across runs needs to know which of them paid for it."
 
 Two spec items deliberately have no task, and both are documentation rather than code: the "known behavioural differences" list, which belongs in the setting's description (Task 8 step 1 carries the timing and semantics warning) and in the run-level note (Task 11 step 3); and the naming decision, which Task 7 step 9 implements by looking the symbol up in the JIT module.
 
-**Where the plan is honestly weak.** Task 10's unit test is thin, and the task says so rather than dressing it up — the interesting behaviour there is the interaction between a live JIT, debug info, and a ring, which a unit test cannot reach. Its real coverage is Task 11's end-to-end test plus the manual verification in its step 5. Task 5 has the same shape and names the boundary explicitly. If either task's implementer finds a cheap way to unit-test what is deferred, taking it is an improvement, not a deviation.
+**Where the plan is honestly weak.** Task 10 unit-tests the width arithmetic through a pure helper, which is real coverage, but it cannot unit-test the interaction between a live JIT, debug info and a ring — no unit test reaches that. Its coverage is Task 11's end-to-end test plus the manual verification in its step 5. Task 5 has the same shape and names the boundary explicitly. If either task's implementer finds a cheap way to unit-test what is deferred, taking it is an improvement, not a deviation.
 
 **Task 8 step 6 leaves a choice open** between forwarding the trap site's callback to the user's `BreakpointLocation` and giving the site its own internal breakpoint. That is deliberate: which one is cleaner depends on how `StopInfoBreakpoint` handles a site whose constituent location sits at a different address, which is worth discovering with the code in hand rather than guessing here. The task says to record which was chosen.
 
