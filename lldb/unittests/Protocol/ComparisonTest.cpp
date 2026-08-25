@@ -70,6 +70,9 @@ ObservationResult MakeRun(Outcome How, uint64_t Hits,
   CaptureReport C;
   C.Expr = Capture.str();
   C.Tier = ValueResolutionTier::VariablePath;
+  // A tier is set by a resolution that worked, so a capture holding one was
+  // evaluated. Left at zero the fixture describes a state no run produces.
+  C.Evaluations = Hits;
   Report.Captures.push_back(std::move(C));
   Report.HitTuples = std::move(Tuples);
   R.Observations.push_back(std::move(Report));
@@ -104,7 +107,7 @@ TEST(ComparisonTest, TwoIdenticalRunsReportNoDifferenceAndNameWhatMatched) {
   ASSERT_NE(Agreed, nullptr);
   EXPECT_EQ(Render(*Agreed),
             R"(["outcome","ended","loop.resolved_locations","loop.hits",)"
-            R"("loop.emitted","loop.n"])");
+            R"("loop.emitted"])");
 }
 
 TEST(ComparisonTest, WhatDivergedCarriesBothSidesAndIsNotAlsoCalledAgreed) {
@@ -189,6 +192,48 @@ TEST(ComparisonTest, HowLongARunTookIsWholeMilliseconds) {
             R"("hits":{"loop":1},"label":"after","outcome":"exited"},)"
             R"({"elapsed_ms":0,"ended":"the program ran to completion",)"
             R"("hits":{"loop":1},"label":"before","outcome":"exited"}])");
+}
+
+TEST(ComparisonTest, HowACaptureResolvedIsComparedAndWhatItCostIsNot) {
+  // A capture reports itself as a cost account, and a timing in a comparison makes
+  // every expression-tier capture diverge on the clock alone -- measured at 165 of
+  // 803 chars of one response, two slightly different timings under a name a
+  // reader takes for the value of the expression.
+  ObservationResult A = MakeRun(Outcome::Exited, 1, {Tuple({"1"})});
+  ObservationResult B = A;
+  for (ObservationResult *R : {&A, &B}) {
+    CaptureReport &C = R->Observations.front().Captures.front();
+    C.Tier = ValueResolutionTier::Expression;
+    C.TotalMs = R == &A ? 599.88 : 632.14;
+  }
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  EXPECT_EQ(Out.getAsObject()->get("diverged"), nullptr) << Render(Out);
+  // Which mechanism read the value is still compared: a capture read through the
+  // expression evaluator in one run and off a variable path in the other is a
+  // difference in what was measured.
+  const std::string Agreed = Render(*Out.getAsObject()->getArray("agreed"));
+  EXPECT_NE(Agreed.find("loop.n"), std::string::npos) << Agreed;
+}
+
+TEST(ComparisonTest, ACaptureThatFailedInBothRunsIsNotADivergence) {
+  // 431 chars of one response were a capture that failed the same way twice,
+  // reported as a difference because the two runs failed at it a different number
+  // of times.
+  ObservationResult A = MakeRun(Outcome::Exited, 4, {Tuple({"1"})});
+  ObservationResult B = MakeRun(Outcome::Exited, 9, {Tuple({"1"})});
+  for (ObservationResult *R : {&A, &B}) {
+    CaptureReport &C = R->Observations.front().Captures.front();
+    C.Tier = ValueResolutionTier::Unresolved;
+    C.Errors = C.Evaluations;
+  }
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  const llvm::json::Object *Diverged = Object(Out, "diverged");
+  ASSERT_NE(Diverged, nullptr) << Render(Out);
+  EXPECT_EQ(Diverged->get("loop.n"), nullptr) << Render(Out);
+  const std::string Agreed = Render(*Out.getAsObject()->getArray("agreed"));
+  EXPECT_NE(Agreed.find("loop.n"), std::string::npos) << Agreed;
 }
 
 TEST(ComparisonTest, TheFirstHitTheyDisagreeOnIsReportedWithWhatEachSaw) {
@@ -279,7 +324,7 @@ TEST(ComparisonTest, ARunWithNoResultIsNotInTheDenominatorOfAgreement) {
   ASSERT_NE(Agreed, nullptr) << Render(Out);
   EXPECT_EQ(Render(*Agreed),
             R"(["outcome","ended","loop.resolved_locations","loop.hits",)"
-            R"("loop.emitted","loop.n"])");
+            R"("loop.emitted"])");
 }
 
 TEST(ComparisonTest, AnObservationOnlyOneRunResolvedIsADifference) {

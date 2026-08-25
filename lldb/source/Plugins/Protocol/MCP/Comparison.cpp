@@ -137,6 +137,59 @@ std::optional<size_t> FirstDifference(ArrayRef<std::string> A,
   return std::nullopt;
 }
 
+/// How a capture resolved, or nothing when it resolved the way nearly every
+/// capture does and has nothing to say.
+///
+/// What a capture reports about itself in its own run is a cost account --
+/// `{"evaluations":1,"tier":"expression","total_ms":599.88}` -- and a timing in a
+/// comparison makes every expression-tier capture diverge on the clock alone.
+/// Measured at 165 of the 803 chars of one comparison, spent on two slightly
+/// different timings, under a name a reader takes for the value of the
+/// expression. A capture that failed identically in both runs was reported as a
+/// divergence for the same reason.
+///
+/// Two runs of one plan resolve their captures the same way or they do not, and
+/// that is the comparable fact: which mechanism read the value, whether anything
+/// failed, whether a fixit rewrote the expression, whether cost control gave up
+/// on it. How long it took is a property of the machine.
+std::optional<std::string> DescribeResolution(const CaptureReport &Capture) {
+  // `$return` is read out of the ABI's result location rather than resolved from
+  // a name, so it has no tier and nothing that can fail.
+  if (Capture.FromABI)
+    return std::nullopt;
+
+  const bool Clean =
+      Capture.Errors == 0 && Capture.FixedExpr.empty() && !Capture.Disabled;
+
+  // A capture that resolved as a path and never failed is most captures, and a
+  // row saying so in both runs is a name in `agreed` earning nothing.
+  if (Clean && Capture.Tier == lldb_private::ValueResolutionTier::VariablePath)
+    return std::nullopt;
+
+  // Never evaluated is not the same as could not be read: the observation may
+  // never have been hit. The default tier spells itself "unavailable", which is
+  // the word a capture that genuinely failed gets, so naming the tier here would
+  // collapse the one distinction the rest of the report keeps.
+  if (Clean && Capture.Evaluations == 0)
+    return "not_evaluated";
+
+  if (Clean)
+    return ToString(Capture.Tier).str();
+
+  json::Object O{{"tier", ToString(Capture.Tier)}};
+  // The run is not evaluating what the caller wrote, and beside the key -- which
+  // is the caller's own spelling -- this is what connects the two.
+  if (!Capture.FixedExpr.empty())
+    O["fixed_as"] = Capture.FixedExpr;
+  // Whether, not how many: the count is a number of hits, and two runs that both
+  // failed to read a name differ in it whenever they differ in how far they got.
+  if (Capture.Errors != 0)
+    O["errors"] = true;
+  if (Capture.Disabled)
+    O["disabled"] = true;
+  return Render(std::move(O));
+}
+
 const ObservationReport *FindObservation(const ObservationResult &Result,
                                          StringRef Label) {
   for (const ObservationReport &Report : Result.Observations)
@@ -226,8 +279,8 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
       if (Report->ResolutionError)
         Compare.Add(Label + ".error", Run.Label, *Report->ResolutionError);
       for (const CaptureReport &Capture : Report->Captures)
-        Compare.Add(Label + "." + Capture.Expr, Run.Label,
-                    Truncate(Render(Capture.Render())));
+        if (std::optional<std::string> How = DescribeResolution(Capture))
+          Compare.Add(Label + "." + Capture.Expr, Run.Label, std::move(*How));
     }
 
     // Rendered per run rather than compared, since two runs' aggregates of one
