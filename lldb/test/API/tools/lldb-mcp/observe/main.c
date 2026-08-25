@@ -49,7 +49,13 @@ int nested(struct Outer *o) { return o->in.a + o->in.b + o->c; }
 /* Called with a null pointer at its first calls and a real one at the rest, so
    that a capture reaching through it is unavailable at some hits and available
    at others. That is the case a capture must not be given up on: the value is
-   readable, just not yet. */
+   readable, just not yet.
+
+   How many of the calls are null is load-bearing. A capture that has failed at
+   every hit so far is given UnresolvableCaptureAttempts of them before it is
+   turned off, which is exactly what the attempts are for, so a fixture whose
+   null run is that long is testing the boundary rather than the behaviour --
+   and lands on the wrong side of it. Fewer nulls than attempts. */
 int sometimes_null(struct Outer *o) { return o ? o->c : 0; }
 
 /* The worked example in trace_program's own description names these two
@@ -239,7 +245,7 @@ int main(int argc, char **argv) {
     total += returns_value(i);
   total += nested(&o);
   for (i = 0; i < 6; ++i)
-    total += sometimes_null(i < 3 ? NULL : &o);
+    total += sometimes_null(i < 2 ? NULL : &o);
   total += recurse(4);
 
   /* The description's example observes these two, so the run it describes has to

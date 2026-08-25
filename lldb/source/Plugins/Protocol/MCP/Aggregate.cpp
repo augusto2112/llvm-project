@@ -25,7 +25,8 @@ using namespace lldb_private::mcp;
 using namespace llvm;
 
 void Aggregator::Record(StringRef Label, StringRef Capture,
-                        StringRef RenderedValue, uint64_t Seq, uint64_t Hit) {
+                        StringRef RenderedValue, bool IsDocument, uint64_t Seq,
+                        uint64_t Hit) {
   CaptureSummary &Summary = m_labels[Label.str()][Capture.str()];
   std::string Rendered = RenderedValue.str();
 
@@ -41,9 +42,20 @@ void Aggregator::Record(StringRef Label, StringRef Capture,
   if (Stats.Count == 0) {
     Stats.FirstSeq = Seq;
     Stats.FirstHit = Hit;
+    Stats.Document = IsDocument;
   }
   ++Stats.Count;
   Summary.Last = std::move(Rendered);
+}
+
+json::Value Aggregator::Displayed(StringRef Key, bool Document) {
+  if (!Document)
+    return Key.str();
+  if (Expected<json::Value> Parsed = json::parse(Key))
+    return std::move(*Parsed);
+  else
+    consumeError(Parsed.takeError());
+  return Key.str();
 }
 
 namespace {
@@ -95,7 +107,13 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   if (Summary.Values.size() == 1) {
     const std::pair<const std::string, ValueStats> &Only =
         *Summary.Values.begin();
-    return formatv("{0} x{1}", Only.first, Only.second.Count).str();
+    if (!Only.second.Document)
+      return formatv("{0} x{1}", Only.first, Only.second.Count).str();
+    // A document cannot go in the string: it is what "{0}" would escape. The
+    // count moves out beside it, since there is nowhere in a document to put an
+    // ` x3` and keep it readable as one.
+    return json::Object{{"value", Displayed(Only.first, /*Document=*/true)},
+                        {"count", Only.second.Count}};
   }
 
   // A capture rendering something unique per hit -- an address, a pointer --
@@ -110,12 +128,41 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
     return std::tie(RHS.second, LHS.first) < std::tie(LHS.second, RHS.first);
   });
 
-  json::Object Histogram;
   size_t Kept = std::min<size_t>(ByCount.size(), MaxHistogramValues);
   Kept = WorthShowing(ArrayRef(ByCount).take_front(Kept), ByCount.size(),
                       [](const auto &Entry) { return Entry.second; });
-  for (size_t I = 0; I < Kept; ++I)
-    Histogram[ByCount[I].first] = ByCount[I].second;
+
+  auto DocumentOf = [&Summary](StringRef Key) {
+    auto It = Summary.Values.find(Key.str());
+    return It != Summary.Values.end() && It->second.Document;
+  };
+
+  // An object keyed by the value, unless any value is a document. A document
+  // used as a key is escaped by the serialization that writes it, which is what
+  // turned a captured `StringRef` into a line of backslashes the caller had to
+  // undo by hand; so where one is present the histogram becomes a list of
+  // value-and-count pairs and each value keeps its shape. The object form is
+  // kept for the scalar case because that is nearly every capture and it is half
+  // the size.
+  const bool AnyDocument =
+      any_of(ArrayRef(ByCount).take_front(Kept),
+             [&](const auto &Entry) { return DocumentOf(Entry.first); });
+
+  json::Value Histogram = nullptr;
+  if (AnyDocument) {
+    json::Array Listed;
+    for (size_t I = 0; I < Kept; ++I)
+      Listed.push_back(
+          json::Object{{"value", Displayed(ByCount[I].first,
+                                           DocumentOf(ByCount[I].first))},
+                       {"count", ByCount[I].second}});
+    Histogram = std::move(Listed);
+  } else {
+    json::Object Keyed;
+    for (size_t I = 0; I < Kept; ++I)
+      Keyed[ByCount[I].first] = ByCount[I].second;
+    Histogram = std::move(Keyed);
+  }
 
   // Ranked by how often each change happened, so a bound drops the edges the
   // run took least often. A cycle is the shape this exists for: two values
@@ -152,10 +199,11 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
 
   json::Array Transitions;
   for (const Edge &Change : Edges)
-    Transitions.push_back(json::Object{{"from", Change.From},
-                                       {"to", Change.To},
-                                       {"count", Change.Count},
-                                       {"first_seq", Change.FirstSeq}});
+    Transitions.push_back(
+        json::Object{{"from", Displayed(Change.From, DocumentOf(Change.From))},
+                     {"to", Displayed(Change.To, DocumentOf(Change.To))},
+                     {"count", Change.Count},
+                     {"first_seq", Change.FirstSeq}});
 
   json::Object Out{{"distinct", Summary.Values.size()},
                    {"values", std::move(Histogram)},
@@ -201,10 +249,11 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
       const size_t KeptRare = std::min<size_t>(Rare.size(), MaxOutliers);
       json::Array Outliers;
       for (size_t I = 0; I < KeptRare; ++I)
-        Outliers.push_back(json::Object{{"value", Rare[I].Rendered},
-                                        {"count", Rare[I].Count},
-                                        {"first_hit", Rare[I].FirstHit},
-                                        {"first_seq", Rare[I].FirstSeq}});
+        Outliers.push_back(json::Object{
+            {"value", Displayed(Rare[I].Rendered, DocumentOf(Rare[I].Rendered))},
+            {"count", Rare[I].Count},
+            {"first_hit", Rare[I].FirstHit},
+            {"first_seq", Rare[I].FirstSeq}});
       Out["outliers"] = std::move(Outliers);
       if (KeptRare < Rare.size())
         Out["outliers_elided"] = Rare.size() - KeptRare;

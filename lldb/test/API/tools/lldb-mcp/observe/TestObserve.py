@@ -717,11 +717,15 @@ class ObserveTestCase(TestBase):
             }
         )
 
-        rendered = document["aggregate"]["deep"]["o"]
+        # A capture with structure keeps it, so the members are read as members
+        # rather than looked for as text in an escaped document.
+        rendered = document["aggregate"]["deep"]["o"]["value"]
         # o, o->in and o->in.a all begin at one address. Identifying a value by
-        # address alone calls the innermost one a cycle and loses it.
-        self.assertNotIn("_cycle", rendered, rendered)
-        self.assertIn('"a"', rendered, rendered)
+        # address alone calls the innermost one a cycle and loses it. Checked over
+        # the whole value, since a cycle marker would sit at whichever depth the
+        # walk gave up at.
+        self.assertNotIn("_cycle", json.dumps(rendered), str(rendered))
+        self.assertIn("a", rendered["in"], str(rendered))
 
     def test_depth_bounds_how_far_a_value_is_expanded(self):
         """A deeper limit reaches further into a nested value."""
@@ -734,14 +738,14 @@ class ObserveTestCase(TestBase):
         }
 
         plan["observe"][0]["depth"] = 1
-        shallow = self.observe(plan)["aggregate"]["deep"]["o"]
+        shallow = self.observe(plan)["aggregate"]["deep"]["o"]["value"]
         plan["observe"][0]["depth"] = 4
-        deep = self.observe(plan)["aggregate"]["deep"]["o"]
+        deep = self.observe(plan)["aggregate"]["deep"]["o"]["value"]
 
         # Depth one reaches o's own members but not through them.
-        self.assertIn('"in"', shallow, shallow)
-        self.assertNotIn('"a"', shallow, shallow)
-        self.assertIn('"a"', deep, deep)
+        self.assertIn("in", shallow, str(shallow))
+        self.assertNotIn("a", shallow["in"], str(shallow))
+        self.assertIn("a", deep["in"], str(deep))
 
     def test_backtrace_records_frames_and_collapses_recursion(self):
         """Frames come back per event, with a run of one function counted."""
@@ -1468,8 +1472,8 @@ class ObserveTestCase(TestBase):
         self.assertEqual(report["hits"], 6, str(report))
 
         capture = report["captures"]["o->c"]
-        # Every hit was tried: giving up here would have lost the three readings
-        # that worked.
+        # Every hit was tried: giving up here would have lost the readings that
+        # worked.
         self.assertEqual(capture["evaluations"], 6, str(capture))
         self.assertNotIn("disabled", capture, str(capture))
         self.assertGreater(capture["errors"], 0, str(capture))
@@ -1480,9 +1484,56 @@ class ObserveTestCase(TestBase):
         for failure in document.get("capture_failures", []):
             self.assertNotEqual(failure["capture"], "o->c", str(failure))
 
-        # And the values that were readable are in the aggregate.
-        values = document["aggregate"]["sometimes_null"]["o->c"]["values"]
-        self.assertIn("3", [serialized_scalar(key) for key in values], str(values))
+        # And the values that were readable are in the aggregate -- only those.
+        # The hits where the pointer was null hold no value the program took, so
+        # they are not values: they are the same error, reported once, in the
+        # capture's own error count. Which leaves one distinct value, and a
+        # single-valued capture collapses to text.
+        aggregate = document["aggregate"]["sometimes_null"]["o->c"]
+        self.assertEqual(aggregate, "3 x4", str(aggregate))
+
+    def test_a_composite_capture_keeps_its_shape(self):
+        """A capture with structure comes back as JSON, not as JSON escaped into
+        a string, and a capture that could not be read is not a value."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "shapes",
+                        "at": "nested",
+                        "capture": ["o->in", "o->nosuch"],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        aggregate = document["aggregate"]["shapes"]
+
+        # The struct arrives as a struct. Keyed as text inside the aggregate,
+        # because that is what lets an emission mode and a comparison decide "the
+        # same value" by comparing strings, but rendered as the document it came
+        # from -- as a key it would be escaped by the serialization that writes the
+        # response, and a caller would have to undo that by hand to read it.
+        entry = aggregate["o->in"]
+        self.assertIsInstance(entry, dict, str(entry))
+        self.assertEqual(entry["count"], 1, str(entry))
+        self.assertEqual(
+            entry["value"], {"a": {"value": "1"}, "b": {"value": "2"}}, str(entry)
+        )
+
+        # A capture that could not be read is not in the aggregate at all. It is
+        # an error about the capture rather than a value the program took, and
+        # left in it would compete with the real values for a bounded histogram,
+        # report a change the program never made, and turn up as the rare value a
+        # caller is told to read first.
+        self.assertNotIn("o->nosuch", aggregate, str(aggregate))
+        failure = self.capture_failure(document, "o->nosuch")
+        self.assertEqual(failure["reason"], "no_such_member", str(failure))
 
     def test_a_condition_that_cannot_be_evaluated_says_so(self):
         """A `when` that never resolves is reported as a condition, not left as

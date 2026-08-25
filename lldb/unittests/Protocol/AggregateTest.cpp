@@ -92,7 +92,7 @@ TEST(AggregateTest, NothingRecordedRendersAnEmptyObject) {
 TEST(AggregateTest, SingleValuedCaptureCollapsesToAString) {
   Aggregator Aggregate;
   for (uint64_t Seq = 0; Seq < 4012; ++Seq)
-    Aggregate.Record("loop", "done", "false", Seq, Seq);
+    Aggregate.Record("loop", "done", "false", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Value *Entry = FindCapture(Summary, "loop", "done");
@@ -107,9 +107,9 @@ TEST(AggregateTest, RepeatedValuesAreCountedRatherThanCollapsed) {
   // still has to count every hit, since it is the only thing that sees them
   // all.
   Aggregator Aggregate;
-  Aggregate.Record("loop", "n", "7", 0, 0);
-  Aggregate.Record("loop", "n", "7", 100, 100);
-  Aggregate.Record("loop", "n", "7", 250, 250);
+  Aggregate.Record("loop", "n", "7", /*IsDocument=*/false, 0, 0);
+  Aggregate.Record("loop", "n", "7", /*IsDocument=*/false, 100, 100);
+  Aggregate.Record("loop", "n", "7", /*IsDocument=*/false, 250, 250);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Value *Entry = FindCapture(Summary, "loop", "n");
@@ -120,10 +120,10 @@ TEST(AggregateTest, RepeatedValuesAreCountedRatherThanCollapsed) {
 
 TEST(AggregateTest, MultiValuedCaptureRendersAnObject) {
   Aggregator Aggregate;
-  Aggregate.Record("loop", "state", "idle", 0, 0);
-  Aggregate.Record("loop", "state", "idle", 1, 1);
-  Aggregate.Record("loop", "state", "busy", 2, 2);
-  Aggregate.Record("loop", "state", "idle", 3, 3);
+  Aggregate.Record("loop", "state", "idle", /*IsDocument=*/false, 0, 0);
+  Aggregate.Record("loop", "state", "idle", /*IsDocument=*/false, 1, 1);
+  Aggregate.Record("loop", "state", "busy", /*IsDocument=*/false, 2, 2);
+  Aggregate.Record("loop", "state", "idle", /*IsDocument=*/false, 3, 3);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Value *Entry = FindCapture(Summary, "loop", "state");
@@ -153,7 +153,7 @@ TEST(AggregateTest, TransitionsCoverOnlyChangesAndStayInSequenceOrder) {
   const llvm::StringRef Values[] = {"a", "a", "b", "b", "b", "c", "a"};
   uint64_t Seq = 0;
   for (llvm::StringRef Value : Values) {
-    Aggregate.Record("loop", "phase", Value, Seq, Seq);
+    Aggregate.Record("loop", "phase", Value, /*IsDocument=*/false, Seq, Seq);
     ++Seq;
   }
 
@@ -176,19 +176,19 @@ TEST(AggregateTest, OutliersReportValuesSeenOnceOrTwiceAmongMany) {
   uint64_t Seq = 0;
   auto RecordCommon = [&](unsigned Times) {
     for (unsigned I = 0; I < Times; ++I) {
-      Aggregate.Record("loop", "kind", "common", Seq, Seq);
+      Aggregate.Record("loop", "kind", "common", /*IsDocument=*/false, Seq, Seq);
       ++Seq;
     }
   };
 
   RecordCommon(10);
-  Aggregate.Record("loop", "kind", "twice", Seq, Seq);
+  Aggregate.Record("loop", "kind", "twice", /*IsDocument=*/false, Seq, Seq);
   ++Seq;
   RecordCommon(5);
-  Aggregate.Record("loop", "kind", "twice", Seq, Seq);
+  Aggregate.Record("loop", "kind", "twice", /*IsDocument=*/false, Seq, Seq);
   ++Seq;
   RecordCommon(5);
-  Aggregate.Record("loop", "kind", "once", Seq, Seq);
+  Aggregate.Record("loop", "kind", "once", /*IsDocument=*/false, Seq, Seq);
   ++Seq;
   RecordCommon(2);
   ASSERT_GE(Seq, Aggregator::MinObservationsForOutliers);
@@ -211,13 +211,13 @@ TEST(AggregateTest, OutliersOfEqualCountAreOrderedByFirstSequence) {
   Aggregator Aggregate;
   uint64_t Seq = 0;
   for (; Seq < Aggregator::MinObservationsForOutliers; ++Seq)
-    Aggregate.Record("loop", "kind", "common", Seq, Seq);
+    Aggregate.Record("loop", "kind", "common", /*IsDocument=*/false, Seq, Seq);
 
   // Both are seen once, and the one seen first sorts last as a value, so an
   // array following the value order rather than the sequence would show.
-  Aggregate.Record("loop", "kind", "zulu", Seq, Seq);
+  Aggregate.Record("loop", "kind", "zulu", /*IsDocument=*/false, Seq, Seq);
   ++Seq;
-  Aggregate.Record("loop", "kind", "alpha", Seq, Seq);
+  Aggregate.Record("loop", "kind", "alpha", /*IsDocument=*/false, Seq, Seq);
   ++Seq;
 
   const llvm::json::Value Summary = Aggregate.Render();
@@ -236,9 +236,9 @@ TEST(AggregateTest, OutliersOfEqualCountAreOrderedByFirstSequence) {
 TEST(AggregateTest, OutliersAppearOnlyOnceThereAreEnoughObservations) {
   auto Build = [](uint64_t Hits) {
     Aggregator Aggregate;
-    Aggregate.Record("loop", "kind", "rare", 0, 0);
+    Aggregate.Record("loop", "kind", "rare", /*IsDocument=*/false, 0, 0);
     for (uint64_t Seq = 1; Seq < Hits; ++Seq)
-      Aggregate.Record("loop", "kind", "common", Seq, Seq);
+      Aggregate.Record("loop", "kind", "common", /*IsDocument=*/false, Seq, Seq);
     return Aggregate;
   };
 
@@ -268,10 +268,10 @@ TEST(AggregateTest, OutliersAppearOnlyOnceThereAreEnoughObservations) {
 
 TEST(AggregateTest, LabelsAndCapturesAccumulateIndependently) {
   Aggregator Aggregate;
-  Aggregate.Record("enter", "n", "1", 0, 0);
-  Aggregate.Record("exit", "n", "2", 1, 1);
-  Aggregate.Record("enter", "m", "3", 2, 2);
-  Aggregate.Record("enter", "n", "1", 3, 3);
+  Aggregate.Record("enter", "n", "1", /*IsDocument=*/false, 0, 0);
+  Aggregate.Record("exit", "n", "2", /*IsDocument=*/false, 1, 1);
+  Aggregate.Record("enter", "m", "3", /*IsDocument=*/false, 2, 2);
+  Aggregate.Record("enter", "n", "1", /*IsDocument=*/false, 3, 3);
 
   EXPECT_EQ(ToString(Aggregate.Render()),
             R"({"enter":{"m":"3 x1","n":"1 x2"},"exit":{"n":"2 x1"}})");
@@ -281,8 +281,8 @@ TEST(AggregateTest, RenderIsStableAndSortsKeys) {
   Aggregator Aggregate;
   // Recorded in the reverse of the order they have to render in, so a
   // rendering that followed the order of arrival would show.
-  Aggregate.Record("zeta", "v", "3", 0, 0);
-  Aggregate.Record("alpha", "v", "2", 1, 1);
+  Aggregate.Record("zeta", "v", "3", /*IsDocument=*/false, 0, 0);
+  Aggregate.Record("alpha", "v", "2", /*IsDocument=*/false, 1, 1);
 
   const std::string Text = ToString(Aggregate.Render());
   EXPECT_EQ(Text, R"({"alpha":{"v":"2 x1"},"zeta":{"v":"3 x1"}})");
@@ -291,9 +291,9 @@ TEST(AggregateTest, RenderIsStableAndSortsKeys) {
 
 TEST(AggregateTest, ValueCountsRenderInValueOrder) {
   Aggregator Aggregate;
-  Aggregate.Record("loop", "v", "b", 0, 0);
-  Aggregate.Record("loop", "v", "a", 1, 1);
-  Aggregate.Record("loop", "v", "b", 2, 2);
+  Aggregate.Record("loop", "v", "b", /*IsDocument=*/false, 0, 0);
+  Aggregate.Record("loop", "v", "a", /*IsDocument=*/false, 1, 1);
+  Aggregate.Record("loop", "v", "b", /*IsDocument=*/false, 2, 2);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Value *Entry = FindCapture(Summary, "loop", "v");
@@ -397,10 +397,10 @@ TEST(AggregateTest, HistogramIsBoundedAndSaysWhatItDropped) {
   Aggregator Agg;
   const uint64_t Hits = Aggregator::MaxHistogramValues + 20;
   for (uint64_t I = 0; I < Hits; ++I)
-    Agg.Record("loop", "addr", "0x" + std::to_string(0x1000 + I), I, I);
+    Agg.Record("loop", "addr", "0x" + std::to_string(0x1000 + I), /*IsDocument=*/false, I, I);
   // One value made frequent, so the bound keeps something meaningful.
   for (uint64_t I = 0; I < 50; ++I)
-    Agg.Record("loop", "addr", "0xbeef", Hits + I, Hits + I);
+    Agg.Record("loop", "addr", "0xbeef", /*IsDocument=*/false, Hits + I, Hits + I);
 
   llvm::json::Value Rendered = Agg.Render();
   const llvm::json::Object *Root = Rendered.getAsObject();
@@ -433,7 +433,7 @@ TEST(AggregateTest, OutlierReportsBothTheHitAndTheSequence) {
   Aggregator Agg;
   for (uint64_t Hit = 1; Hit <= 30; ++Hit) {
     const uint64_t Seq = 100 + Hit; // as if another observation ran first
-    Agg.Record("values", "value", Hit == 7 ? "99" : "7", Seq, Hit);
+    Agg.Record("values", "value", Hit == 7 ? "99" : "7", /*IsDocument=*/false, Seq, Hit);
   }
 
   llvm::json::Value Rendered = Agg.Render();
@@ -451,7 +451,7 @@ TEST(AggregateTest, OutlierReportsBothTheHitAndTheSequence) {
 TEST(AggregateTest, OneDistinctValueCollapsesAndTwoDoNot) {
   Aggregator One;
   for (uint64_t Seq = 0; Seq < 5; ++Seq)
-    One.Record("loop", "v", "same", Seq, Seq);
+    One.Record("loop", "v", "same", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value OneRendered = One.Render();
   const llvm::json::Value *OneEntry = FindCapture(OneRendered, "loop", "v");
@@ -462,8 +462,8 @@ TEST(AggregateTest, OneDistinctValueCollapsesAndTwoDoNot) {
   // whole of what separates the two shapes.
   Aggregator Two;
   for (uint64_t Seq = 0; Seq < 4; ++Seq)
-    Two.Record("loop", "v", "same", Seq, Seq);
-  Two.Record("loop", "v", "other", 4, 4);
+    Two.Record("loop", "v", "same", /*IsDocument=*/false, Seq, Seq);
+  Two.Record("loop", "v", "other", /*IsDocument=*/false, 4, 4);
 
   const llvm::json::Value TwoRendered = Two.Render();
   EXPECT_EQ(ToString(TwoRendered),
@@ -476,7 +476,7 @@ TEST(AggregateTest, CollapsedCaptureCarriesNoneOfTheSummaryFields) {
   Aggregator Aggregate;
   const uint64_t Hits = Aggregator::MinObservationsForOutliers + 5;
   for (uint64_t Seq = 0; Seq < Hits; ++Seq)
-    Aggregate.Record("loop", "v", "steady", Seq, Seq);
+    Aggregate.Record("loop", "v", "steady", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Value *Entry = FindCapture(Summary, "loop", "v");
@@ -492,8 +492,8 @@ TEST(AggregateTest, VariedCaptureAlwaysCarriesDistinctValuesAndTransitions) {
   // Two distinct values cannot both be seen without a change between them, so
   // the object form never renders an empty transitions array.
   Aggregator Aggregate;
-  Aggregate.Record("loop", "v", "a", 0, 0);
-  Aggregate.Record("loop", "v", "b", 1, 1);
+  Aggregate.Record("loop", "v", "a", /*IsDocument=*/false, 0, 0);
+  Aggregate.Record("loop", "v", "b", /*IsDocument=*/false, 1, 1);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "v");
@@ -512,7 +512,7 @@ TEST(AggregateTest, OutliersAreAbsentWhenNothingIsRareEnough) {
   Aggregator Aggregate;
   const uint64_t Hits = Aggregator::MinObservationsForOutliers + 10;
   for (uint64_t Seq = 0; Seq < Hits; ++Seq)
-    Aggregate.Record("loop", "v", Seq % 2 == 0 ? "even" : "odd", Seq, Seq);
+    Aggregate.Record("loop", "v", Seq % 2 == 0 ? "even" : "odd", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "v");
@@ -526,10 +526,10 @@ TEST(AggregateTest, OutliersAreAbsentWhenNothingIsRareEnough) {
 
 TEST(AggregateTest, OutliersRemainAboveTheObservationThreshold) {
   Aggregator Aggregate;
-  Aggregate.Record("loop", "kind", "rare", 0, 0);
+  Aggregate.Record("loop", "kind", "rare", /*IsDocument=*/false, 0, 0);
   const uint64_t Hits = Aggregator::MinObservationsForOutliers + 10;
   for (uint64_t Seq = 1; Seq < Hits; ++Seq)
-    Aggregate.Record("loop", "kind", "common", Seq, Seq);
+    Aggregate.Record("loop", "kind", "common", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "kind");
@@ -545,7 +545,7 @@ TEST(AggregateTest, AValueSeenThreeTimesIsNotRare) {
   uint64_t Seq = 0;
   auto Record = [&](llvm::StringRef Value, unsigned Times) {
     for (unsigned I = 0; I < Times; ++I) {
-      Aggregate.Record("loop", "kind", Value, Seq, Seq);
+      Aggregate.Record("loop", "kind", Value, /*IsDocument=*/false, Seq, Seq);
       ++Seq;
     }
   };
@@ -576,7 +576,7 @@ TEST(AggregateTest, OutliersAreOrderedByCountThenByFirstSequence) {
   Aggregator Aggregate;
   uint64_t Seq = 0;
   auto Record = [&](llvm::StringRef Value) {
-    Aggregate.Record("loop", "kind", Value, Seq, Seq);
+    Aggregate.Record("loop", "kind", Value, /*IsDocument=*/false, Seq, Seq);
     ++Seq;
   };
 
@@ -613,8 +613,8 @@ TEST(AggregateTest, TheHitAndTheSequenceAreReportedIndependently) {
   Aggregator Aggregate;
   const uint64_t Hits = Aggregator::MinObservationsForOutliers + 5;
   for (uint64_t Hit = 0; Hit < Hits; ++Hit)
-    Aggregate.Record("loop", "v", Hit == 3 ? "spike" : "flat", 1000 + Hit * 7,
-                     Hit);
+    Aggregate.Record("loop", "v", Hit == 3 ? "spike" : "flat",
+                     /*IsDocument=*/false, 1000 + Hit * 7, Hit);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "v");
@@ -636,7 +636,7 @@ TEST(AggregateTest, HistogramKeepsEveryValueUpToTheBound) {
   auto Build = [](size_t Distinct) {
     Aggregator Aggregate;
     for (size_t I = 0; I < Distinct; ++I)
-      Aggregate.Record("loop", "v", ValueName(I), I, I);
+      Aggregate.Record("loop", "v", ValueName(I), /*IsDocument=*/false, I, I);
     return Aggregate;
   };
 
@@ -663,9 +663,9 @@ TEST(AggregateTest, HistogramPastTheBoundDropsTheLeastFrequentAndSaysHowMany) {
   // drops is decided by frequency rather than by a tie.
   for (size_t I = 0; I + 1 < Distinct; ++I)
     for (unsigned Repeat = 0; Repeat < 5; ++Repeat, ++Seq)
-      Aggregate.Record("loop", "v", ValueName(I), Seq, Seq);
+      Aggregate.Record("loop", "v", ValueName(I), /*IsDocument=*/false, Seq, Seq);
   const uint64_t RareSeq = Seq;
-  Aggregate.Record("loop", "v", ValueName(Distinct - 1), RareSeq, RareSeq);
+  Aggregate.Record("loop", "v", ValueName(Distinct - 1), /*IsDocument=*/false, RareSeq, RareSeq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "v");
@@ -703,7 +703,7 @@ TEST(AggregateTest, EquallyFrequentValuesPastTheBoundAreKeptInValueOrder) {
   const size_t Distinct = Aggregator::MaxHistogramValues + 1;
   Aggregator Aggregate;
   for (size_t I = Distinct; I > 0; --I)
-    Aggregate.Record("loop", "v", ValueName(I - 1), Distinct - I, Distinct - I);
+    Aggregate.Record("loop", "v", ValueName(I - 1), /*IsDocument=*/false, Distinct - I, Distinct - I);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "v");
@@ -719,15 +719,15 @@ TEST(AggregateTest, InterleavedLabelsAndCapturesKeepSeparateHistories) {
   // Hits arrive interleaved, and a transition belongs to the history of one
   // capture of one label: chaining across them would invent changes.
   Aggregator Aggregate;
-  Aggregate.Record("enter", "n", "1", 0, 0);
-  Aggregate.Record("exit", "n", "1", 1, 0);
-  Aggregate.Record("enter", "tag", "x", 2, 1);
-  Aggregate.Record("exit", "tag", "y", 3, 1);
-  Aggregate.Record("enter", "n", "2", 4, 2);
-  Aggregate.Record("exit", "n", "1", 5, 2);
-  Aggregate.Record("enter", "tag", "x", 6, 3);
-  Aggregate.Record("exit", "tag", "z", 7, 3);
-  Aggregate.Record("enter", "n", "1", 8, 4);
+  Aggregate.Record("enter", "n", "1", /*IsDocument=*/false, 0, 0);
+  Aggregate.Record("exit", "n", "1", /*IsDocument=*/false, 1, 0);
+  Aggregate.Record("enter", "tag", "x", /*IsDocument=*/false, 2, 1);
+  Aggregate.Record("exit", "tag", "y", /*IsDocument=*/false, 3, 1);
+  Aggregate.Record("enter", "n", "2", /*IsDocument=*/false, 4, 2);
+  Aggregate.Record("exit", "n", "1", /*IsDocument=*/false, 5, 2);
+  Aggregate.Record("enter", "tag", "x", /*IsDocument=*/false, 6, 3);
+  Aggregate.Record("exit", "tag", "z", /*IsDocument=*/false, 7, 3);
+  Aggregate.Record("enter", "n", "1", /*IsDocument=*/false, 8, 4);
 
   EXPECT_EQ(ToString(Aggregate.Render()),
             R"({"enter":{"n":{"distinct":2,"transitions":)"
@@ -747,11 +747,11 @@ TEST(AggregateTest, TheSameRecordingRendersByteIdenticallyTwice) {
     Aggregator Aggregate;
     uint64_t Seq = 500;
     for (size_t I = 0; I < Aggregator::MaxHistogramValues + 3; ++I, ++Seq)
-      Aggregate.Record("zeta", "addr", ValueName(I), Seq, Seq - 500);
+      Aggregate.Record("zeta", "addr", ValueName(I), /*IsDocument=*/false, Seq, Seq - 500);
     for (unsigned I = 0; I < Aggregator::MinObservationsForOutliers; ++I, ++Seq)
-      Aggregate.Record("alpha", "state", I % 3 == 0 ? "busy" : "idle", Seq,
-                       Seq - 500);
-    Aggregate.Record("alpha", "state", "wedged", Seq, Seq - 500);
+      Aggregate.Record("alpha", "state", I % 3 == 0 ? "busy" : "idle",
+                       /*IsDocument=*/false, Seq, Seq - 500);
+    Aggregate.Record("alpha", "state", "wedged", /*IsDocument=*/false, Seq, Seq - 500);
     return Aggregate;
   };
 
@@ -836,9 +836,9 @@ TEST(AggregateTest, ANoteKeyIsNotConfusableWithAValueOfThatName) {
   Aggregator Aggregate;
   uint64_t Seq = 0;
   for (unsigned Repeat = 0; Repeat < 40; ++Repeat, ++Seq)
-    Aggregate.Record("loop", "v", "_elided", Seq, Seq);
+    Aggregate.Record("loop", "v", "_elided", /*IsDocument=*/false, Seq, Seq);
   for (size_t I = 0; I < Aggregator::MaxHistogramValues + 4; ++I, ++Seq)
-    Aggregate.Record("loop", "v", ValueName(I), Seq, Seq);
+    Aggregate.Record("loop", "v", ValueName(I), /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "v");
@@ -859,7 +859,7 @@ TEST(AggregateTest, TransitionsCountTheDistinctChangesRatherThanListingThem) {
   Aggregator Aggregate;
   const llvm::StringRef Cycle[] = {"legal", "custom"};
   for (uint64_t Seq = 0; Seq < 400; ++Seq)
-    Aggregate.Record("loop", "state", Cycle[Seq % 2], Seq, Seq);
+    Aggregate.Record("loop", "state", Cycle[Seq % 2], /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "state");
@@ -883,13 +883,13 @@ TEST(AggregateTest, TransitionsAreBoundedAndSayHowManyWereDropped) {
   // One pair traversed often, so the bound has something to prefer and the
   // entries kept are not decided by a tie.
   for (size_t I = 0; I < 30; ++I) {
-    Aggregate.Record("loop", "v", "a", Seq, Seq);
+    Aggregate.Record("loop", "v", "a", /*IsDocument=*/false, Seq, Seq);
     ++Seq;
-    Aggregate.Record("loop", "v", "b", Seq, Seq);
+    Aggregate.Record("loop", "v", "b", /*IsDocument=*/false, Seq, Seq);
     ++Seq;
   }
   for (size_t I = 0; I <= Changes; ++I) {
-    Aggregate.Record("loop", "v", ValueName(I), Seq, Seq);
+    Aggregate.Record("loop", "v", ValueName(I), /*IsDocument=*/false, Seq, Seq);
     ++Seq;
   }
 
@@ -922,7 +922,7 @@ TEST(AggregateTest, AnUndifferentiatedListIsShortenedToOneExample) {
   uint64_t Seq = 0;
   for (unsigned Round = 0; Round < 3; ++Round)
     for (size_t I = 0; I < Distinct; ++I, ++Seq)
-      Aggregate.Record("loop", "id", ValueName(I), Seq, Seq);
+      Aggregate.Record("loop", "id", ValueName(I), /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "id");
@@ -955,7 +955,7 @@ TEST(AggregateTest, AFewEquallyCommonValuesAreStillEnumerated) {
   uint64_t Seq = 0;
   for (unsigned Round = 0; Round < 4; ++Round)
     for (size_t I = 0; I < Distinct; ++I, ++Seq)
-      Aggregate.Record("loop", "opcode", ValueName(I), Seq, Seq);
+      Aggregate.Record("loop", "opcode", ValueName(I), /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "opcode");
@@ -975,11 +975,11 @@ TEST(AggregateTest, OutliersAreBoundedAndSayHowManyWereDropped) {
   const size_t Rare = Aggregator::MaxOutliers + 40;
   size_t Seq = 0;
   for (; Seq < Rare; ++Seq)
-    Aggregate.Record("loop", "p", ValueName(Seq), Seq, Seq);
+    Aggregate.Record("loop", "p", ValueName(Seq), /*IsDocument=*/false, Seq, Seq);
   // A common value the typical hit holds, so that being seen once is remarkable
   // rather than ordinary.
   for (size_t I = 0; I < Rare * 3; ++I, ++Seq)
-    Aggregate.Record("loop", "p", "common", Seq, Seq);
+    Aggregate.Record("loop", "p", "common", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "p");
@@ -1014,10 +1014,10 @@ TEST(AggregateTest, NothingIsRareWhenTheTypicalHitIsItselfRare) {
   uint64_t Seq = 0;
   for (unsigned I = 0; I < 3; ++I)
     for (unsigned Repeat = 0; Repeat < 134; ++Repeat, ++Seq)
-      Aggregate.Record("loop", "p", "hot" + std::to_string(I), Seq, Seq);
+      Aggregate.Record("loop", "p", "hot" + std::to_string(I), /*IsDocument=*/false, Seq, Seq);
   for (unsigned I = 0; I < 400; ++I)
     for (unsigned Repeat = 0; Repeat < 2; ++Repeat, ++Seq)
-      Aggregate.Record("loop", "p", ValueName(I), Seq, Seq);
+      Aggregate.Record("loop", "p", ValueName(I), /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "p");
@@ -1033,8 +1033,8 @@ TEST(AggregateTest, OneRareValueAmongThousandsOfCommonOnesSurvives) {
   Aggregator Aggregate;
   uint64_t Seq = 0;
   for (; Seq < 4000; ++Seq)
-    Aggregate.Record("loop", "ty", "i32", Seq, Seq);
-  Aggregate.Record("loop", "ty", "v4i32", Seq, Seq);
+    Aggregate.Record("loop", "ty", "i32", /*IsDocument=*/false, Seq, Seq);
+  Aggregate.Record("loop", "ty", "v4i32", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "ty");
@@ -1052,7 +1052,7 @@ TEST(AggregateTest, NothingIsRareWhenEveryValueIsDistinct) {
   // ones that repeat, and there were none.
   Aggregator Aggregate;
   for (uint64_t Seq = 0; Seq < 200; ++Seq)
-    Aggregate.Record("loop", "id", ValueName(Seq), Seq, Seq);
+    Aggregate.Record("loop", "id", ValueName(Seq), /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "id");
@@ -1073,11 +1073,11 @@ TEST(AggregateTest, ARareValueSurvivesALongTailOfLessRareOnes) {
   Aggregator Aggregate;
   uint64_t Seq = 0;
   for (; Seq < 60; ++Seq)
-    Aggregate.Record("loop", "kind", "common", Seq, Seq);
+    Aggregate.Record("loop", "kind", "common", /*IsDocument=*/false, Seq, Seq);
   for (unsigned I = 0; I < 20; ++I)
     for (unsigned Twice = 0; Twice < 2; ++Twice, ++Seq)
-      Aggregate.Record("loop", "kind", ValueName(I), Seq, Seq);
-  Aggregate.Record("loop", "kind", "wedged", Seq, Seq);
+      Aggregate.Record("loop", "kind", ValueName(I), /*IsDocument=*/false, Seq, Seq);
+  Aggregate.Record("loop", "kind", "wedged", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "kind");
@@ -1093,11 +1093,11 @@ TEST(AggregateTest, OutliersUpToTheBoundSayNothingWasDropped) {
   Aggregator Aggregate;
   size_t Seq = 0;
   for (; Seq < Aggregator::MaxOutliers; ++Seq)
-    Aggregate.Record("loop", "p", ValueName(Seq), Seq, Seq);
+    Aggregate.Record("loop", "p", ValueName(Seq), /*IsDocument=*/false, Seq, Seq);
   // Enough common hits to put the run over the threshold at which a rare value
   // is worth naming at all.
   for (size_t I = 0; I < Aggregator::MinObservationsForOutliers; ++I, ++Seq)
-    Aggregate.Record("loop", "p", "common", Seq, Seq);
+    Aggregate.Record("loop", "p", "common", /*IsDocument=*/false, Seq, Seq);
 
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "p");
@@ -1106,4 +1106,72 @@ TEST(AggregateTest, OutliersUpToTheBoundSayNothingWasDropped) {
   ASSERT_NE(Outliers, nullptr);
   EXPECT_EQ(Outliers->size(), Aggregator::MaxOutliers);
   EXPECT_EQ(Fields->get("outliers_elided"), nullptr);
+}
+
+TEST(AggregateTest, ADocumentValuedCaptureKeepsItsStructure) {
+  // The shape a composite capture arrives in. Keyed as text, because that is what
+  // lets an emission mode and a comparison decide "the same value" by comparing
+  // strings, but rendered as the document it came from: as a key it would be
+  // escaped by the serialization that writes the response, and a caller would
+  // have to undo the escaping by hand to read a captured name.
+  Aggregator Aggregate;
+  const llvm::StringRef Exit = R"({"Data":{"summary":"\"exit\""}})";
+  for (uint64_t Hit = 0; Hit < 3; ++Hit)
+    Aggregate.Record("bb", "BB->getName()", Exit, /*IsDocument=*/true, Hit, Hit);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Value *Entry = FindCapture(Summary, "bb", "BB->getName()");
+  ASSERT_NE(Entry, nullptr);
+  // Not a string: a single-valued capture usually collapses to "value xN", and
+  // a document has nowhere to put the count and stay readable as one.
+  EXPECT_FALSE(Entry->getAsString().has_value()) << ToString(*Entry);
+  const llvm::json::Object *Fields = Entry->getAsObject();
+  ASSERT_NE(Fields, nullptr);
+  EXPECT_EQ(Fields->getInteger("count"), 3);
+  const llvm::json::Value *Value = Fields->get("value");
+  ASSERT_NE(Value, nullptr);
+  EXPECT_EQ(ToString(*Value), R"({"Data":{"summary":"\"exit\""}})");
+}
+
+TEST(AggregateTest, ADocumentValuedHistogramIsAListRatherThanKeys) {
+  Aggregator Aggregate;
+  Aggregate.Record("bb", "name", R"({"value":"a"})", /*IsDocument=*/true, 1, 1);
+  Aggregate.Record("bb", "name", R"({"value":"a"})", /*IsDocument=*/true, 2, 2);
+  Aggregate.Record("bb", "name", R"({"value":"b"})", /*IsDocument=*/true, 3, 3);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "bb", "name");
+  ASSERT_NE(Fields, nullptr);
+  EXPECT_EQ(Fields->getInteger("distinct"), 2);
+
+  // A list, because a document cannot be a key without being escaped into one.
+  const llvm::json::Array *Values = Fields->getArray("values");
+  ASSERT_NE(Values, nullptr) << ToString(*Fields);
+  EXPECT_EQ(ToString(*Values),
+            R"([{"count":2,"value":{"value":"a"}},)"
+            R"({"count":1,"value":{"value":"b"}}])");
+
+  // Both sides of a transition are the document too, since a caller acting on
+  // "this went from a to b" needs to read a and b.
+  const llvm::json::Array *Transitions = Fields->getArray("transitions");
+  ASSERT_NE(Transitions, nullptr);
+  EXPECT_EQ(ToString(*Transitions),
+            R"([{"count":1,"first_seq":3,"from":{"value":"a"},)"
+            R"("to":{"value":"b"}}])");
+}
+
+TEST(AggregateTest, AScalarHistogramStaysKeyedByItsValue) {
+  // The path nearly every capture takes, asserted beside the document case so
+  // that keeping the structure cannot quietly cost the scalar rendering its
+  // density.
+  Aggregator Aggregate;
+  Aggregate.Record("loop", "n", "7", /*IsDocument=*/false, 1, 1);
+  Aggregate.Record("loop", "n", "8", /*IsDocument=*/false, 2, 2);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "n");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Object *Values = Fields->getObject("values");
+  ASSERT_NE(Values, nullptr) << ToString(*Fields);
+  EXPECT_EQ(ToString(*Values), R"({"7":1,"8":1})");
 }

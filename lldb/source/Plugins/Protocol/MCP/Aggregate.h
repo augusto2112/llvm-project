@@ -41,8 +41,15 @@ public:
   /// on it lands on the hit it named. Whoever records has to number \p Hit the
   /// way only_hit reads it, skipped hits included, or that is exactly what it
   /// will not do.
+  /// \p IsDocument says that \p RenderedValue is a serialized JSON document
+  /// rather than a scalar, which is what \ref Render needs in order to put the
+  /// document back into the response instead of leaving it as an escaped string.
+  /// Recorded rather than guessed from the text, because a program's own string
+  /// value may be spelled like a document and a number is spelled like one every
+  /// time.
   void Record(llvm::StringRef Label, llvm::StringRef Capture,
-              llvm::StringRef RenderedValue, uint64_t Seq, uint64_t Hit);
+              llvm::StringRef RenderedValue, bool IsDocument, uint64_t Seq,
+              uint64_t Hit);
 
   /// Renders an object of labels, each an object of captures.
   ///
@@ -123,6 +130,10 @@ private:
   struct ValueStats {
     uint64_t Count = 0;
 
+    /// Whether the key this is filed under is a serialized document. See
+    /// \ref Record.
+    bool Document = false;
+
     /// The sequence number of the hit that first showed this value, which is
     /// where a reader goes to see a rare one in context.
     uint64_t FirstSeq = 0;
@@ -155,6 +166,16 @@ private:
     /// compared.
     std::string Last;
   };
+
+  /// One recorded value as the response should show it: the document it came
+  /// from where the key is one, and the key itself otherwise.
+  ///
+  /// Recovered by parsing rather than by having been kept, so that a capture
+  /// rendering something distinct at every hit does not hold two copies of every
+  /// one of them. Parsing cannot fail on a key this class was given; a key that
+  /// somehow does not parse falls back to the text, which is the previous
+  /// behaviour rather than a lost value.
+  static llvm::json::Value Displayed(llvm::StringRef Key, bool Document);
 
   static llvm::json::Value RenderCapture(const CaptureSummary &Summary);
 

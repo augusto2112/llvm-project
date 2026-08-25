@@ -96,6 +96,27 @@ std::string Compact(const json::Value &V) {
   return S;
 }
 
+/// A value as the aggregate files it: the text it is counted under, and whether
+/// that text is a serialized document rather than a bare scalar.
+struct AggregatedValue {
+  std::string Key;
+
+  /// Set when \ref Key is a document. The aggregate is keyed by string -- that is
+  /// what lets an emission mode and a comparison both decide "the same value" by
+  /// comparing text -- so a composite value's document ends up as a map key, and
+  /// the outer serialization then escapes every quote in it. `BB->getName()`, on
+  /// any reading the most common thing an LLVM developer captures, came back as
+  ///
+  ///     "{\"Data\":{\"summary\":\"\\\"exit\\\"\"},\"Length\":{\"value\":\"4\"}} x3"
+  ///
+  /// which is a value the caller has to unescape by hand to read. Recording this
+  /// is what lets the rendering put the document back where it belongs while the
+  /// key stays a key. Nothing is stored twice: the key *is* the serialization, so
+  /// the value is recovered by parsing it rather than by keeping a second copy per
+  /// distinct value, of which a high-cardinality capture has one per hit.
+  bool Document = false;
+};
+
 /// The text a value is aggregated under. A scalar serializes to {"value":"7"},
 /// and using that document as the aggregate's key would spend three quarters of
 /// the densest part of the response on repeated punctuation. Anything with
@@ -105,7 +126,7 @@ std::string Compact(const json::Value &V) {
 /// same number are two values to an aggregate that compares them as strings, so
 /// a run's return values would be summarised separately from the paths they came
 /// from and neither would be comparable with the other.
-std::string AggregateKey(const json::Value &V) {
+AggregatedValue AggregateKey(const json::Value &V) {
   if (const json::Object *Obj = V.getAsObject()) {
     // A marker is not data. A value reduced for size carries its own value plus
     // an `_elided` saying so, and keying on the whole document repeated that
@@ -117,10 +138,24 @@ std::string AggregateKey(const json::Value &V) {
         return Key == "value" || Key.starts_with("_");
       });
       if (OnlyMarkers)
-        return Scalar->str();
+        return {Scalar->str(), /*Document=*/false};
     }
   }
-  return Compact(V);
+  return {Compact(V), /*Document=*/true};
+}
+
+/// Whether a serialized value says the capture could not be read, rather than
+/// saying what the program held there.
+///
+/// Such a value is an error about the capture and not a value the program took, so
+/// it is kept out of the aggregate: as a histogram entry it competes with the real
+/// values for a bounded list, as a transition it reports a change the program
+/// never made, and as an outlier it is the rare value a caller is told to read
+/// first. One broken capture polluted all three. It is reported once, at top
+/// level, in `capture_failures`.
+bool IsUnavailable(const json::Value &V) {
+  const json::Object *Obj = V.getAsObject();
+  return Obj && Obj->get("unavailable");
 }
 
 } // namespace
@@ -1896,9 +1931,14 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
           SOpts.MaxDepth = Obs.Depth;
           SOpts.MaxRenderedChars = MaxCaptureChars;
           json::Value V = SerializeValue(Node, SOpts);
-          std::string Text = AggregateKey(V);
-          m_aggregator.Record(Obs.Label, ReturnValueCapture, Text, Seq, Hit);
-          Rendered += Text;
+          AggregatedValue Filed = AggregateKey(V);
+          if (!IsUnavailable(V))
+            m_aggregator.Record(Obs.Label, ReturnValueCapture, Filed.Key,
+                                Filed.Document, Seq, Hit);
+          // The tuple keeps it either way: it is what an emission mode and a
+          // comparison read, and a hit whose return value could not be read is a
+          // different hit from one where it could.
+          Rendered += Filed.Key;
           Rendered += CaptureTupleSeparator;
           Values[ReturnValueCapture] = std::move(V);
         }
@@ -2093,14 +2133,27 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
       }
     }
 
-    std::string Text = AggregateKey(V);
+    AggregatedValue Filed = AggregateKey(V);
 
     // The aggregate sees every recorded hit, whatever the emission mode does
     // with the event. That invariant is the whole reason reducing the stream is
     // a saving rather than a loss.
-    m_aggregator.Record(Obs.Label, Capture.Expr, Text, Seq, Hit);
+    //
+    // A value that could not be read is the exception, and it is not an exception
+    // to that invariant: it is not a value the program took at this hit, it is an
+    // error about the capture, and it is reported at top level in
+    // `capture_failures` instead. Left in, one broken capture put an
+    // `{"unavailable": ...}` into the histogram, onto both sides of a transition,
+    // and into the outliers -- the array a caller is told to read first.
+    if (!IsUnavailable(V))
+      m_aggregator.Record(Obs.Label, Capture.Expr, Filed.Key, Filed.Document,
+                          Seq, Hit);
 
-    Rendered += Text;
+    // The tuple keeps it either way. It is what an emission mode and a comparison
+    // read, and a hit where a capture could not be read is a different hit from
+    // one where it could -- `on_change` should say so, and two runs disagreeing
+    // about it is exactly the kind of difference a comparison is for.
+    Rendered += Filed.Key;
     Rendered += CaptureTupleSeparator;
     Values[Capture.Expr] = std::move(V);
 

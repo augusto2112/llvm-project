@@ -250,6 +250,21 @@ Read `aggregate` first. For each captured expression it gives the distinct
 values with counts, the changes between them, and `outliers`: the values seen
 only once or twice among many hits. That last field is usually the answer.
 
+A scalar capture is keyed by its value, so `values` is an object and a capture
+that never varied collapses to `"false x4012"`. A capture with structure keeps
+that structure: `values` becomes a list of `value`/`count` pairs and each `value`
+is the document itself, in `transitions` and `outliers` as well. A document
+cannot be an object key without the serialization escaping every quote in it,
+which is how a captured `StringRef` used to come back as a line of backslashes
+for the caller to undo by hand.
+
+A value that could not be read is not in `aggregate` at all. It is an error about
+the capture rather than a value the program took: counted among the values it
+competes with the real ones for a bounded histogram, it reports a change the
+program never made, and it turns up as the rare value a caller is told to read
+first. It is reported once instead, in `capture_failures`, and the capture's own
+`errors` count says how many hits it covers.
+
 A change is reported as a `from`/`to` pair with the number of times the run made
 it and the sequence of the first time. Counting the pairs rather than listing every
 change is what makes a value that cycles readable: two values alternating come back
