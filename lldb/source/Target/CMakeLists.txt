@@ -16,6 +16,7 @@ add_lldb_library(lldbTarget
   AssertFrameRecognizer.cpp
   DWIMValueResolution.cpp
   DynamicRegisterInfo.cpp
+  EntryTrampoline.cpp
   CoreFileMemoryRanges.cpp
   ExecutionContext.cpp
   InstrumentationRuntime.cpp

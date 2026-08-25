@@ -2,6 +2,7 @@ add_lldb_unittest(TargetTests
   ABITest.cpp
   DWIMValueResolutionTest.cpp
   DynamicRegisterInfoTest.cpp
+  EntryTrampolineTest.cpp
   ExecutionContextTest.cpp
   LanguageTest.cpp
   LocateModuleCallbackTest.cpp
