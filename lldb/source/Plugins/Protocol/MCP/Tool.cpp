@@ -339,26 +339,24 @@ namespace {
 /// the plan, so this list stays two entries long however the plan grows.
 constexpr StringRef kObserveArguments[] = {"debugger", "plan"};
 
-json::Value schemaField(StringRef type, StringRef description) {
-  return json::Object{{"type", type}, {"description", description}};
-}
+/// What a client of *this* server is told about `debugger`. It differs from the
+/// text `lldb-mcp` serves only in what names a session: a client reaching this
+/// server directly sees one LLDB and so an id, while one reaching it through
+/// `lldb-mcp` sees an instance-qualified URI.
+///
+/// Which client this is matters, because almost none are: `lldb-mcp` is the
+/// documented entry point and it answers tools/list itself, so this string
+/// reaches only a client wired straight to an in-LLDB server. It is here, beside
+/// nothing else, rather than beside the schema it is passed to, so that it cannot
+/// be mistaken for the one on the wire.
+constexpr StringRef kDebuggerDescription =
+    "Id or URI of an existing session to run in. Omit it: the first session is "
+    "used, and one is opened if there is none.";
 
 } // namespace
 
 std::optional<json::Value> ObserveTool::GetSchema() const {
-  return json::Object{
-      {"type", "object"},
-      {"properties",
-       json::Object{
-           {"plan", lldb_protocol::mcp::ObservationPlanSchema()},
-           {"debugger",
-            schemaField("string",
-                        "The debugger ID or URI of the session to run in. If "
-                        "not specified, the first debugger will be used.")},
-       }},
-      {"required", json::Array{"plan"}},
-      {"additionalProperties", false},
-  };
+  return lldb_protocol::mcp::ObserveInputSchema(kDebuggerDescription);
 }
 
 Expected<lldb_protocol::mcp::CallToolResult>

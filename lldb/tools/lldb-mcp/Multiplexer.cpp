@@ -39,6 +39,17 @@ constexpr llvm::StringLiteral kDebuggerLocalPrefix = "lldb-mcp://debugger/";
 constexpr llvm::StringLiteral kResourceLocalPrefix = "lldb://debugger/";
 /// @}
 
+/// What a client is told about `debugger`, which is the one argument whose
+/// meaning differs between this server and the plugin behind it: here a session
+/// is named by an instance-qualified URI, because there may be several LLDBs.
+///
+/// It is supplied to the shared schema rather than written into one, so that this
+/// string is visibly the one on the wire. It had a twin in the plugin that no
+/// client could reach, and the shorter, staler twin was the one a reader found
+/// first.
+constexpr llvm::StringLiteral kDebuggerDescription =
+    "URI of an existing session to run in. Omit it: one is opened as needed.";
+
 std::string replaceAll(StringRef text, StringRef from, StringRef to) {
   std::string result;
   size_t pos = 0;
@@ -53,31 +64,6 @@ std::string replaceAll(StringRef text, StringRef from, StringRef to) {
     pos = next + from.size();
   }
   return result;
-}
-
-json::Value schemaField(StringRef type, StringRef description) {
-  return json::Object{{"type", type}, {"description", description}};
-}
-
-json::Value observeInputSchema() {
-  return json::Object{
-      {"type", "object"},
-      {"properties",
-       json::Object{
-           {"plan", ObservationPlanSchema()},
-           {"debugger",
-            schemaField(
-                "string",
-                "Optional. Omit it: with no session open and none named, a "
-                "session is opened automatically, and a plan already carries "
-                "the program, its arguments and its environment. Pass "
-                "lldb-mcp://instance/{pid}/debugger/{id} only to run in a "
-                "session you already have a URI for, such as an LLDB someone "
-                "is using interactively.")},
-       }},
-      {"required", json::Array{"plan"}},
-      {"additionalProperties", false},
-  };
 }
 
 } // namespace
@@ -234,7 +220,7 @@ Expected<ListToolsResult> Multiplexer::HandleToolsList() {
   ToolDefinition observe;
   observe.name = kToolObserve;
   observe.description = ObserveToolDescription;
-  observe.inputSchema = observeInputSchema();
+  observe.inputSchema = ObserveInputSchema(kDebuggerDescription);
   result.tools.push_back(std::move(observe));
 
   return result;

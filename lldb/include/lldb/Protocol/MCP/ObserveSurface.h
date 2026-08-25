@@ -47,6 +47,13 @@ namespace lldb_protocol::mcp {
 /// therefore load-bearing in a way a description cannot be, because the description
 /// is read after the decision it would have informed.
 ///
+/// The opening sentence is the next thing to get right, and for the same reason:
+/// where only the name and the head of this string arrive, they are the entire
+/// discovery surface. So the first two sentences say what the tool does *and* that
+/// the argument is a plan naming functions and expressions -- the one thing 23
+/// recorded write-ups got wrong, calling `plan` an opaque JSON string, 16 of them
+/// never placing a tracepoint at all.
+///
 /// It opens with a plan rather than with prose. Measured on two agents given
 /// this tool on two different tasks: both reported that they could not tell what
 /// a tracepoint looked like, one of them abandoned runtime inspection after a
@@ -68,12 +75,40 @@ namespace lldb_protocol::mcp {
 /// test builds, and that test runs the example out of this string as it is
 /// written, replacing "program" and nothing else. A spelling that stops
 /// resolving fails a test rather than a caller.
+///
+/// What is *not* here came out on evidence that length was not buying
+/// comprehension. This string was 3,930 characters and the schema beside it
+/// 6,352 wire bytes -- typed, closed with `additionalProperties: false`, an enum
+/// and a default on every field that has one -- and across 47 recorded runs none
+/// of it arrived: the tools reached the agent as bare names in a deferred list,
+/// 36 attempts to recover a schema each came back with 209 characters and none of
+/// them got it, and 23 write-ups afterwards describe `plan` as an opaque JSON
+/// string, 16 of those never placing a tracepoint at all. So the name and the
+/// opening sentence carry the discovery on their own, and are worth more care
+/// than everything behind them; volume is not the lever it looks like.
+///
+/// For the client that does receive all of it -- an editor, or any client that
+/// lists a tool before calling it -- the argument for cutting is legibility and
+/// one outright defect. Three paragraphs said the same sentence as the schema
+/// field they explained, 824 characters of exact duplication: what an "at" may
+/// be, that a path names what a type declares rather than what it exposes, and
+/// how "compare" reports. The schema's copy is the one read at the moment a
+/// caller sets that field, and two copies of a sentence are two things to keep
+/// true. Two more paragraphs came out at a real loss and are covered elsewhere:
+/// data formatters, which the engine already pushes a note about when a run met
+/// none, and the attribution of printed output, which the response labels for
+/// itself.
+///
+/// What stays is what a caller cannot be told by the field it is filling in:
+/// that this tool exists instead of stepping, what an empty plan does, which
+/// field of the response to read first, and the one economic argument -- capture
+/// generously -- that a schema has no place to make.
 inline constexpr llvm::StringLiteral ObserveToolDescription =
     "Run a program under a set of tracepoints and report what happened, "
-    "instead of stepping through it. One call launches the program, reads the "
-    "expressions named at each tracepoint, lets the program run to its own "
-    "end, and comes back with a summary over every hit plus a JSONL artifact "
-    "holding the full event stream.\n"
+    "instead of stepping through it. The \"plan\" argument names the functions "
+    "to stop at and the expressions to read at each; one call launches the "
+    "program, reads them, lets it run to its own end, and returns a summary "
+    "over every hit plus a JSONL artifact holding the full event stream.\n"
     "\n"
     "A plan with two tracepoints on it:\n"
     "{\"plan\": {\"program\": \"build/bin/analyze\",\n"
@@ -84,64 +119,20 @@ inline constexpr llvm::StringLiteral ObserveToolDescription =
     "             {\"at\": \"parse_expr\", \"on\": \"return\",\n"
     "              \"capture\": [\"$return\"], \"emit\": \"on_change\"}]}}\n"
     "\n"
-    "An \"at\" is a function name, qualified or not, or a source location "
-    "written as \"file.cpp:1189\".\n"
+    "An empty \"observe\" list is crash triage: the program runs untouched and "
+    "the result is how it ended, with a ranked backtrace, locals and source. "
+    "For a program that is stuck rather than crashing the same plan reports "
+    "\"profile\" -- where sampled stacks found it -- which answers what is "
+    "running without being told where to look.\n"
     "\n"
-    "An empty \"observe\" list is crash triage: the program runs untouched, "
-    "and the result is how it ended, with a ranked backtrace, locals and "
-    "source at the failure. For a program that is stuck rather than crashing, "
-    "that same plan reports \"profile\" -- where sampled stacks found it, which "
-    "answers what is running without being told where to look.\n"
+    "Read \"aggregate\" first: its \"outliers\", the values seen once or twice "
+    "among many hits, are usually the answer. Re-run with \"only_hit\" set to "
+    "that outlier's \"first_hit\" to record that one hit in full detail.\n"
     "\n"
-    "What matters about a capture is whether it is a path or a call, not how "
-    "it is spelled: \"tok.kind\" and \"tok->kind\" are both paths, and "
-    "\"->\" and \"[]\" are as much a part of one as \".\" is. Prefer a path "
-    "over a call, \"tok->describe()\". A path is a debug-info lookup and a "
-    "memory read, while a call compiles and runs code inside the observed "
-    "process, and on a hot tracepoint a call is measured and turned off "
-    "partway through the run.\n"
-    "\n"
-    "A path names what the type declares, which is not what it exposes: where a "
-    "class offers \"getName()\", the path is the field that accessor reads, "
-    "private or not, because debug info describes storage rather than an API. "
-    "Reading a field name off an accessor is the common way a capture fails, so "
-    "where a name is a guess, capture the accessor call as well.\n"
-    "\n"
-    "A value with a custom rendering needs a data formatter to get it, and "
-    "formatters are not built in: this session loads what \"~/.lldbinit\" "
-    "imports, and without them a value comes back expanded into its members "
-    "instead. A run that met no formatter at all says so in \"notes\", so an "
-    "expanded struct is not left looking like the value the program holds.\n"
-    "\n"
-    "Capture more expressions than you think you need. A capture costs wall "
-    "clock once per run, not tokens per round trip, and the alternative to "
-    "capturing it now is running the whole program again to ask one more "
-    "question. A wrong guess is cheap: a capture that cannot resolve is "
-    "stopped at its first hit and reported in \"capture_failures\" with the "
-    "compiler's reason and the names that were in scope, so read that array "
-    "before concluding a value was uninteresting.\n"
-    "\n"
-    "To answer whether a change moved anything, put the runs in \"compare\" and "
-    "get back the differences rather than two reports to diff: [{\"label\": "
-    "\"fixed\"}, {\"label\": \"before\", \"program\": \"/tmp/opt.before\"}] runs "
-    "the same tracepoints over both binaries and reports how each ended, what "
-    "disagreed, the first hit at which they stopped agreeing, and the names of "
-    "everything that matched.\n"
-    "\n"
-    "Read \"aggregate\" first. Its \"outliers\", the values seen once or twice "
-    "among many hits, are usually the answer. Then re-run with \"only_hit\" "
-    "set to that outlier's \"first_hit\", which records that one hit in full "
-    "detail: captures are read there alone, so a call is affordable.\n"
-    "\n"
-    "A capture that prints rather than returning a value -- \"tok->dump()\" -- "
-    "comes back with what it printed beside it, in \"printed\", per hit and with "
-    "\"stdout\" and \"stderr\" apart. That text is part of the capture's value, so "
-    "\"emit\": \"on_change\" over a printer emits when what it prints changes. "
-    "The program's own output is reported separately in \"inferior_output\". "
-    "Attribution is best-effort: text the program had written and not yet "
-    "flushed when a capture ran is credited to that capture, and a capture that "
-    "prints for the first time may have that hit's text reported as the "
-    "program's.";
+    "Capture generously, and prefer a path (\"tok->kind\") to a call "
+    "(\"tok->describe()\"): a capture costs wall clock once per run rather than "
+    "tokens per turn, and one that cannot resolve is reported in "
+    "\"capture_failures\" with the names that were in scope.";
 
 /// What the `command` tool is for, and how it divides the work with
 /// `trace_program`.
@@ -172,6 +163,17 @@ llvm::json::Value ObservationSchema();
 /// validated as a closed set, and admitting a non-plan field at that level would
 /// make the error that lists the accepted ones wrong.
 llvm::json::Value ObservationPlanSchema();
+
+/// The whole `inputSchema` of the tool: the plan, plus the one argument that
+/// selects a session.
+///
+/// \p debugger_description is the only thing the two servers disagree about, so
+/// it is a parameter rather than a second copy of the schema. It was two copies:
+/// the text a client actually saw lived in `lldb-mcp`, the plugin carried a
+/// shorter one that nothing served, and a reader could not tell which was which.
+/// Editing the dead one is silent -- the wire is unchanged and no test moves --
+/// which is the failure this signature exists to make impossible.
+llvm::json::Value ObserveInputSchema(llvm::StringRef debugger_description);
 
 } // namespace lldb_protocol::mcp
 

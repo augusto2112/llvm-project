@@ -16,8 +16,35 @@ using namespace llvm;
 
 namespace {
 
+// A schema's job is to make a call valid: the names, the types, the enumerated
+// values and what is required. That is what these helpers always emit, and a
+// description is what they take only when there is something to say that the
+// name and the type do not already say.
+//
+// Prose arguing *why* to set a field is discovery text, and a caller reading the
+// schema has already decided to call the tool -- it is filling the field in. What
+// it was reading instead: of 6,352 wire bytes of `inputSchema`, the contents of
+// 30 description strings were 4,299 and their `"description":` wrappers another
+// 510, leaving 1,543 for every type, enum, default and key together. So a reader
+// looking for the shape of a call was reading five parts prose to one part shape,
+// and some of that prose only restated the field's own name -- "args":
+// "Arguments passed to the program."
+//
+// An `enum` or a `default` earns its bytes differently and both are kept
+// everywhere they apply: they are short, they are machine-checkable, and a
+// default is the one thing that tells a caller not to set the field at all.
+
+json::Value schemaField(StringRef type) {
+  return json::Object{{"type", type}};
+}
+
 json::Value schemaField(StringRef type, StringRef description) {
   return json::Object{{"type", type}, {"description", description}};
+}
+
+json::Value schemaStringArray() {
+  return json::Object{{"type", "array"},
+                      {"items", json::Object{{"type", "string"}}}};
 }
 
 json::Value schemaStringArray(StringRef description) {
@@ -34,9 +61,19 @@ json::Value schemaEnum(json::Array values, StringRef fallback,
                       {"description", description}};
 }
 
+json::Value schemaNumber(int64_t fallback) {
+  return json::Object{{"type", "integer"}, {"default", fallback}};
+}
+
 json::Value schemaNumber(int64_t fallback, StringRef description) {
   return json::Object{
       {"type", "integer"}, {"default", fallback}, {"description", description}};
+}
+
+json::Value schemaStringMap() {
+  return json::Object{
+      {"type", "object"},
+      {"additionalProperties", json::Object{{"type", "string"}}}};
 }
 
 } // namespace
@@ -46,68 +83,37 @@ json::Value lldb_protocol::mcp::ObservationSchema() {
       {"type", "object"},
       {"properties",
        json::Object{
-           {"at",
-            schemaField("string",
-                        "Where to observe, as a function name -- qualified or "
-                        "not, \"Parser::parseExpr\" -- or a source "
-                        "location written as \"file.cpp:1189\". An address is "
-                        "rejected because it cannot be carried from one run "
-                        "into the next.")},
-           {"label",
-            schemaField("string",
-                        "Identifies this observation in the report and in "
-                        "another observation's \"enabled_after\". Defaults to "
-                        "\"at\", so it is only worth setting when one function "
-                        "is observed more than once.")},
+           {"at", schemaField("string",
+                              "A function name, qualified or not, or a source "
+                              "location written as \"file.cpp:1189\". Not an "
+                              "address.")},
+           {"label", schemaField("string", "Defaults to \"at\".")},
            {"on", schemaEnum(json::Array{"entry", "return"}, "entry",
-                             "Whether state is read as the function returns "
-                             "rather than as it is entered. At \"return\" the "
-                             "frame is already gone: capture \"$return\", since "
-                             "the function's own parameters and locals cannot "
-                             "be read there.")},
+                             "At \"return\" the frame is gone: capture "
+                             "\"$return\", not the function's own names.")},
            {"capture",
             schemaStringArray(
-                "Expressions to read at each hit, in the language of the "
-                "program: a member path like \"tok.kind\" or \"tok->text\", "
-                "or a call like \"describe(tok)\". A path names what the type "
-                "declares rather than what it exposes, so the field behind an "
-                "accessor and not the accessor's name. A call to the program's "
-                "own printer, \"tok->dump()\", is how an object that knows how "
-                "to describe itself is read; what it prints comes back beside "
-                "the capture in \"printed\" rather than as its value. Empty is "
-                "a bare tracepoint recording only hit counts, which already "
-                "answers whether the code runs at all.")},
+                "Expressions read at each hit, in the program's language: a "
+                "path like \"tok->text\", or a call like \"tok->dump()\". A "
+                "path names what the type declares, so the field behind an "
+                "accessor rather than the accessor.")},
            {"when",
-            schemaField("string",
-                        "A condition evaluated at each hit, written like a "
-                        "capture. A hit whose condition is false still counts "
-                        "as a hit, but is neither captured nor emitted.")},
-           {"called_from",
-            schemaField("string", "Restricts the tracepoint to hits reached "
-                                  "from this function.")},
+            schemaField("string", "A false condition still counts as a hit, "
+                                  "but is neither captured nor emitted.")},
+           {"called_from", schemaField("string")},
            {"enabled_after",
-            schemaField("string",
-                        "Holds this observation disabled until the observation "
-                        "carrying this label has been hit.")},
-           {"skip_first",
-            schemaNumber(0, "Hits to ignore before the tracepoint starts "
-                            "recording.")},
+            schemaField("string", "Held disabled until the observation with "
+                                  "this label has been hit.")},
+           {"skip_first", schemaNumber(0)},
            {"only_hit",
-            schemaField("integer",
-                        "Records a single hit, counting from one. This is the "
-                        "follow-up to an aggregate that named an interesting "
-                        "hit: that one hit comes back in full detail.")},
+            schemaField("integer", "Records a single hit, counting from one.")},
            {"emit",
             schemaEnum(json::Array{"every_hit", "on_change", "first_and_last"},
                        "every_hit",
-                       "Which hits of this observation reach the event stream. "
-                       "Reducing the stream never loses counts: aggregation "
-                       "runs over every hit regardless of the mode.")},
-           {"backtrace",
-            schemaNumber(0, "Frames of backtrace to record per emitted "
-                            "event.")},
-           {"depth", schemaNumber(2, "Levels of children to expand in each "
-                                     "captured value.")},
+                       "Which hits reach the event stream; aggregation covers "
+                       "every hit regardless.")},
+           {"backtrace", schemaNumber(0)},
+           {"depth", schemaNumber(2)},
        }},
       {"required", json::Array{"at"}},
       {"additionalProperties", false},
@@ -117,63 +123,39 @@ json::Value lldb_protocol::mcp::ObservationSchema() {
 json::Value lldb_protocol::mcp::ObservationPlanSchema() {
   return json::Object{
       {"type", "object"},
-      {"description", "What to run and what to observe while it runs."},
       {"properties",
        json::Object{
            {"program", schemaField("string", "The path to the program to "
                                              "run.")},
-           {"args", schemaStringArray("Arguments passed to the program.")},
+           {"args", schemaStringArray()},
            {"env",
             json::Object{
                 {"type", "object"},
                 {"additionalProperties", json::Object{{"type", "string"}}},
                 {"description",
-                 "Environment variables set for the program, added to the "
-                 "environment it would otherwise inherit. Values must be "
-                 "strings; a number or boolean is not converted to one."}}},
-           {"cwd", schemaField("string", "The directory to run the program "
-                                         "in.")},
+                 "Added to the environment the program would otherwise "
+                 "inherit. Values must be strings."}}},
+           {"cwd", schemaField("string")},
            {"stdin",
             schemaField("string", "A path whose contents are fed to the "
                                   "program's standard input.")},
            {"capture_inferior_output",
-            json::Object{
-                {"type", "boolean"},
-                {"default", true},
-                {"description",
-                 "Whether the program's own standard output and error are "
-                 "recorded. A program's last line of output is often the only "
-                 "evidence of how far it got, so this is on unless it is "
-                 "turned off. It also governs \"printed\", the text attributed "
-                 "to a capture that prints, since both are read from the same "
-                 "streams."}}},
+            json::Object{{"type", "boolean"}, {"default", true}}},
            {"timeout_seconds",
-            schemaNumber(30,
-                         "Wall-clock ceiling on the program, measured from the "
-                         "launch: reading its debug info happens first and is "
-                         "reported separately as \"setup_ms\", so a large binary "
-                         "does not spend the budget for running it. Reaching the "
-                         "ceiling is a result and not an error: the run comes "
-                         "back with \"outcome\": \"timed_out\", everything "
-                         "observed up to that point, and where the program was "
-                         "stopped.")},
+            schemaNumber(30, "Ceiling on the program, from the launch. "
+                             "Reaching it is a result, \"timed_out\", not an "
+                             "error.")},
            {"no_progress_seconds",
-            schemaField(
-                "integer",
-                "Gives up after this long with no tracepoint in the "
-                "plan being hit at all, and must be shorter than "
-                "\"timeout_seconds\". Absent leaves the check "
-                "disarmed, because a plan whose triggers only fire near "
-                "the end of a run is legitimate and would otherwise be "
-                "cut short.")},
+            schemaField("integer",
+                        "Give up after this long with no tracepoint hit at "
+                        "all. Must be under \"timeout_seconds\"; absent "
+                        "disarms it.")},
            {"observe",
-            json::Object{
-                {"type", "array"},
-                {"items", ObservationSchema()},
-                {"description",
-                 "The tracepoints. An absent or empty list is a legal plan: it "
-                 "runs the program and reports only how it ended, which is "
-                 "crash triage."}}},
+            json::Object{{"type", "array"},
+                         {"items", ObservationSchema()},
+                         {"description",
+                          "The tracepoints. Absent or empty runs the program "
+                          "and reports only how it ended."}}},
            {"compare",
             json::Object{
                 {"type", "array"},
@@ -182,40 +164,37 @@ json::Value lldb_protocol::mcp::ObservationPlanSchema() {
                      {"type", "object"},
                      {"properties",
                       json::Object{
-                          {"label",
-                           schemaField("string",
-                                       "Names this run in the report. Every "
-                                       "result is keyed on it.")},
-                          {"program", schemaField("string", "Overrides the "
-                                                            "plan's program.")},
-                          {"args", schemaStringArray("Overrides the plan's "
-                                                     "arguments.")},
-                          {"env",
-                           json::Object{
-                               {"type", "object"},
-                               {"additionalProperties",
-                                json::Object{{"type", "string"}}},
-                               {"description", "Overrides the plan's "
-                                               "environment."}}},
-                          {"cwd", schemaField("string", "Overrides the plan's "
-                                                        "directory.")},
-                          {"stdin", schemaField("string", "Overrides the plan's "
-                                                          "standard input.")},
+                          {"label", schemaField("string")},
+                          {"program", schemaField("string")},
+                          {"args", schemaStringArray()},
+                          {"env", schemaStringMap()},
+                          {"cwd", schemaField("string")},
+                          {"stdin", schemaField("string")},
                       }},
                      {"required", json::Array{"label"}},
                      {"additionalProperties", false},
                  }},
                 {"description",
-                 "Runs to make and compare, each one this plan with these fields "
-                 "replaced: the same tracepoints over the binary before and "
-                 "after a change, or over the input that fails and the one that "
-                 "does not. The response is the differences rather than one "
-                 "report per run -- how each ended, the hits and values that "
-                 "disagreed, the first hit at which they stopped agreeing, and "
-                 "the names of everything that matched. Leave it out for a "
-                 "single run."}}},
+                 "Runs to make and compare, each this plan with a few fields "
+                 "replaced. The response is the differences, not one report "
+                 "per run."}}},
        }},
       {"required", json::Array{"program"}},
       {"additionalProperties", false},
   };
 }
+
+json::Value
+lldb_protocol::mcp::ObserveInputSchema(StringRef debugger_description) {
+  return json::Object{
+      {"type", "object"},
+      {"properties",
+       json::Object{
+           {"plan", ObservationPlanSchema()},
+           {"debugger", schemaField("string", debugger_description)},
+       }},
+      {"required", json::Array{"plan"}},
+      {"additionalProperties", false},
+  };
+}
+
