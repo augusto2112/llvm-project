@@ -1066,15 +1066,16 @@ json::Value CaptureReport::Render() const {
   // How many hits this capture came back with a value at, said on the row rather
   // than left to be worked out.
   //
-  // Every short form here used to be a bare word naming how the capture
-  // resolved, and a word says nothing about whether it then read. The reader is
-  // meant to infer it from what is *absent*: no `errors`, so no failures, so as
-  // many reads as the enclosing observation had hits. From a live run, on
-  // hand-guessed paths into a compiler's internals -- "with paths like
-  // `CondVT.V.SimpleTy`, a silent failure is the likely failure mode, and I would
-  // have read its absence as 'the field was uninteresting'." That run hedged by
-  // capturing four fields redundantly so they could corroborate each other,
-  // which is four times the cost of the answer.
+  // Every short form here is a bare word naming how the capture resolved, and a
+  // word says nothing about whether it then read. Absent the count the reader has
+  // to infer that from an omission -- no `errors` field, so no failures, so as
+  // many reads as the enclosing observation had hits -- which is what a silently
+  // failing capture also looks like. A hand-written path into another project's
+  // internals is the case where that matters: it is the kind of capture most
+  // likely to resolve and read nothing, and measured on a run of them the
+  // response was read as "the field was uninteresting" and answered by capturing
+  // four fields redundantly so they could corroborate each other, at four times
+  // the cost of the answer.
   //
   // Spelled as the aggregate spells a value that never varied, `"false x4012"`:
   // this response already has an idiom for a thing and how many times, and six

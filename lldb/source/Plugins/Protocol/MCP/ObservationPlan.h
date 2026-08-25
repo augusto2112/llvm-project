@@ -195,11 +195,10 @@ struct LocationResolution {
   /// A line number means whatever the line table says, and the line table was
   /// written when the binary was built. Edit the file afterwards and the same
   /// plan traces a different statement, silently -- the report still says the
-  /// location resolved, because it did. From a live run: a tracepoint was set on
-  /// a statement at line 49038, four lines of comment were added above it, and
-  /// any re-run would have traced what had moved to 49042 with nothing to say
-  /// otherwise. That is the loop a debugger has to win to beat a print statement,
-  /// and losing it silently is worse than not being there.
+  /// location resolved, because it did. Adding a comment above the statement is
+  /// enough, which is what makes it the ordinary outcome of an edit-rebuild loop
+  /// rather than an unusual one: that loop is what a debugger has to win to beat
+  /// a print statement, and losing it silently is worse than not being there.
   ///
   /// Only the ordering of two mtimes, which is cheap and is the whole of the
   /// claim: not what moved, and not that anything did. Unset whenever either

@@ -518,10 +518,9 @@ using Secs = std::chrono::seconds;
 } // namespace
 
 TEST(SourceSkewTest, ASourceEditedAfterTheBuildIsReportedWithHowLongAfter) {
-  // The case this exists for, from a live run: a tracepoint was set on a
-  // statement, four lines of comment were added above it, and any re-run of the
-  // same plan would have traced what had moved four lines down -- with
-  // `resolved_locations: 1` still saying the location resolved, because it had.
+  // The failure this exists for is silent by construction: any edit above a
+  // traced statement moves it, and the report goes on saying the location
+  // resolved, because it did. The note is the only thing that can say otherwise.
   std::optional<std::string> Note =
       DescribeSourceSkew("X86ISelLowering.cpp", At(Secs(600)), At(Secs(0)));
   ASSERT_TRUE(Note.has_value());
