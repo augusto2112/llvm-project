@@ -190,6 +190,20 @@ std::string lldb_private::mcp::DescribeWallClock(double RunningMs,
       .str();
 }
 
+unsigned lldb_private::mcp::TerminalLocalRank(StringRef Name, bool IsScalar,
+                                              bool IsArgument) {
+  // Tested before anything else, so that a generated temporary goes last whatever
+  // its type is: a `__range1` is an aggregate whose expansion nobody asked for,
+  // and a `__begin2` is an iterator nobody will name in a capture.
+  if (Name.starts_with("__"))
+    return 4;
+  if (Name == "this")
+    return 3;
+  if (IsScalar)
+    return 0;
+  return IsArgument ? 2 : 1;
+}
+
 StringRef lldb_private::mcp::ToString(EmitDecision D) {
   switch (D) {
   case EmitDecision::Emit:
@@ -1521,6 +1535,27 @@ constexpr unsigned MaxFailureReasonChars = 400;
 /// that a frame of scalars and small structs comes back whole, while one local
 /// that reaches an arbitrarily large object cannot crowd out the rest.
 constexpr unsigned MaxTerminalLocalNodes = 96;
+
+/// Nodes any one of those locals may take out of that budget.
+///
+/// The shared budget bounds the response; this bounds one local's share of it,
+/// which is a different job. Without the second, the first local to reach a large
+/// object spends the response on itself and every local after it is an elision
+/// marker: measured on a compiler stopped inside one of its passes, `this` took 73
+/// of the 96 nodes and left 25 locals with none. Twelve is a small struct or a
+/// pointer and its members whole, and the loop-carried scalars a hang is explained
+/// by cost one apiece.
+constexpr unsigned MaxNodesPerTerminalLocal = 12;
+
+/// Characters one of those locals may render as before it collapses to its own
+/// value and a note of what was left out.
+///
+/// Larger than a capture's 300 because a terminal event happens once per run,
+/// where a capture's rendering is repeated into a histogram and into each side of
+/// every transition it appears in. The terminal was the only caller leaving this
+/// unbounded, which is how one local came back as 4,440 characters of pass and
+/// target state.
+constexpr unsigned MaxTerminalLocalChars = 600;
 
 /// The reciprocal of the share of a run that may be spent stopping the program
 /// to sample it. Ten per cent: enough that a run long enough to be worth
@@ -2992,14 +3027,17 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
           /*get_file_globals=*/false, /*include_synthetic_vars=*/true,
           /*error_ptr=*/nullptr)) {
     const size_t Count = std::min(Locals->GetSize(), MaxTerminalLocals);
-    // One budget for the whole set rather than one per local. A frame holding a
-    // reference to a compiler's pass manager reaches everything the compiler
-    // owns in two hops, and a per-local budget lets each of forty locals spend
-    // it: measured at 8.6 kB of interior, against 5 kB for the backtrace it was
-    // meant to annotate. Exhausting it leaves the remaining locals as elision
-    // markers, which is what the reader wants of a local it has not asked about.
-    unsigned Budget = MaxTerminalLocalNodes;
-    size_t Rendered = 0;
+
+    // Read and ranked before anything is rendered, because the order the budget
+    // is spent in decides which locals the response holds. See \ref
+    // TerminalLocalRank.
+    struct Local {
+      llvm::StringRef Name;
+      lldb::ValueObjectSP Value;
+      unsigned Rank = 0;
+    };
+    std::vector<Local> Ordered;
+    Ordered.reserve(Count);
     for (size_t I = 0; I < Count; ++I) {
       lldb::VariableSP Var = Locals->GetVariableAtIndex(I);
       if (!Var)
@@ -3011,15 +3049,47 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
       // A local with no name cannot be named in a capture either, so reporting
       // it costs a reader an entry keyed on the empty string and offers nothing
       // to do with it.
-      llvm::StringRef Name = Value->GetName().GetStringRef();
+      const llvm::StringRef Name = Value->GetName().GetStringRef();
       if (Name.empty())
         continue;
-      ValueObjectNode Node(Value);
+      // `IsScalarType` computes no synthetic children, so asking it of every
+      // local costs nothing the ranking would otherwise avoid.
+      Ordered.push_back(
+          {Name, Value,
+           TerminalLocalRank(Name, Value->GetCompilerType().IsScalarType(),
+                             Var->GetScope() ==
+                                 lldb::eValueTypeVariableArgument)});
+    }
+
+    // Stable, so that within one rank the compiler's own order stands: among a
+    // function's body locals, declaration order is as good an answer as any and
+    // it does not move between runs.
+    llvm::stable_sort(Ordered, [](const Local &LHS, const Local &RHS) {
+      return LHS.Rank < RHS.Rank;
+    });
+
+    // One budget for the whole set rather than one per local. A frame holding a
+    // reference to a compiler's pass manager reaches everything the compiler
+    // owns in two hops, and a per-local budget lets each of forty locals spend
+    // it: measured at 8.6 kB of interior, against 5 kB for the backtrace it was
+    // meant to annotate. Exhausting it leaves the remaining locals as elision
+    // markers, which is what the reader wants of a local it has not asked about.
+    unsigned Budget = MaxTerminalLocalNodes;
+    size_t Rendered = 0;
+    for (const Local &L : Ordered) {
+      ValueObjectNode Node(L.Value);
       SerializeValueOptions SOpts;
-      SOpts.SharedBudget = &Budget;
+      // A slice of the shared budget rather than the whole of it, so that the
+      // first local to reach a large object cannot spend the response on itself,
+      // and only what the slice was spent down to is charged back.
+      unsigned Slice = std::min(Budget, MaxNodesPerTerminalLocal);
+      const unsigned Given = Slice;
+      SOpts.SharedBudget = &Slice;
+      SOpts.MaxRenderedChars = MaxTerminalLocalChars;
       SOpts.SawSummary = &m_saw_summary;
       SOpts.SawExpansion = &m_saw_expansion;
-      Terminal.Locals[Name] = SerializeValue(Node, SOpts);
+      Terminal.Locals[L.Name] = SerializeValue(Node, SOpts);
+      Budget -= Given - Slice;
       ++Rendered;
     }
     if (Locals->GetSize() > Rendered)

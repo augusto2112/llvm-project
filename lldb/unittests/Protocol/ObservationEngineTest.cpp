@@ -537,6 +537,42 @@ TEST(ObservationEngineTest, RankingCountsTheSourcelessFramesItDropped) {
   EXPECT_EQ(Dropped, 0u);
 }
 
+TEST(ObservationEngineTest, LocalsAreReadScalarsFirstAndThisLast) {
+  // Declaration order hands a shared budget to `this` and the parameters, which
+  // for a C++ member function is what the compiler emits first and never what was
+  // asked about. Measured on a compiler stopped inside a pass: those four took
+  // the whole of a 96-node budget and all eleven body locals came back as elision
+  // markers.
+  const unsigned Scalar =
+      TerminalLocalRank("Worklist", /*IsScalar=*/true, /*IsArgument=*/false);
+  const unsigned BodyAggregate =
+      TerminalLocalRank("PhiNodes", /*IsScalar=*/false, /*IsArgument=*/false);
+  const unsigned Parameter =
+      TerminalLocalRank("TM", /*IsScalar=*/false, /*IsArgument=*/true);
+  const unsigned This =
+      TerminalLocalRank("this", /*IsScalar=*/false, /*IsArgument=*/true);
+  const unsigned Temporary =
+      TerminalLocalRank("__range1", /*IsScalar=*/false, /*IsArgument=*/false);
+
+  EXPECT_LT(Scalar, BodyAggregate);
+  EXPECT_LT(BodyAggregate, Parameter);
+  EXPECT_LT(Parameter, This);
+  EXPECT_LT(This, Temporary);
+
+  // A scalar parameter is still a scalar: one node and about twenty-five bytes,
+  // and for a hang it is as likely to be the loop-carried value as any body
+  // local.
+  EXPECT_EQ(TerminalLocalRank("N", /*IsScalar=*/true, /*IsArgument=*/true),
+            Scalar);
+
+  // The temporary test comes first, so a range-for's own iterator goes last
+  // whatever its type says. Eight of thirty-two slots in the frame measured were
+  // these, all starved, and none names anything a reader would capture.
+  EXPECT_EQ(TerminalLocalRank("__begin2", /*IsScalar=*/true,
+                              /*IsArgument=*/false),
+            Temporary);
+}
+
 TEST(ObservationEngineTest, SystemPathsAreJudgedByRoot) {
   EXPECT_TRUE(IsSystemSourcePath("/usr/include/stdio.h"));
   EXPECT_TRUE(IsSystemSourcePath("/opt/homebrew/include/foo.h"));

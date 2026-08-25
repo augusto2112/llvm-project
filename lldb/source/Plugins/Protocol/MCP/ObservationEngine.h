@@ -72,6 +72,31 @@ bool IsAbnormal(Outcome O);
 /// run.
 std::string DescribeWallClock(double RunningMs, double SetupMs);
 
+/// Where one local sits in the order a stopped frame's locals are read, lowest
+/// read first.
+///
+/// A budget shared across the locals and spent in declaration order gives it to
+/// whatever the compiler emitted first, which for a C++ member function is
+/// `this` and then the formal parameters. Measured on a compiler stopped inside
+/// one of its passes: those four took the whole of a 96-node budget and every one
+/// of the eleven body locals came back as an elision marker. `this` alone was
+/// 4,440 bytes, 37.7% of the response, and -- the part worth being precise about
+/// -- it was real pass and target state rather than unreadable field soup. It is
+/// simply never what was asked about. What was asked about is the loop-carried
+/// value a body local holds.
+///
+/// Scalars first: one node and about twenty-five bytes each, and they are what a
+/// hang is explained by. Then the body's own aggregates, then the parameters,
+/// then `this`, which reaches everything its object owns in two hops. Last the
+/// compiler's own range-for temporaries, which took eight of thirty-two slots in
+/// the frame measured and name nothing a reader would ask about again.
+///
+/// This decides what is expanded, not what order the response prints in:
+/// `llvm::json::Object` prints its keys sorted, and a caller names a local by
+/// key.
+unsigned TerminalLocalRank(llvm::StringRef Name, bool IsScalar,
+                           bool IsArgument);
+
 /// Separates one capture's rendering from the next in the tuple a hit is recorded
 /// as. A control character cannot occur inside a rendered value, so two different
 /// tuples cannot join into one identical string -- which is what lets an emission
