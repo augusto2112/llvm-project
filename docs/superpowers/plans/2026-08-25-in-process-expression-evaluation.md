@@ -13,7 +13,7 @@
 ## Global Constraints
 
 - **arm64 only.** Every architecture-specific path must refuse other architectures rather than guess. Darwin is the only tested platform.
-- **Build directory is `/Users/work/Developer/llvm/build`.** Unit tests: `ninja -C /Users/work/Developer/llvm/build TargetTests` then `/Users/work/Developer/llvm/build/bin/TargetTests --gtest_filter=<Suite>.*`.
+- **Build directory is `/Users/work/Developer/llvm/build`.** Unit tests: `ninja -C /Users/work/Developer/llvm/build TargetTests` then `/Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter=<Suite>.*`.
 - **LLVM style.** Two-space indent, 80 columns, `///` doc comments on public declarations, `m_` prefix for private members, `PascalCase` for new local variables in new files under `lldb/source/Target` (match the file you are editing; existing LLDB code uses `snake_case` locals, new lldb-mcp-adjacent code in this branch uses `PascalCase` — follow the surrounding file).
 - **No `Date.now()`-style nondeterminism in tests.** Golden-string tests must not embed addresses that vary between runs; pass addresses in as parameters.
 - **Comments explain why, not what.** This branch's convention is strict about it. Never reference a task number, this plan, or a bug being fixed in a source comment.
@@ -233,7 +233,7 @@ In `lldb/unittests/Target/CMakeLists.txt`, add `EntryTrampolineTest.cpp` to the 
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build TargetTests && \
-  /Users/work/Developer/llvm/build/bin/TargetTests --gtest_filter='EntryTrampolineTest.*'
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='EntryTrampolineTest.*'
 ```
 
 Expected: `[  PASSED  ] 4 tests.`
@@ -734,7 +734,7 @@ In `lldb/unittests/Target/CMakeLists.txt`, add `FunctionBodySourceTest.cpp` afte
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build TargetTests && \
-  /Users/work/Developer/llvm/build/bin/TargetTests --gtest_filter='FunctionBodySourceTest.*'
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='FunctionBodySourceTest.*'
 ```
 
 Expected: `[  PASSED  ] 14 tests.`
@@ -1128,7 +1128,7 @@ In `lldb/unittests/Target/CMakeLists.txt`, add `PatchControlBlockTest.cpp` after
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build TargetTests && \
-  /Users/work/Developer/llvm/build/bin/TargetTests --gtest_filter='PatchControlBlockTest.*'
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='PatchControlBlockTest.*'
 ```
 
 Expected: `[  PASSED  ] 11 tests.`
@@ -1799,7 +1799,7 @@ In `lldb/unittests/Target/CMakeLists.txt`, add `PatchSourceBuilderTest.cpp` afte
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build TargetTests && \
-  /Users/work/Developer/llvm/build/bin/TargetTests --gtest_filter='PatchSourceBuilderTest.*'
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='PatchSourceBuilderTest.*'
 ```
 
 Expected: `[  PASSED  ] 25 tests.`
@@ -1914,7 +1914,7 @@ Note the comma after `eExternal` — it is currently the last enumerator and has
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build TargetTests && \
-  /Users/work/Developer/llvm/build/bin/TargetTests --gtest_filter='BreakpointSiteTest.*'
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='BreakpointSiteTest.*'
 ```
 
 Expected: `[  PASSED  ] 1 test.`
@@ -2001,7 +2001,7 @@ Change it to:
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build lldb TargetTests && \
-  /Users/work/Developer/llvm/build/bin/TargetTests
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests
 ```
 
 Expected: the whole `TargetTests` suite passes. The new enumerator must not have changed behaviour for any existing type, so a failure here means a `switch` somewhere now has an unhandled case — build warnings will name it.
@@ -2458,7 +2458,7 @@ Add `FunctionPatch.cpp` to `lldb/source/Target/CMakeLists.txt` after `FunctionBo
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build TargetTests && \
-  /Users/work/Developer/llvm/build/bin/TargetTests --gtest_filter='FunctionPatchTest.*'
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='FunctionPatchTest.*'
 ```
 
 Expected: `[  PASSED  ] 5 tests.`
@@ -2499,10 +2499,10 @@ Add `#include "lldb/Target/FunctionPatch.h"` to that file's includes.
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build ProtocolTests && \
-  /Users/work/Developer/llvm/build/bin/ProtocolTests --gtest_filter='*SourceSkew*:*Skew*'
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Protocol/ProtocolTests --gtest_filter='*SourceSkew*:*Skew*'
 ```
 
-Expected: the existing skew tests still pass. If none match that filter, run the whole suite: `/Users/work/Developer/llvm/build/bin/ProtocolTests`.
+Expected: the existing skew tests still pass. If none match that filter, run the whole suite: `/Users/work/Developer/llvm/build/tools/lldb/unittests/Protocol/ProtocolTests`.
 
 - [ ] **Step 8: Commit the move**
 
@@ -2562,7 +2562,7 @@ Add `#include "lldb/Target/FunctionPatch.h"` to `Target.cpp`.
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build lldb TargetTests && \
-  /Users/work/Developer/llvm/build/bin/TargetTests
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests
 ```
 
 Expected: builds clean, whole suite passes.
@@ -3298,7 +3298,7 @@ Adapt `self.observe(...)` and the line number in `main.c:42` to whatever the exi
 
 ```bash
 ninja -C /Users/work/Developer/llvm/build lldb ProtocolTests && \
-  /Users/work/Developer/llvm/build/bin/ProtocolTests && \
+  /Users/work/Developer/llvm/build/tools/lldb/unittests/Protocol/ProtocolTests && \
   /Users/work/Developer/llvm/build/bin/lldb-dotest -p TestObserve.py
 ```
 
