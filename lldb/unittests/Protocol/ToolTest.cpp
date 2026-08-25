@@ -45,7 +45,13 @@ std::string Observe(json::Value Arguments) {
 TEST(ObserveToolTest, RequiresArguments) {
   ObserveTool Tool = MakeTool();
   ToolArguments Args; // std::monostate
-  EXPECT_EQ(FailureMessage(Tool.Call(Args)), "ObserveTool requires arguments");
+  // Matched whole rather than by substring, because what is being pinned is that
+  // the message names the tool as the server advertises it. A class name is a
+  // fact about this implementation, and a caller can neither look one up nor act
+  // on it.
+  EXPECT_EQ(FailureMessage(Tool.Call(Args)),
+            "trace_program: no arguments. Pass \"plan\", the observation plan "
+            "to run.");
 }
 
 TEST(ObserveToolTest, RequiresAnObject) {

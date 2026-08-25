@@ -200,7 +200,9 @@ static bool hasLiveProcess(Debugger &debugger) {
 Expected<lldb_protocol::mcp::CallToolResult>
 CommandTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   if (!std::holds_alternative<json::Value>(args))
-    return createStringError("CommandTool requires arguments");
+    return createStringError(
+        formatv("{0}: no arguments. Pass \"command\", the lldb command to run.",
+                GetName()));
 
   json::Path::Root root;
 
@@ -361,10 +363,20 @@ std::optional<json::Value> ObserveTool::GetSchema() const {
 
 Expected<lldb_protocol::mcp::CallToolResult>
 ObserveTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
+  // Read from the tool rather than written out, because what a caller can look
+  // up is the name the server advertised, and a class name is a fact about this
+  // file that no client can act on.
   if (!std::holds_alternative<json::Value>(args))
-    return createStringError("ObserveTool requires arguments");
+    return createStringError(
+        formatv("{0}: no arguments. Pass \"plan\", the observation plan to run.",
+                GetName()));
 
+  // Reachable: `arguments` is mapped raw, so a call passing a number or a string
+  // for it arrives here. Only a client speaking to this server directly can --
+  // `lldb-mcp` builds an object before forwarding -- which is also why the
+  // message spells out what the argument should have been.
   const json::Object *arguments = std::get<json::Value>(args).getAsObject();
+
   if (!arguments)
     return createStringError(
         "trace_program: the arguments must be an object carrying \"plan\", the "
@@ -502,15 +514,24 @@ DebuggerCreateTool::Call(const lldb_protocol::mcp::ToolArguments &) {
 Expected<lldb_protocol::mcp::CallToolResult>
 DebuggerDeleteTool::Call(const lldb_protocol::mcp::ToolArguments &args) {
   if (!std::holds_alternative<json::Value>(args))
-    return createStringError("DebuggerDeleteTool requires arguments");
+    return createStringError(
+        formatv("{0}: no arguments. Pass \"debugger\", the id or uri of the "
+                "session to destroy.",
+                GetName()));
 
   const json::Object *arguments = std::get<json::Value>(args).getAsObject();
   if (!arguments)
-    return createStringError("DebuggerDeleteTool requires arguments");
+    return createStringError(
+        formatv("{0}: the arguments must be an object carrying \"debugger\", "
+                "the id or uri of the session to destroy.",
+                GetName()));
 
   std::optional<StringRef> debugger = arguments->getString("debugger");
   if (!debugger)
-    return createStringError("DebuggerDeleteTool requires a debugger");
+    return createStringError(
+        formatv("{0}: \"debugger\" is required, and is the id or uri of the "
+                "session to destroy.",
+                GetName()));
 
   StringRef specifier = *debugger;
   specifier.consume_front(kSchemeAndHost);

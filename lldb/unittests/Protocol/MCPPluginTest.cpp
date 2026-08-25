@@ -255,8 +255,12 @@ TEST_F(MCPPluginTest, ReadResourceTargetWithExecutable) {
 TEST_F(MCPPluginTest, CommandToolRequiresArguments) {
   CommandTool tool("command", "Run an lldb command.");
   ToolArguments args; // std::monostate
-  EXPECT_THAT_EXPECTED(tool.Call(args),
-                       FailedWithMessage("CommandTool requires arguments"));
+  // The name the tool was registered under, not the class implementing it: a
+  // caller reading the message can look the former up and act on it.
+  EXPECT_THAT_EXPECTED(
+      tool.Call(args),
+      FailedWithMessage(
+          "command: no arguments. Pass \"command\", the lldb command to run."));
 }
 
 TEST_F(MCPPluginTest, CommandToolInvalidArguments) {
@@ -414,7 +418,8 @@ TEST_F(MCPPluginTest, DebuggerDeleteToolRequiresDebugger) {
   ToolArguments args = json::Value(json::Object{});
   EXPECT_THAT_EXPECTED(
       tool.Call(args),
-      FailedWithMessage("DebuggerDeleteTool requires a debugger"));
+      FailedWithMessage("debugger_delete: \"debugger\" is required, and is the "
+                        "id or uri of the session to destroy."));
 }
 
 TEST_F(MCPPluginTest, DebuggerDeleteToolUnknownDebugger) {
