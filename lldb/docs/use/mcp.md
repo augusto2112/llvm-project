@@ -361,8 +361,29 @@ A value that could not be read comes back as `unavailable` with the kind, and a
 `reason`: the one line of the debugger's own diagnostic that says what went wrong,
 which is what decides whether to re-spell the capture, move it to another
 location, or stop asking. A capture that ran and produced nothing — a call
-returning void, which is how a compiler is asked to dump a node — reads `(void)`
-rather than as a failure, and what it printed is in `printed` beside that value.
+returning void — reads `(void)` rather than as a failure, and what it printed is
+in `printed` beside that value.
+
+Where such a call printed something — `N->dump()`, which is how a compiler is
+asked to describe a node — the printed text *is* the value, marked
+`printed_as_value`. So the histogram counts dumps, a transition names the two it
+moved between, an outlier is the dump seen twice in four thousand hits, and a
+comparison of two runs compares what each printed. An expression run for its
+effect has its effect as its answer, and for a node that answer is the only
+legible rendering there is: reading the field gives `NodeType: 193`, and the
+renderer that turns 193 into `ISD::XOR` can only be called.
+
+Three things are worth knowing about that text as a value. Leading and trailing
+whitespace is dropped and CRLF is folded to LF, so a dump does not key differently
+from its own trimmed form or because its printer chose `outs()` over `errs()`; the
+interior is kept, since a multi-line dump is a multi-line value. It is bounded to
+the same 300 characters as any other capture's rendering, and a bounded key says
+so in the key itself — `... (+607 more chars, whole text hashes a3e7d872)`, with
+the hash there so that two dumps agreeing for 300 characters are still two values.
+`printed` keeps the text raw, per stream and whole, and `printed_value_elided`
+beside the value says to go there. And where one expression printed on *both*
+streams there is no single text to be the value — nothing orders a write on the
+one against a write on the other — so that hit keeps `(void)` and its `printed`.
 
 A capture that was stopped keeps its numbers, and the reason it was stopped is
 reported once per observation under `stopped`, against the list of captures it
@@ -547,9 +568,11 @@ The debuggee's own output does not come back as debugger output. It is reported 
 
 A capture that prints instead of returning a value — `I->dump()`, which is how an
 object that knows how to describe itself is read — comes back with what it printed
-in `printed` beside it, per hit and per stream. That text is part of the capture's
-value, so `emit: on_change` over a printer emits when what it prints changes rather
-than never.
+in `printed` beside it, per hit and per stream, and with that text as the capture's
+own value. It is therefore a first-class observable: `emit: on_change` over a
+printer emits when what it prints changes rather than never, and the aggregate
+summarises dumps rather than one bucket of `(void)`. See `printed_as_value` above
+for what is normalised on the way.
 
 The two streams are separated by giving the program's standard error a file of the
 run's own. Standard output stays on a terminal, which keeps it line-buffered so

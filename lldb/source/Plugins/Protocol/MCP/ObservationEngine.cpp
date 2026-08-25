@@ -49,6 +49,7 @@
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/DJB.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -134,10 +135,19 @@ AggregatedValue AggregateKey(const json::Value &V) {
     // an `_elided` saying so, and keying on the whole document repeated that
     // sentence in every histogram key, on both sides of every transition and in
     // every outlier -- which is what the reduction was meant to stop.
+    //
+    // `printed_as_value` puts the `printed` family in the same class. It says the
+    // scalar under `value` is what the expression printed, so the raw per-stream
+    // copy beside it is a second rendering of the same answer rather than another
+    // field -- and keying on the pair would put the unbounded copy back into
+    // every entry, which is the whole reason the text was promoted.
     if (std::optional<StringRef> Scalar = Obj->getString("value")) {
-      const bool OnlyMarkers = all_of(*Obj, [](const auto &Entry) {
+      const bool Promoted =
+          Obj->getBoolean(PrintedAsValueField).value_or(false);
+      const bool OnlyMarkers = all_of(*Obj, [Promoted](const auto &Entry) {
         const StringRef Key = Entry.first;
-        return Key == "value" || Key.starts_with("_");
+        return Key == "value" || Key.starts_with("_") ||
+               (Promoted && Key.starts_with("printed"));
       });
       if (OnlyMarkers)
         return {Scalar->str(), /*Document=*/false};
@@ -1269,6 +1279,60 @@ json::Value InferiorOutput::Render() const {
   return O;
 }
 
+PrintedValue lldb_private::mcp::PrintedAsValue(const InferiorOutput &Printed,
+                                               size_t MaxChars) {
+  PrintedValue Result;
+
+  // One stream, or none. Two streams that both produced text have no order
+  // between them -- one file and one pty, with nothing marking which write came
+  // first -- so there is no single text for the value to be, and inventing an
+  // order would report a sequence the program did not have. Such a hit keeps the
+  // void marker and its `printed`, which is what it had before.
+  if (!Printed.Out.empty() && !Printed.Err.empty())
+    return Result;
+  StringRef Raw =
+      Printed.Out.empty() ? StringRef(Printed.Err) : StringRef(Printed.Out);
+
+  std::string Folded;
+  Folded.reserve(Raw.size());
+  for (size_t I = 0, E = Raw.size(); I != E; ++I) {
+    if (Raw[I] == '\r' && I + 1 != E && Raw[I + 1] == '\n')
+      continue;
+    Folded += Raw[I];
+  }
+
+  StringRef Text = StringRef(Folded).trim();
+
+  // Whitespace and nothing else is not a value. It is also what a drain that
+  // caught only the newline the program had left buffered looks like, and filing
+  // that as a bucket of its own would put a value in the histogram that no
+  // expression produced.
+  if (Text.empty())
+    return Result;
+
+  if (Text.size() <= MaxChars) {
+    Result.Text = Text.str();
+  } else {
+    // The hash covers the whole text, not the part that was dropped, so that the
+    // key is a function of everything printed. Without it two dumps agreeing for
+    // 300 characters and to the byte in length -- the same node with one operand
+    // changed, which is exactly what a caller is looking for -- would be counted
+    // as one value, and a histogram that merges two answers is worse than one
+    // that splits one.
+    Result.Text = Text.take_front(MaxChars).str();
+    Result.Text += formatv("... (+{0} more chars, whole text hashes {1:x-8})",
+                           Text.size() - MaxChars, djbHash(Text))
+                       .str();
+    Result.Shortened = true;
+  }
+
+  // A dump can carry anything the program had in a string, and a key that is not
+  // valid UTF-8 is not serializable.
+  if (!json::isUTF8(Result.Text))
+    Result.Text = json::fixUTF8(Result.Text);
+  return Result;
+}
+
 json::Value ArtifactReport::Render() const {
   json::Object O{{"events", static_cast<int64_t>(Events)}};
   if (!Path.empty())
@@ -2380,17 +2444,43 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     // nothing: the caller re-spells a capture that was working, and stops
     // looking for what it printed -- which is the whole point of capturing a
     // dump.
-    if (Resolved.Tier == ValueResolutionTier::Expression && Resolved.Value &&
-        !Resolved.Value->GetCompilerType().IsValid())
+    const bool ReturnedNothing =
+        Resolved.Tier == ValueResolutionTier::Expression && Resolved.Value &&
+        !Resolved.Value->GetCompilerType().IsValid();
+    if (ReturnedNothing)
       V = json::Object{{"value", VoidValue}};
 
     // What this expression printed, on the expression rather than in a shared
-    // buffer the caller has to guess at. It goes inside the value, so that it
-    // reaches the aggregate as part of the key: `emit: on_change` over a `dump()`
-    // is asking to be told when the dump changes, and a key that held only
-    // `(void)` would answer that it never does.
+    // buffer the caller has to guess at.
+    //
+    // For a call that returned nothing the text *is* the value, and stands where
+    // one would: an expression run for its effect has its effect as its answer,
+    // and in a codebase whose idiom is `N->dump()` that answer is the only legible
+    // rendering of the node there is. The histogram then counts dumps, a
+    // transition names the two of them it moved between, an outlier is the dump
+    // seen once in four thousand hits, and a comparison of two runs is a
+    // comparison of what each printed -- none of which a void marker can do.
+    // `printed` stays where it is, holding the text raw and per stream: promotion
+    // normalises and may shorten, and the bytes as written are what a caller
+    // reading one hit closely is after.
     if (json::Value Written = Printed.Render(); Written != nullptr) {
       if (json::Object *Obj = V.getAsObject()) {
+        if (ReturnedNothing) {
+          if (PrintedValue AsValue = PrintedAsValue(Printed, MaxCaptureChars);
+              !AsValue.Text.empty()) {
+            (*Obj)["value"] = std::move(AsValue.Text);
+            // Marked, because a reader who is not told will take the value for
+            // something the expression returned -- and what a printer returned
+            // is nothing, which is a different claim about the program.
+            Obj->try_emplace(PrintedAsValueField, true);
+            if (AsValue.Shortened)
+              Obj->try_emplace("printed_value_elided",
+                               formatv("the value is the first {0} characters of "
+                                       "what was printed; \"printed\" has it whole",
+                                       MaxCaptureChars)
+                                   .str());
+          }
+        }
         Obj->try_emplace("printed", std::move(Written));
         if (Printed.Truncated)
           Obj->try_emplace("printed_elided",

@@ -881,8 +881,12 @@ class ObserveTestCase(TestBase):
         for index, event in enumerate(events):
             captured = event["values"]["describe(n)"]
             # A call that ran and returned nothing is not a failure. Its value is
-            # void and its answer is what it wrote.
+            # void and its answer is what it wrote. Void here rather than the
+            # text, because this printer wrote on both streams at once and
+            # nothing orders a write on the one against a write on the other --
+            # so there is no single text for the value to be.
             self.assertEqual(captured["value"], "(void)", str(captured))
+            self.assertNotIn("printed_as_value", captured, str(captured))
             printed = captured["printed"]
             # Attributed per hit: hit 0 does not carry hit 2's line. Standard
             # output is still on a terminal, whose line discipline turns each
@@ -942,6 +946,48 @@ class ObserveTestCase(TestBase):
         self.assertEqual(report["emitted"], 3, str(report))
         aggregate = document["aggregate"]["printed"]["describe(n)"]
         self.assertEqual(aggregate["distinct"], 3, str(aggregate))
+
+    def test_a_printer_on_one_stream_is_aggregated_by_what_it_printed(self):
+        """The histogram over a printer counts dumps, not one bucket of void."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["printing"],
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "printed",
+                        "at": "step_printing",
+                        "capture": ["describe_one_stream(n)"],
+                    }
+                ],
+            }
+        )
+
+        events = self.events(document)
+        self.assertEqual(len(events), 3, str(events))
+        for index, event in enumerate(events):
+            captured = event["values"]["describe_one_stream(n)"]
+            # The text, not `(void)`, and marked as printed rather than returned:
+            # what this expression returned is nothing, which is a different
+            # claim about the program from what it printed.
+            self.assertEqual(captured["value"], f"node {index}", str(captured))
+            self.assertTrue(captured["printed_as_value"], str(captured))
+            # Trimmed for the value, verbatim in `printed`. A trailing newline is
+            # near-universal in dump output, and left in the value it would make
+            # every key differ from its own trimmed form.
+            self.assertEqual(
+                captured["printed"]["stderr"], f"node {index}\n", str(captured)
+            )
+
+        # And the aggregate is keyed on the text: three dumps, each its own value,
+        # legible without unescaping a document that wrapped a void marker.
+        aggregate = document["aggregate"]["printed"]["describe_one_stream(n)"]
+        self.assertEqual(
+            aggregate["values"], {"node 0": 1, "node 1": 1, "node 2": 1}, str(aggregate)
+        )
 
     def test_expression_capture_reports_its_tier(self):
         """A capture that is not a path is reported as an expression."""

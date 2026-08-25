@@ -89,6 +89,13 @@ void describe(int n) {
   fprintf(stderr, "warned %d\n", n);
 }
 
+/* The same thing on one stream, which is what a real `dump()` does. Writing to
+   two streams at once leaves nothing ordering one against the other, so such a
+   hit cannot have its printed text as its value; this one can, and that is the
+   case worth having a subject for. The trailing newline is deliberate: it is
+   near-universal in dump output and it is what the value must not carry. */
+void describe_one_stream(int n) { fprintf(stderr, "node %d\n", n); }
+
 /* Observed while a capture calls `describe`, so the attribution has more than
    one hit to keep straight. */
 int step_printing(int n) { return n + 1; }

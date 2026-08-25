@@ -895,6 +895,51 @@ struct InferiorOutput {
   llvm::json::Value Render() const;
 };
 
+/// Marks a capture's value as text the expression printed rather than something
+/// it returned. Named here rather than at its two use sites because the aggregate
+/// keys on its presence: it is what says the raw `printed` beside the value is a
+/// second copy of the answer and not another field.
+constexpr llvm::StringLiteral PrintedAsValueField = "printed_as_value";
+
+/// What a capture that printed instead of returning something is aggregated
+/// under: the text it wrote, made fit to be a key.
+struct PrintedValue {
+  /// Empty when what was printed cannot stand as a value, in which case the void
+  /// marker with \ref InferiorOutput::Render beside it remains the answer.
+  std::string Text;
+
+  /// Set when \ref Text is a prefix of what was printed. \ref Text says so
+  /// itself; this is what lets the hit carry a marker as well, since a key
+  /// travels into a transition with no room for one beside it.
+  bool Shortened = false;
+};
+
+/// The value for a capture whose expression ran, returned nothing, and printed.
+///
+/// Such a capture already reached the aggregate as a document wrapping the void
+/// marker, which worked -- transitions and `on_change` did see the text change --
+/// and cost fifteen times what the answer does. Measured on a subject printing a
+/// sixteen-operand subtree at each of 24 hits, four distinct values: 15.7 kB of
+/// response, 96% of it the aggregate, because a thousand-byte document is a key
+/// and a key appears once per histogram entry, twice per transition and once per
+/// outlier. The text alone is both the answer and a tenth of the bytes.
+///
+/// Three normalisations, each because without it a value differs from itself.
+/// CRLF becomes LF, since standard output is on a terminal and standard error is
+/// not, so the same string keyed differently depending on which stream a printer
+/// chose. Leading and trailing whitespace goes, because a trailing newline is
+/// near-universal in dump output and every key would otherwise differ from its
+/// own trimmed form -- and because the program's own unflushed newline can land
+/// at the front of a capture's window. What is left of the interior is kept
+/// verbatim: a multi-line dump is a multi-line value, and folding its structure
+/// away would merge nodes that differ only in an operand list.
+///
+/// \p MaxChars bounds the key. Past it the text is cut and the cut says how much
+/// went and hashes the whole, so that two dumps sharing a prefix are two values
+/// rather than one -- a key that under-reported a difference would answer the
+/// question this exists to ask.
+PrintedValue PrintedAsValue(const InferiorOutput &Printed, size_t MaxChars);
+
 /// Where the full event stream went.
 struct ArtifactReport {
   /// Empty when no file could be opened, in which case the events exist only as

@@ -1646,3 +1646,87 @@ TEST(ObservationEngineTest, AMissingMemberSettlesAtOneFailureAnywhere) {
   In.Locations = 27;
   EXPECT_TRUE(AssessCaptureCost(In).Disable);
 }
+
+namespace {
+
+/// A capture spelled as a call to a printer, which is the shape the whole of
+/// \ref PrintedAsValue exists for.
+InferiorOutput Wrote(llvm::StringRef Out, llvm::StringRef Err) {
+  InferiorOutput O;
+  O.Out = Out.str();
+  O.Err = Err.str();
+  return O;
+}
+
+} // namespace
+
+TEST(PrintedValueTest, WhatAPrinterPrintedIsTheValue) {
+  // Not `(void)`. A histogram over a printer has to count dumps, or the run can
+  // say that a line executed and nothing about what the node there was.
+  const PrintedValue V = PrintedAsValue(Wrote("", "t12: xor"), 300);
+  EXPECT_EQ(V.Text, "t12: xor");
+  EXPECT_FALSE(V.Shortened);
+}
+
+TEST(PrintedValueTest, ATrailingNewlineIsNotPartOfTheValue) {
+  // Near-universal in dump output, and left in it makes every key differ from
+  // its own trimmed form -- so the same node dumped by a printer that terminates
+  // its line and one that does not would be two values.
+  EXPECT_EQ(PrintedAsValue(Wrote("", "t12: xor\n"), 300).Text, "t12: xor");
+  EXPECT_EQ(PrintedAsValue(Wrote("", "\n\t t12: xor \n\n"), 300).Text,
+            "t12: xor");
+}
+
+TEST(PrintedValueTest, TheSameTextKeysTheSameThroughEitherStream) {
+  // Standard output is on a terminal and standard error is a file of the run's
+  // own, so one arrives with CRLF and the other with LF. Keyed as written, a
+  // printer that chose `outs()` would be summarised separately from the same
+  // printer through `errs()`.
+  EXPECT_EQ(PrintedAsValue(Wrote("add\r\n  op 0: t1\r\n", ""), 300).Text,
+            PrintedAsValue(Wrote("", "add\n  op 0: t1\n"), 300).Text);
+}
+
+TEST(PrintedValueTest, TheInteriorOfAMultiLineDumpIsKept) {
+  // A dump of a node with operands is a subtree, and the subtree is the answer.
+  // Folding it to one line would merge two nodes differing only in an operand.
+  EXPECT_EQ(PrintedAsValue(Wrote("", "xor\n  op 0: t1\n  op 1: t2\n"), 300).Text,
+            "xor\n  op 0: t1\n  op 1: t2");
+}
+
+TEST(PrintedValueTest, WhitespaceAloneIsNotAValue) {
+  // What a drain that caught only the newline the program had left buffered
+  // looks like. Filed as a value it becomes a histogram bucket no expression
+  // produced.
+  EXPECT_TRUE(PrintedAsValue(Wrote("", "\n"), 300).Text.empty());
+  EXPECT_TRUE(PrintedAsValue(Wrote("", ""), 300).Text.empty());
+}
+
+TEST(PrintedValueTest, TwoStreamsAtOnceHaveNoOrderSoNeitherIsTheValue) {
+  // One file and one pty, with nothing marking which write came first. A value
+  // joining them would report a sequence the program did not have, so the hit
+  // keeps the void marker and its `printed`.
+  EXPECT_TRUE(PrintedAsValue(Wrote("on stdout", "on stderr"), 300).Text.empty());
+}
+
+TEST(PrintedValueTest, AKeyPastTheBoundSaysItIsAPrefixAndHowMuchWent) {
+  // A `dump()` on a compiler node runs to hundreds of bytes, and a key appears
+  // once per histogram entry, twice per transition and once per outlier. What is
+  // never allowed is for the cut text to read as the whole of what was printed.
+  const std::string Long(400, 'x');
+  const PrintedValue V = PrintedAsValue(Wrote("", Long), 300);
+  EXPECT_TRUE(V.Shortened);
+  EXPECT_EQ(V.Text.compare(0, 300, Long, 0, 300), 0);
+  EXPECT_NE(V.Text.find("(+100 more chars"), std::string::npos) << V.Text;
+}
+
+TEST(PrintedValueTest, TwoDumpsSharingAPrefixAndALengthAreTwoValues) {
+  // The same node with one operand changed is exactly what a caller is looking
+  // for, and it differs past the bound. Keyed on the prefix alone the two would
+  // be counted as one value -- a histogram that merges two answers says
+  // something false, where one that splits one answer only says less.
+  std::string A(400, 'x');
+  std::string B = A;
+  B[380] = 'y';
+  EXPECT_NE(PrintedAsValue(Wrote("", A), 300).Text,
+            PrintedAsValue(Wrote("", B), 300).Text);
+}
