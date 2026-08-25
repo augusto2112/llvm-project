@@ -194,9 +194,26 @@ TEST(ComparisonTest, ARunThatCouldNotBeMadeIsARowRatherThanAnError) {
   ASSERT_EQ(Rows->size(), 2u);
   EXPECT_EQ((*Rows)[1].getAsObject()->getString("error"),
             std::optional<llvm::StringRef>("'/tmp/gone' does not exist"));
+}
 
-  // And nothing is called agreed, because one side said nothing at all.
-  EXPECT_EQ(Out.getAsObject()->get("agreed"), nullptr) << Render(Out);
+TEST(ComparisonTest, ARunWithNoResultIsNotInTheDenominatorOfAgreement) {
+  // Agreement is decided against the runs that answered. Counting the run that
+  // could not be launched leaves every row one short of the total, so every row
+  // reports as a one-sided divergence and the whole of the surviving run's
+  // report comes back under `diverged` with `agreed` gone -- which is the
+  // opposite of the other runs still answering.
+  std::vector<ComparedRun> Runs;
+  Runs.push_back({"ok", MakeRun(Outcome::Exited, 2, {Tuple({"1"}), Tuple({"2"})}),
+                  ""});
+  Runs.push_back({"missing", std::nullopt, "'/tmp/gone' does not exist"});
+
+  const llvm::json::Value Out = CompareRuns(Runs);
+  EXPECT_EQ(Out.getAsObject()->get("diverged"), nullptr) << Render(Out);
+  const llvm::json::Array *Agreed = Out.getAsObject()->getArray("agreed");
+  ASSERT_NE(Agreed, nullptr) << Render(Out);
+  EXPECT_EQ(Render(*Agreed),
+            R"(["outcome","ended","loop.resolved_locations","loop.hits",)"
+            R"("loop.emitted","loop.n"])");
 }
 
 TEST(ComparisonTest, AnObservationOnlyOneRunResolvedIsADifference) {

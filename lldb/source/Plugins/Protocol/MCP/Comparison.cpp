@@ -51,9 +51,16 @@ std::string Truncate(std::string S) {
 struct Compared {
   std::map<std::string, std::string> ByLabel;
 
-  /// Whether every run that has a value for this said the same thing. A run that
-  /// is missing it disagrees: an observation that resolved in one run and not in
-  /// another is a difference, and the commonest one there is.
+  /// Whether every run that has a value for this said the same thing, against
+  /// \p Runs runs that could say anything at all. A run that is missing it
+  /// disagrees: an observation that resolved in one run and not in another is a
+  /// difference, and the commonest one there is.
+  ///
+  /// \p Runs counts the runs that produced a result rather than the runs asked
+  /// for. A run that could not be launched contributes to no row, so counting it
+  /// here would put every row one short of the total and report the whole of the
+  /// surviving run's report as a one-sided divergence -- which is the opposite of
+  /// the promise that the other runs still answer.
   bool Agrees(size_t Runs) const {
     if (ByLabel.size() != Runs)
       return false;
@@ -209,11 +216,15 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
                         Truncate(Render(Summary)));
   }
 
+  // Against the runs that answered, not the runs asked for.
+  const size_t Answered = count_if(
+      Runs, [](const ComparedRun &Run) { return Run.Result.has_value(); });
+
   json::Object Diverged;
   json::Array Agreed;
   for (const std::string &Name : Compare.Names()) {
     const Compared &Row = Compare.Row(Name);
-    if (Row.Agrees(Runs.size())) {
+    if (Row.Agrees(Answered)) {
       Agreed.push_back(Name);
       continue;
     }
