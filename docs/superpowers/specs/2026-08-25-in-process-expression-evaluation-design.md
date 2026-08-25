@@ -215,7 +215,6 @@ static void __lldb_rec(unsigned k, unsigned c, unsigned long long v) {
   r->site = k; r->cap = c; r->val = v;
 }
 
-int target(struct Point *p, int n) __asm__("$__lldb_patched_target_1");
 #line 4 "/tmp/ipe/t.c"
 int target(struct Point *p, int n) {
   int acc = 0;
@@ -479,17 +478,33 @@ it is a far lighter harness than the MCP tool for debugging a JIT problem:
 5. One negative test per refusal that matters: a function too small to patch, a
    `static` local, a macro in the body.
 
+## Naming the generated function
+
+The generated function keeps the original function's name, and its address is
+read from the JIT module's symbol table rather than by evaluating `&name` as an
+expression.
+
+A unique source-level name with an `asm` label redirecting the symbol was the
+first choice, so that the DWARF name stayed `target` while the linker symbol
+stayed unique. It does not work: the JIT'd definition is not registered under the
+label, and a call to it fails with `Couldn't look up symbols:
+$__lldb_patched_probe_1`. Measured, not assumed.
+
+Keeping the original name is better anyway. Backtraces read `target` with no
+special casing, and reading the address out of the JIT module is more robust than
+a name-based expression lookup, which would be ambiguous between the original and
+the copy. The one caveat is that several JIT modules may end up defining the same
+symbol after repeated re-patching; that only matters if a patched body references
+the function by name, which happens only for direct recursion, and there
+resolving to the newest patched copy is the desired behaviour.
+
 ## Open questions to resolve first in implementation
 
-Each is cheap to check and each would reshape one piece:
+Does appending the JIT module with notification actually re-resolve `file:line`
+breakpoints into the patched copy? This is the mechanism behind the whole
+bookkeeping story, and it is the one claim in this document still unverified.
 
-1. Do `__atomic_*` builtins compile in an LLDB expression without a runtime
-   library? Eight-byte atomics are lock-free inline on arm64, so this is
-   expected to work, but the control block's whole design depends on it.
-2. Does the `asm()` label preserve the DWARF name, so a backtrace reads `target`
-   rather than `target_patched`? If not, naming the generated function `target`
-   outright is the fallback — and a call to `target` from inside the patched body
-   resolving to the patched copy is desirable anyway.
-3. Does appending the JIT module with notification actually re-resolve
-   `file:line` breakpoints into the patched copy? This is the mechanism behind
-   the whole bookkeeping story.
+Two questions that were open in the first draft are now measured and closed.
+`__atomic_*` builtins do compile and link in a top-level expression, with no
+libcall emitted, so the control block's counters work as written. And the `asm`
+label does not preserve a renamed symbol, which is why the section above exists.
