@@ -60,6 +60,22 @@ bool lldb_private::IsVariablePathEligible(llvm::StringRef Expr,
   return true;
 }
 
+uint32_t
+lldb_private::VariablePathOptions(const ValueResolutionOptions &Opts) {
+  uint32_t PathOptions =
+      StackFrame::eExpressionPathOptionsAllowDirectIVarAccess;
+
+  // DIL reads this flag as "do not consult the compile unit's globals or the
+  // module's global variable list", which is every route a bare identifier
+  // naming a global or a file-scope static could be found by. With it set the
+  // path tier cannot resolve such a name at all, so the name reaches the
+  // expression evaluator and is compiled -- once per resolution, since nothing
+  // about a path is cached between them.
+  if (!Opts.AllowGlobals)
+    PathOptions |= StackFrame::eExpressionPathOptionsDisallowGlobals;
+  return PathOptions;
+}
+
 ValueResolution
 lldb_private::ResolveValueDWIM(llvm::StringRef Expr, StackFrame *Frame,
                                Target &Tgt, ExecutionContextScope *Scope,
@@ -77,10 +93,8 @@ lldb_private::ResolveValueDWIM(llvm::StringRef Expr, StackFrame *Frame,
     lldb::VariableSP VarSP;
     Status PathStatus;
     lldb::ValueObjectSP ValObj = Frame->GetValueForVariableExpressionPath(
-        Expr, Opts.UseDynamic,
-        StackFrame::eExpressionPathOptionsAllowDirectIVarAccess |
-            StackFrame::eExpressionPathOptionsDisallowGlobals,
-        VarSP, PathStatus, Mode);
+        Expr, Opts.UseDynamic, VariablePathOptions(Opts), VarSP, PathStatus,
+        Mode);
     if (ValObj && PathStatus.Success() && ValObj->GetError().Success()) {
       if (!Opts.SuppressPersistentResult)
         if (lldb::ValueObjectSP Persisted = ValObj->Persist())

@@ -7,6 +7,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "lldb/Target/DWIMValueResolution.h"
+#include "lldb/Target/StackFrame.h"
 #include "gtest/gtest.h"
 
 using namespace lldb_private;
@@ -61,4 +62,34 @@ TEST(DWIMValueResolutionTest, TierNamesAreStable) {
   EXPECT_EQ(ToString(ValueResolutionTier::PersistentVariable), "persistent");
   EXPECT_EQ(ToString(ValueResolutionTier::Expression), "expression");
   EXPECT_EQ(ToString(ValueResolutionTier::Unresolved), "unavailable");
+}
+
+TEST(DWIMValueResolutionTest, AGlobalIsReachableAtThePathTierOnlyWhenAskedFor) {
+  // The flag is what decides whether a bare identifier naming a global or a
+  // file-scope static can resolve without compiling anything: DIL's interpreter
+  // reads it as "do not consult the compile unit's globals", so with it set the
+  // path tier returns nothing for such a name and the caller falls through to
+  // the expression evaluator at every resolution.
+  ValueResolutionOptions Default;
+  EXPECT_TRUE(VariablePathOptions(Default) &
+              StackFrame::eExpressionPathOptionsDisallowGlobals);
+
+  ValueResolutionOptions Globals;
+  Globals.AllowGlobals = true;
+  EXPECT_FALSE(VariablePathOptions(Globals) &
+               StackFrame::eExpressionPathOptionsDisallowGlobals);
+
+  // dwim-print takes the default, so the option has to be off in a
+  // default-constructed set of options and nowhere else.
+  EXPECT_FALSE(ValueResolutionOptions().AllowGlobals);
+}
+
+TEST(DWIMValueResolutionTest, DirectIVarAccessIsAskedForEitherWay) {
+  // A capture spelled as a bare member name, reached without `this->`, depends
+  // on this bit; admitting globals must not be a way of losing it.
+  ValueResolutionOptions Globals;
+  Globals.AllowGlobals = true;
+  for (const ValueResolutionOptions &Opts : {ValueResolutionOptions(), Globals})
+    EXPECT_TRUE(VariablePathOptions(Opts) &
+                StackFrame::eExpressionPathOptionsAllowDirectIVarAccess);
 }

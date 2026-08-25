@@ -15,6 +15,7 @@
 #include "lldb/lldb-forward.h"
 #include "lldb/lldb-private-types.h"
 #include "llvm/ADT/StringRef.h"
+#include <cstdint>
 #include <optional>
 #include <string>
 
@@ -35,6 +36,18 @@ struct ValueResolutionOptions {
   /// because those operators can be overloaded; a caller tracing a
   /// pointer-heavy codebase wants them on and reports the tier it got.
   bool AllowPointerPaths = false;
+
+  /// Let a bare identifier name a global or a file-scope static at the path
+  /// tier. Off, a name that resolves to one is not found there at all and falls
+  /// through to the expression evaluator: measured on a `static int` at file
+  /// scope, 9.6 ms per resolution against 0.17 ms for a parameter of the same
+  /// function, which is 2.6x the cost of an entire tracepoint hit. On, the same
+  /// name is a debug-info lookup and a memory read like any other path.
+  ///
+  /// A local still wins: the interpreter looks the frame up first and reaches
+  /// for a global only when that finds nothing, so this admits a name rather
+  /// than reordering one. dwim-print leaves it off and is unaffected.
+  bool AllowGlobals = false;
 
   /// Look up `$name` in the persistent expression state. Useful for a REPL,
   /// unwanted for a capture, where a stale `$3` must not shadow a variable.
@@ -80,6 +93,16 @@ struct ValueResolution {
 /// by the expression evaluator. Only `.` joins path components unless
 /// \p AllowPointerPaths is set, which additionally admits `->` and `[]`.
 bool IsVariablePathEligible(llvm::StringRef Expr, bool AllowPointerPaths);
+
+/// The frame expression-path option bits \ref ResolveValueDWIM asks the path
+/// tier for, given \p Opts.
+///
+/// Split out because this mapping is the whole of what
+/// \ref ValueResolutionOptions::AllowGlobals does, and because the difference
+/// it makes -- a memory read or a compiled expression, per resolution -- is
+/// otherwise only visible from a running inferior stopped in a frame whose
+/// compile unit has a global in it.
+uint32_t VariablePathOptions(const ValueResolutionOptions &Opts);
 
 /// Resolve \p Expr to a value, trying the cheapest mechanism that can work:
 /// a variable expression path, then a persistent variable, then the expression
