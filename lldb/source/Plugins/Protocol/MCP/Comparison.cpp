@@ -37,12 +37,36 @@ std::string Render(const json::Value &V) {
   return S;
 }
 
-std::string Truncate(std::string S) {
-  if (S.size() > MaxComparedSummaryChars) {
-    S.resize(MaxComparedSummaryChars);
+std::string Truncate(std::string S, unsigned Max = MaxComparedSummaryChars) {
+  if (S.size() > Max) {
+    S.resize(Max);
     S += "...";
   }
   return S;
+}
+
+/// \p Text with the carriage returns a terminal put in it removed.
+///
+/// A program observed here is launched on a pseudo-terminal, so every line it
+/// wrote arrives ending `\r\n`. Left in, the return is a character of every line a
+/// caller is shown, and it makes a stream captured on a pty differ from the same
+/// text written down anywhere else.
+std::string WithoutCarriageReturns(StringRef Text) {
+  std::string Out;
+  Out.reserve(Text.size());
+  for (size_t I = 0; I < Text.size(); ++I)
+    if (Text[I] != '\r' || (I + 1 != Text.size() && Text[I + 1] != '\n'))
+      Out += Text[I];
+  return Out;
+}
+
+/// \p Text as its lines, without the empty field a trailing newline leaves.
+SmallVector<StringRef, 8> Lines(StringRef Text) {
+  SmallVector<StringRef, 8> Out;
+  Text.split(Out, '\n');
+  if (!Out.empty() && Out.back().empty())
+    Out.pop_back();
+  return Out;
 }
 
 /// \p V with the text it holds bounded, rather than the document it serializes
@@ -82,16 +106,31 @@ struct Side {
   /// as text, a scalar came back double-quoted (`"\"282 x1\""`) and a summary came
   /// back as a line of backslashes for the caller to undo by hand -- which is the
   /// complaint the capture aggregate exists to answer, reintroduced one level up.
+  ///
+  /// Null where what to show is derived from the key rather than held: a stream is
+  /// compared as its whole text and shown as one line of it.
   json::Value Shown = nullptr;
+};
+
+/// How a row's sides are shown, once they are known to differ. Every row is
+/// compared the same way -- as text -- and the shape only decides what is worth
+/// putting in the document about a difference.
+enum class Shape {
+  /// As compared. The text is short and is what a reader wants.
+  AsIs,
+
+  /// Each run's summary of one capture, shortened against the others.
+  Summary,
+
+  /// Each run's output on one stream, reported as the line they part company on.
+  Stream,
 };
 
 /// One thing compared across runs: what each run said about it, keyed by label.
 struct Compared {
   std::map<std::string, Side> ByLabel;
 
-  /// Whether the sides are each run's summary of one capture, which are shortened
-  /// against each other rather than each cut to a length.
-  bool Summaries = false;
+  Shape Shown = Shape::AsIs;
 
   /// Whether every run that has a value for this said the same thing, against
   /// \p Runs runs that could say anything at all. A run that is missing it
@@ -127,8 +166,17 @@ public:
   /// serialization, and shown as the document it is.
   void AddSummary(StringRef Name, StringRef Label, const json::Value &Summary) {
     Compared &Row = Ensure(Name);
-    Row.Summaries = true;
+    Row.Shown = Shape::Summary;
     Row.ByLabel[Label.str()] = Side{Render(Summary), Summary};
+  }
+
+  /// A row holding what each run wrote on one stream: compared as the whole text,
+  /// so that identical output collapses to one name, and shown as the line they
+  /// part company on.
+  void AddStream(StringRef Name, StringRef Label, std::string Text) {
+    Compared &Row = Ensure(Name);
+    Row.Shown = Shape::Stream;
+    Row.ByLabel[Label.str()].Key = std::move(Text);
   }
 
   /// Names in the order they were added, so that a report follows the plan rather
@@ -312,6 +360,44 @@ json::Object ShortenSummaries(const std::map<std::string, Side> &ByLabel) {
   return Out;
 }
 
+/// What each run wrote on one stream, reduced to the line they part company on.
+///
+/// The streams themselves do not go in the document. A program's output is bounded
+/// at 8 kB per stream and two of those would be most of a response that is charged
+/// for its size on every later turn -- while for a miscompile the wrong answer is
+/// usually one line of stdout, and a caller who has the line has the difference.
+/// Identical output produces no entry here at all: the whole text is what the runs
+/// are compared on, so it collapses to one name under `agreed`.
+json::Object ShortenStreams(const std::map<std::string, Side> &ByLabel) {
+  std::map<std::string, SmallVector<StringRef, 8>> Split;
+  for (const auto &[Label, S] : ByLabel)
+    Split[Label] = Lines(S.Key);
+
+  // The earliest line at which any run parted company with the first of them,
+  // which for runs whose shared lines all agree is the first line the shorter one
+  // does not have.
+  const SmallVector<StringRef, 8> &Baseline = Split.begin()->second;
+  std::optional<size_t> At;
+  for (const auto &[Label, These] : Split) {
+    const size_t Shared = std::min(Baseline.size(), These.size());
+    size_t I = 0;
+    while (I < Shared && Baseline[I] == These[I])
+      ++I;
+    if (I == Shared && These.size() == Baseline.size())
+      continue;
+    At = At ? std::min(*At, I) : I;
+  }
+
+  // No line differs when only one run wrote anything at all, and the difference
+  // is then the whole of what it wrote against the other's silence.
+  json::Object Out{{"first_differing_line", static_cast<int64_t>(At.value_or(0) + 1)}};
+  for (const auto &[Label, These] : Split)
+    Out[Label] = At.value_or(0) < These.size()
+                     ? Truncate(These[At.value_or(0)].str(), MaxComparedOutputChars)
+                     : std::string();
+  return Out;
+}
+
 /// A hit's capture tuple as the values it holds, keyed by the expression each came
 /// from.
 ///
@@ -484,6 +570,19 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
                           R.Terminal.Line)
                       .str());
 
+    // What the program itself said. For a miscompile the wrong answer usually *is*
+    // stdout, and it was collected on every compared run and then dropped on the
+    // floor: nothing here read it, so a pair of binaries that print different
+    // results reported the difference only if a tracepoint happened to catch it.
+    // Compared as the whole text, so two runs that printed the same thing cost one
+    // name under `agreed` rather than two copies of their output.
+    if (!R.Output.Out.empty())
+      Compare.AddStream("stdout", Run.Label,
+                        WithoutCarriageReturns(R.Output.Out));
+    if (!R.Output.Err.empty())
+      Compare.AddStream("stderr", Run.Label,
+                        WithoutCarriageReturns(R.Output.Err));
+
     for (const std::string &Label : Labels) {
       const ObservationReport *Report = FindObservation(R, Label);
       if (!Report)
@@ -529,11 +628,17 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
       continue;
     }
     json::Object Sides;
-    if (Row.Summaries) {
-      Sides = ShortenSummaries(Row.ByLabel);
-    } else {
+    switch (Row.Shown) {
+    case Shape::AsIs:
       for (const auto &[Label, Answer] : Row.ByLabel)
         Sides[Label] = Bounded(Answer.Shown);
+      break;
+    case Shape::Summary:
+      Sides = ShortenSummaries(Row.ByLabel);
+      break;
+    case Shape::Stream:
+      Sides = ShortenStreams(Row.ByLabel);
+      break;
     }
     Diverged[Name] = std::move(Sides);
   }

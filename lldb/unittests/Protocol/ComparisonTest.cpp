@@ -335,6 +335,56 @@ TEST(ComparisonTest, ALongValueIsShortenedWithoutLeavingAnUnparseableDocument) {
   EXPECT_EQ(Shown->getString("value")->size(), MaxComparedSummaryChars + 3);
 }
 
+TEST(ComparisonTest, TwoRunsThatPrintedTheSameThingCostOneName) {
+  // The streams are compared as their whole text, so identical output collapses to
+  // a name. Putting two 8 kB streams in the document would be most of a response
+  // that is charged for its size on every later turn.
+  ObservationResult A = MakeRun(Outcome::Exited, 1, {Tuple({"1"})});
+  ObservationResult B = A;
+  A.Output.Out = "total=320 groups=39\r\n";
+  B.Output.Out = "total=320 groups=39\r\n";
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  EXPECT_EQ(Out.getAsObject()->get("diverged"), nullptr) << Render(Out);
+  const std::string Agreed = Render(*Out.getAsObject()->getArray("agreed"));
+  EXPECT_NE(Agreed.find("stdout"), std::string::npos) << Agreed;
+}
+
+TEST(ComparisonTest, TheLineTwoRunsOutputPartsCompanyOnIsTheDifference) {
+  // For a miscompile the wrong answer usually *is* stdout, and it was collected on
+  // every compared run and then read by nothing. The carriage returns are the
+  // pseudo-terminal's, not the program's, so they are gone before the line is
+  // compared or shown.
+  ObservationResult A = MakeRun(Outcome::Exited, 1, {Tuple({"1"})});
+  ObservationResult B = A;
+  A.Output.Out = "reading in.ll\r\ntotal=320 groups=39\r\n";
+  B.Output.Out = "reading in.ll\r\ntotal=282 groups=9\r\n";
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  EXPECT_EQ(Render(*Object(Out, "diverged")->getObject("stdout")),
+            R"({"after":"total=320 groups=39","before":"total=282 groups=9",)"
+            R"("first_differing_line":2})");
+}
+
+TEST(ComparisonTest, OutputInOneRunAndSilenceInTheOtherIsADifference) {
+  // A program that stopped printing is the difference being looked for, and a long
+  // line of it is still one line: the stream is bounded at 8 kB and the whole of it
+  // is never what a caller reads.
+  ObservationResult A = MakeRun(Outcome::Exited, 1, {Tuple({"1"})});
+  ObservationResult B = A;
+  A.Output.Err = std::string(MaxComparedOutputChars + 50, 'x') + "\n";
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  const llvm::json::Object *Stderr = Object(Out, "diverged")->getObject("stderr");
+  ASSERT_NE(Stderr, nullptr) << Render(Out);
+  EXPECT_EQ(Stderr->getInteger("first_differing_line"),
+            std::optional<int64_t>(1));
+  EXPECT_EQ(Stderr->getString("after")->size(), MaxComparedOutputChars + 3);
+  // And the run that printed nothing is not a side of it, the same way a run
+  // missing any other compared thing is not.
+  EXPECT_EQ(Stderr->get("before"), nullptr) << Render(Out);
+}
+
 TEST(ComparisonTest, TheFirstHitTheyDisagreeOnIsReportedWithWhatEachSaw) {
   // For a miscompile this is the answer: everything before it is the same
   // computation, and everything after is a consequence of this.

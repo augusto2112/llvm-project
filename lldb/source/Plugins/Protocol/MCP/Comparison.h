@@ -44,6 +44,7 @@ struct ComparedRun {
 /// as differences, which is true and useless. These are compared:
 ///
 ///   * how each run ended, and where
+///   * what each run wrote on stdout and on stderr
 ///   * per observation: locations resolved, hits, events emitted, resolution error
 ///   * per observation and capture, as `<label>.<expr>`: what the capture was
 ///     observed to hold, and under `<label>.<expr>.capture` how it resolved where
@@ -64,6 +65,11 @@ llvm::json::Value CompareRuns(llvm::ArrayRef<ComparedRun> Runs);
 /// on -- so this now bounds only the strings a value holds, where a single captured
 /// string is genuinely long.
 constexpr unsigned MaxComparedSummaryChars = 400;
+
+/// Characters of one line of a program's output shown per run. A stream is bounded
+/// at 8 kB and two of those would be most of a response; the line the runs part
+/// company on is what a caller reads, and for a miscompile it is the answer.
+constexpr unsigned MaxComparedOutputChars = 200;
 
 } // namespace lldb_private::mcp
 
