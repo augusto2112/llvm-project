@@ -94,7 +94,7 @@ unit-testable directly.
 | File | Responsibility |
 | --- | --- |
 | `Target/FunctionBodySource.{h,cpp}` | Given a `Function` and a `SourceManager`, return its textual extent: the start of the declaration through the matching `}`, brace-balanced with string, character, line-comment and block-comment awareness, plus a line-to-offset index for placing injections. |
-| `Target/PatchSourceBuilder.{h,cpp}` | Assemble the generated top-level source from the body text and the injection list. Owns the `#line` discipline and the `asm` label. Returns a string. |
+| `Target/PatchSourceBuilder.{h,cpp}` | Assemble the generated top-level source from the body text and the injection list. Owns the `#line` discipline and the baked-in control block addresses. Returns a string. |
 | `Target/PatchControlBlock.{h,cpp}` | Layout of the inferior-side control block, record encode and decode, and the ring drain producing records plus a lost count. |
 | `Target/EntryTrampoline.{h,cpp}` | `EncodeEntryTrampoline(addr_t) -> array<uint8_t, 16>`, and the safety predicate: 16 bytes available inside the function's bounds, no thread's PC in the range, no breakpoint site in the range. |
 | `Target/FunctionPatch.{h,cpp}` | Orchestration, and the only stateful part. `FunctionPatchManager`, one per `Target`, keyed by original entry address. Holds each patched function's original body text, its live injections, the current JIT'd copy, and the trampoline's saved bytes. |
