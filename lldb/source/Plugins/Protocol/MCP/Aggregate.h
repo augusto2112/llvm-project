@@ -194,16 +194,45 @@ struct CycleReport {
 /// bound.
 constexpr unsigned MaxCyclePeriod = 32;
 
-/// Finds the shortest block that the end of \p TailLabels repeats, where each
-/// entry names the location an event came from.
+/// The shortest block DetectCycle will report.
+///
+/// One entry repeating is the shape a counted loop making perfect progress has as
+/// readily as a hang: every run of a single observation that was still going when
+/// the clock ran out ends in a tail of one entry over and over, so a period-1
+/// cycle restates `hits > 3` and nothing else. Worse, the `repeats` beside it was
+/// the length of the tail buffer rather than a property of the program -- 256,
+/// every time.
+constexpr unsigned MinCyclePeriod = 2;
+
+/// Separates the location an entry came from from what was read there, in an
+/// entry handed to \ref DetectCycle. An entry without one is all location.
+///
+/// Present so that a repetition is decided on the values as well as on the place,
+/// which is what tells a hang from a loop that is getting somewhere: a counted
+/// loop's values differ at every iteration however regular its locations are, and
+/// a wedged one's do not. The block reported stays a list of locations, since that
+/// is what a caller acts on and the values are already in the aggregate and in the
+/// artifact's tail. A plan with no captures renders an empty value half at every
+/// hit and so is judged on locations alone, exactly as before.
+///
+/// The cost is that a hang whose captured values change at every iteration reports
+/// no cycle. `profile`'s `under` is the field that answers there, and it does not
+/// depend on the plan having tracepoints at all.
+constexpr char CycleEntryValueSeparator = '\x1e';
+
+/// Finds the shortest block that the end of \p TailEntries repeats, where each
+/// entry names the location an event came from and optionally what was read
+/// there, joined by \ref CycleEntryValueSeparator.
 ///
 /// The block has to reach the final entry, so that what is reported is where
 /// the program is now rather than somewhere it has already left, and it has to
 /// repeat at least three times, since two repetitions of a block are as much a
 /// coincidence as a loop. For a run that never terminates this is the answer
 /// the caller reports, which makes a cycle claimed in error worse than one
-/// missed.
-std::optional<CycleReport> DetectCycle(llvm::ArrayRef<std::string> TailLabels);
+/// missed -- so a block also has to span at least \ref MinCyclePeriod entries and
+/// hold two distinct ones. A block that is one entry repeated is a claim about the
+/// length of the tail rather than about the program.
+std::optional<CycleReport> DetectCycle(llvm::ArrayRef<std::string> TailEntries);
 
 } // namespace lldb_private::mcp
 

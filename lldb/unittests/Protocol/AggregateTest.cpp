@@ -82,6 +82,15 @@ std::vector<std::string> Repeat(llvm::ArrayRef<llvm::StringRef> Block,
   return Tail;
 }
 
+/// One tail entry as the engine records it: the location a hit came from, and
+/// what that hit's captures rendered as, joined the way \ref DetectCycle expects.
+std::string Entry(llvm::StringRef Location, llvm::StringRef Values) {
+  std::string Out = Location.str();
+  Out += CycleEntryValueSeparator;
+  Out += Values;
+  return Out;
+}
+
 } // namespace
 
 TEST(AggregateTest, NothingRecordedRendersAnEmptyObject) {
@@ -316,14 +325,44 @@ TEST(DetectCycleTest, RepeatedBlockIsReportedWithItsPeriodAndCount) {
             std::vector<std::string>({"parse", "emit", "advance"}));
 }
 
-TEST(DetectCycleTest, SingleLocationOverAndOverIsAPeriodOneCycle) {
-  const std::vector<std::string> Tail = Repeat({"spin"}, 10);
+TEST(DetectCycleTest, OneLocationOverAndOverIsNotACycle) {
+  // The shape every timed-out run of a single observation ends in. Reported as a
+  // cycle it read "period 1, repeats 256, this label" for a counted loop making
+  // perfect progress as readily as for a hang -- and the 256 was the length of the
+  // tail buffer rather than anything about the program.
+  EXPECT_FALSE(DetectCycle(Repeat({"spin"}, 10)).has_value());
+}
 
-  const std::optional<CycleReport> Cycle = DetectCycle(Tail);
+TEST(DetectCycleTest, ABlockOfIdenticalEntriesIsNotACycleAtAnyPeriod) {
+  // The same claim as above reached by counting the repetitions in twos and in
+  // threes. A block has to hold two distinct entries before it describes a
+  // traversal rather than a place.
+  EXPECT_FALSE(DetectCycle(Repeat({"spin", "spin"}, 6)).has_value());
+  EXPECT_FALSE(DetectCycle(Repeat({"spin", "spin", "spin"}, 5)).has_value());
+}
+
+TEST(DetectCycleTest, TwoLocationsAlternatingIsACycle) {
+  // The shortest block that says the program is traversing something.
+  const std::optional<CycleReport> Cycle =
+      DetectCycle(Repeat({"lock", "wait"}, 5));
   ASSERT_TRUE(Cycle.has_value());
-  EXPECT_EQ(Cycle->Period, 1u);
-  EXPECT_EQ(Cycle->Repeats, 10u);
-  EXPECT_EQ(Cycle->Sequence, std::vector<std::string>({"spin"}));
+  EXPECT_EQ(Cycle->Period, 2u);
+  EXPECT_EQ(Cycle->Repeats, 5u);
+  EXPECT_EQ(Cycle->Sequence, std::vector<std::string>({"lock", "wait"}));
+}
+
+TEST(DetectCycleTest, ABlockThatRepeatsOneEntryWithinItIsStillACycle) {
+  // The block the corpus's one genuine cycle had: four entries, three distinct,
+  // one of them twice in a row. Two distinct entries is the bar, not four.
+  const std::optional<CycleReport> Cycle = DetectCycle(
+      Repeat({"sinkcast_clone", "sinkcast_erase", "phiconvert", "phiconvert"},
+             4));
+  ASSERT_TRUE(Cycle.has_value());
+  EXPECT_EQ(Cycle->Period, 4u);
+  EXPECT_EQ(Cycle->Repeats, 4u);
+  EXPECT_EQ(Cycle->Sequence,
+            std::vector<std::string>({"sinkcast_clone", "sinkcast_erase",
+                                      "phiconvert", "phiconvert"}));
 }
 
 TEST(DetectCycleTest, ShortestPeriodWins) {
@@ -827,6 +866,54 @@ TEST(DetectCycleTest,
   EXPECT_EQ(Cycle->Repeats, 5u);
   EXPECT_EQ(Cycle->Sequence,
             std::vector<std::string>({"execute", "retire", "read", "decode"}));
+}
+
+TEST(DetectCycleTest, ValuesJoinedToALocationDecideWhetherTheBlockRepeated) {
+  // What separates a hang from a loop that is getting somewhere is not the places
+  // it traverses -- those are the same either way -- but whether what it reads
+  // there changes. A counted loop's values differ at every iteration, so no block
+  // of them repeats however regular its locations are.
+  std::vector<std::string> Tail;
+  for (unsigned Iteration = 0; Iteration < 8; ++Iteration)
+    for (llvm::StringRef Location : {"head", "body"})
+      Tail.push_back(Entry(Location, std::to_string(Iteration)));
+
+  EXPECT_FALSE(DetectCycle(Tail).has_value());
+}
+
+TEST(DetectCycleTest, ALoopReadingTheSameValuesIsACycleReportedAsLocations) {
+  // The wedged case: the same places, and the same values at them, over and over.
+  // What is reported is the locations alone, since the values are already in the
+  // aggregate and in the artifact's tail and where the program is is what a caller
+  // acts on.
+  std::vector<std::string> Tail;
+  for (unsigned Iteration = 0; Iteration < 4; ++Iteration) {
+    Tail.push_back(Entry("acquire", "held=1"));
+    Tail.push_back(Entry("retry", "held=1"));
+  }
+
+  const std::optional<CycleReport> Cycle = DetectCycle(Tail);
+  ASSERT_TRUE(Cycle.has_value());
+  EXPECT_EQ(Cycle->Period, 2u);
+  EXPECT_EQ(Cycle->Repeats, 4u);
+  EXPECT_EQ(Cycle->Sequence, std::vector<std::string>({"acquire", "retry"}));
+}
+
+TEST(DetectCycleTest, APlanWithNoCapturesIsJudgedOnLocationsAlone) {
+  // The shortest plan for a hang carries no captures, so every entry has an empty
+  // value half. That has to behave exactly as the labels alone did, because it is
+  // the case the one genuine cycle in the corpus came from.
+  std::vector<std::string> Tail;
+  for (unsigned Iteration = 0; Iteration < 5; ++Iteration)
+    for (llvm::StringRef Location : {"clone", "erase", "convert"})
+      Tail.push_back(Entry(Location, ""));
+
+  const std::optional<CycleReport> Cycle = DetectCycle(Tail);
+  ASSERT_TRUE(Cycle.has_value());
+  EXPECT_EQ(Cycle->Period, 3u);
+  EXPECT_EQ(Cycle->Repeats, 5u);
+  EXPECT_EQ(Cycle->Sequence,
+            std::vector<std::string>({"clone", "erase", "convert"}));
 }
 
 TEST(AggregateTest, ANoteKeyIsNotConfusableWithAValueOfThatName) {

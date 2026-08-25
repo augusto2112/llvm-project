@@ -1654,9 +1654,10 @@ constexpr Micros AttributedOutputQuiet = std::chrono::milliseconds(5);
 /// same window is paid again each time.
 constexpr size_t MaxAttributedOutput = 4096;
 
-/// Hit locations kept for cycle detection. Enough for the longest period
-/// DetectCycle looks for to repeat several times over.
-constexpr size_t MaxTailLabels = MaxCyclePeriod * 8;
+/// Hits kept for cycle detection, each a location and what was read there.
+/// Enough for the longest period DetectCycle looks for to repeat several times
+/// over.
+constexpr size_t MaxTailEntries = MaxCyclePeriod * 8;
 
 /// How long the wait loop blocks before it re-checks the run's deadline. A
 /// program that is neither stopping nor hitting a tracepoint is only noticed
@@ -2439,9 +2440,19 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     }
   }
 
-  m_tail_labels.push_back(Obs.Label);
-  if (m_tail_labels.size() > MaxTailLabels)
-    m_tail_labels.erase(m_tail_labels.begin());
+  // The location and what was read there, so that a repetition means the program
+  // is arriving at the same places holding the same values. The locations alone
+  // repeat for any loop, wedged or not; the values are what separate them. A plan
+  // with no captures contributes an empty value half and is judged on locations,
+  // which is what the shortest useful plan for a hang looks like.
+  {
+    std::string Entry = Obs.Label;
+    Entry += CycleEntryValueSeparator;
+    Entry += Rendered;
+    m_tail_entries.push_back(std::move(Entry));
+  }
+  if (m_tail_entries.size() > MaxTailEntries)
+    m_tail_entries.erase(m_tail_entries.begin());
 
   // Kept per hit so that two runs of one plan can be compared hit by hit, which
   // is where the answer is: the hit at which they stopped agreeing. Bounded,
@@ -3389,7 +3400,7 @@ Expected<ObservationResult> ObservationEngine::Run() {
   // reporting one for a program that ran to completion says a normal loop was
   // the reason it got stuck, which it was not.
   if (IsAbnormal(m_result.Result))
-    m_result.Cycle = DetectCycle(m_tail_labels);
+    m_result.Cycle = DetectCycle(m_tail_entries);
 
   uint64_t Emitted = 0;
   for (const std::unique_ptr<ObservationSite> &Site : m_sites) {

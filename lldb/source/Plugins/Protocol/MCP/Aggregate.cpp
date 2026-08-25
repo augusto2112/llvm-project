@@ -275,12 +275,12 @@ json::Value Aggregator::Render() const {
 }
 
 std::optional<CycleReport>
-lldb_private::mcp::DetectCycle(ArrayRef<std::string> TailLabels) {
-  const size_t Count = TailLabels.size();
+lldb_private::mcp::DetectCycle(ArrayRef<std::string> TailEntries) {
+  const size_t Count = TailEntries.size();
 
   // Ascending, because the shortest block that fits is the one describing the
   // loop: a longer block that also fits is that same loop counted in pairs.
-  for (unsigned Period = 1; Period <= MaxCyclePeriod; ++Period) {
+  for (unsigned Period = MinCyclePeriod; Period <= MaxCyclePeriod; ++Period) {
     const size_t Length = Period;
 
     // Three repetitions of a longer block need more entries than there are,
@@ -288,15 +288,32 @@ lldb_private::mcp::DetectCycle(ArrayRef<std::string> TailLabels) {
     if (Count < 3 * Length)
       break;
 
-    ArrayRef<std::string> Block = TailLabels.take_back(Length);
+    ArrayRef<std::string> Block = TailEntries.take_back(Length);
+
+    // A block of one entry repeated is the period-one claim reached by counting
+    // the repetitions in twos, and it says nothing a hit count has not: a loop
+    // getting somewhere sits at one location as readily as a wedged one.
+    if (all_of(Block.drop_front(),
+               [&](const std::string &Entry) { return Entry == Block.front(); }))
+      continue;
+
     size_t Repeats = 1;
     while ((Repeats + 1) * Length <= Count &&
-           TailLabels.slice(Count - (Repeats + 1) * Length, Length) == Block)
+           TailEntries.slice(Count - (Repeats + 1) * Length, Length) == Block)
       ++Repeats;
 
-    if (Repeats >= 3)
+    if (Repeats >= 3) {
+      // The values an entry carries decided the repetition above and are not
+      // reported: what a caller acts on is the block of locations, and the values
+      // there are already in the aggregate and in the artifact's tail.
+      std::vector<std::string> Sequence;
+      Sequence.reserve(Block.size());
+      for (const std::string &Entry : Block)
+        Sequence.push_back(
+            StringRef(Entry).split(CycleEntryValueSeparator).first.str());
       return CycleReport{Period, static_cast<unsigned>(Repeats),
-                         std::vector<std::string>(Block.begin(), Block.end())};
+                         std::move(Sequence)};
+    }
   }
 
   return std::nullopt;

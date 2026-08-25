@@ -272,7 +272,11 @@ apart from the total rather than left inside it. A run that got stuck also carri
 program that did not terminate is usually the answer. The cycle is found in the
 event stream rather than on the stack, so it appears only for a plan that had
 tracepoints to emit events: a stuck run with an empty `observe` list reports
-where it was stopped and no cycle. `inferior_output` holds
+where it was stopped and no cycle. It also has to be a traversal rather than a
+place — at least two distinct locations — and the captured values have to recur
+along with the locations, since a loop that is getting somewhere visits the same
+places holding different values at every iteration. Where a plan carries no
+captures, the locations decide it alone. `inferior_output` holds
 the program's own output, with `stdout` and `stderr` apart, and `notes` holds what
 went wrong that no single observation owns.
 

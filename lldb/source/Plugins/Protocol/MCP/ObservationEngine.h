@@ -1162,11 +1162,12 @@ private:
   /// evaluation is what lets the two overlap.
   std::recursive_mutex m_output_mutex;
 
-  /// Locations of the hits most recently recorded, which is what a cycle is
-  /// found over. The hit sequence rather than the emitted one, since an
+  /// The hits most recently recorded, each the location it came from joined to
+  /// what was read there by \ref CycleEntryValueSeparator, which is what a cycle
+  /// is found over. The hit sequence rather than the emitted one, since an
   /// emission mode that drops repeats would destroy the very repetition being
   /// looked for.
-  std::vector<std::string> m_tail_labels;
+  std::vector<std::string> m_tail_entries;
 
   std::vector<llvm::json::Value> m_tail_events;
 
