@@ -52,6 +52,11 @@ struct ComparedRun {
 ///   * per observation: the first hit whose captures disagreed, and what each run
 ///     saw there
 ///
+/// Captures that could not be read and notes no observation owns are reported once
+/// each at top level, deduplicated across the runs and labelled only where the runs
+/// disagree about them: two runs failing at the same name is one fault in the
+/// request and not a difference between them.
+///
 /// Everything compared that matched is reported by name alone under `agreed`,
 /// which is what makes "did my change affect anything else" a line rather than a
 /// diffing exercise.

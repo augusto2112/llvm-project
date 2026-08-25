@@ -501,6 +501,53 @@ const ObservationReport *FindObservation(const ObservationResult &Result,
   return nullptr;
 }
 
+/// One capture that could not be read, as a comparison reports it.
+///
+/// A capture that resolved in one run and not in another is what the comparison
+/// calls the commonest difference there is, and it appeared nowhere: the caller saw
+/// an escaped `{"reason":"use of undeclared identifier 'i'","unavailable":"error"}`
+/// inside `saw`, and only if that hit happened to be the divergent one.
+///
+/// The candidate names go, because two runs' lists of what was in scope instead are
+/// the same list twice, and the detail is kept to its first line -- what the
+/// compiler objected to, without the source excerpt and the caret under an
+/// expression the caller wrote and already has.
+json::Object DescribeFailure(const CaptureFailureReport &Failure) {
+  json::Object O{{"observation", Failure.Label},
+                 {"capture", Failure.Expr},
+                 {"reason", ToString(Failure.Kind)}};
+
+  // A condition is not a capture: it decides whether a hit is recorded at all, so
+  // one that cannot be evaluated leaves an observation looking like code that never
+  // ran.
+  if (Failure.IsCondition)
+    O["field"] = "when";
+  if (!Failure.Reason.empty())
+    O["detail"] =
+        Truncate(StringRef(Failure.Reason).split('\n').first.str(), MaxComparedOutputChars);
+  if (!Failure.FixedExpr.empty()) {
+    O["fixed_as"] = Failure.FixedExpr;
+    // A fixit that was suggested and failed as well is not a fix, and a caller who
+    // read it as one would adopt a spelling that never resolved.
+    O["fix_applied"] = Failure.FixApplied;
+  }
+  if (Failure.Disabled)
+    O["disabled"] = true;
+  return O;
+}
+
+/// The labels of \p In as an array, or nothing where every run that answered is in
+/// it: a fault the whole set of runs hit is a fault in the request, and naming all
+/// of them says only that.
+std::optional<json::Array> Only(ArrayRef<std::string> In, size_t Answered) {
+  if (In.size() == Answered)
+    return std::nullopt;
+  json::Array Out;
+  for (const std::string &Label : In)
+    Out.push_back(Label);
+  return Out;
+}
+
 } // namespace
 
 json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
@@ -728,11 +775,62 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
     FirstDiverged[Label] = std::move(Entry);
   }
 
+  // What could not be read, and what went wrong that no observation owns. Both were
+  // dropped in comparison mode, so a capture that resolved in one run and not in
+  // another -- the commonest difference there is -- reached the caller only as an
+  // escaped error inside `saw`, and only if that hit happened to be the divergent
+  // one. Reported once each at top level, deduplicated across the runs, because two
+  // runs failing at the same name is one fault in the request and not two.
+  std::vector<std::string> FailureOrder;
+  std::map<std::string, json::Object> FailureByKey;
+  std::map<std::string, std::vector<std::string>> FailureIn;
+  std::vector<std::string> NoteOrder;
+  std::map<std::string, std::vector<std::string>> NoteIn;
+  for (const ComparedRun &Run : Runs) {
+    if (!Run.Result)
+      continue;
+    for (const CaptureFailureReport &Failure : Run.Result->CaptureFailures) {
+      json::Object Described = DescribeFailure(Failure);
+      std::string Key = Render(json::Object(Described));
+      if (FailureByKey.try_emplace(Key, std::move(Described)).second)
+        FailureOrder.push_back(Key);
+      FailureIn[std::move(Key)].push_back(Run.Label);
+    }
+    for (const std::string &Note : Run.Result->Notes) {
+      if (!NoteIn.count(Note))
+        NoteOrder.push_back(Note);
+      NoteIn[Note].push_back(Run.Label);
+    }
+  }
+
+  json::Array Failures;
+  for (const std::string &Key : FailureOrder) {
+    json::Object Entry = std::move(FailureByKey.at(Key));
+    if (std::optional<json::Array> In = Only(FailureIn.at(Key), Answered))
+      Entry["in"] = std::move(*In);
+    Failures.push_back(std::move(Entry));
+  }
+
+  // A note every run made is the string it is, as it is in a single run's report. One
+  // only some runs made carries the labels, which is the whole of why it is here.
+  json::Array Notes;
+  for (const std::string &Note : NoteOrder) {
+    std::optional<json::Array> In = Only(NoteIn.at(Note), Answered);
+    if (!In)
+      Notes.push_back(Note);
+    else
+      Notes.push_back(json::Object{{"note", Note}, {"in", std::move(*In)}});
+  }
+
   json::Object Out{{"runs", std::move(Rows)}};
   if (!Diverged.empty())
     Out["diverged"] = std::move(Diverged);
   if (!FirstDiverged.empty())
     Out["first_divergent_hit"] = std::move(FirstDiverged);
+  if (!Failures.empty())
+    Out["capture_failures"] = std::move(Failures);
+  if (!Notes.empty())
+    Out["notes"] = std::move(Notes);
   // Names alone. What a caller asks a comparison is whether anything else moved,
   // and the answer is a list of what did not rather than the values that did not.
   if (!Agreed.empty())

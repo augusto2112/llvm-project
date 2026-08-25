@@ -385,6 +385,62 @@ TEST(ComparisonTest, OutputInOneRunAndSilenceInTheOtherIsADifference) {
   EXPECT_EQ(Stderr->get("before"), nullptr) << Render(Out);
 }
 
+TEST(ComparisonTest, ACaptureOnlyOneRunCouldReadIsNamedWithTheRunsThatFailed) {
+  // "Resolved in one run and not the other" is the commonest difference there is,
+  // and it reached the caller only as an escaped error inside `saw`, and only if
+  // that hit happened to be the divergent one.
+  ObservationResult A = MakeRun(Outcome::Exited, 2, {Tuple({"1"}), Tuple({"2"})});
+  ObservationResult B = A;
+  CaptureFailureReport Failure;
+  Failure.Label = "loop";
+  Failure.Expr = "i";
+  Failure.Kind = CaptureFailure::UnknownName;
+  Failure.Reason = "use of undeclared identifier 'i'\n    i\n    ^";
+  // Two runs' lists of what was in scope instead are the same list twice.
+  Failure.Candidates.Names = {"index", "n"};
+  Failure.Candidates.InScope = 40;
+  B.CaptureFailures.push_back(std::move(Failure));
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  const llvm::json::Array *Failures =
+      Out.getAsObject()->getArray("capture_failures");
+  ASSERT_NE(Failures, nullptr) << Render(Out);
+  ASSERT_EQ(Failures->size(), 1u);
+  EXPECT_EQ(Render(*Failures),
+            R"([{"capture":"i","detail":"use of undeclared identifier 'i'",)"
+            R"("in":["before"],"observation":"loop","reason":"no_such_name"}])");
+}
+
+TEST(ComparisonTest, AFaultEveryRunHitIsReportedOnceAndNotPerRun) {
+  // A capture that fails in every run is a fault in the request rather than a
+  // difference between the runs, so it is neither repeated nor labelled.
+  ObservationResult A = MakeRun(Outcome::Exited, 2, {Tuple({"1"}), Tuple({"2"})});
+  CaptureFailureReport Failure;
+  Failure.Label = "loop";
+  Failure.Expr = "i";
+  Failure.Kind = CaptureFailure::UnknownName;
+  A.CaptureFailures.push_back(Failure);
+  A.Notes.push_back("the artifact was truncated");
+  ObservationResult B = A;
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  EXPECT_EQ(Render(*Out.getAsObject()->getArray("capture_failures")),
+            R"([{"capture":"i","observation":"loop","reason":"no_such_name"}])");
+  EXPECT_EQ(Render(*Out.getAsObject()->getArray("notes")),
+            R"(["the artifact was truncated"])");
+}
+
+TEST(ComparisonTest, ANoteOnlySomeRunsMadeCarriesTheRunsThatMadeIt) {
+  ObservationResult A = MakeRun(Outcome::Exited, 2, {Tuple({"1"}), Tuple({"2"})});
+  ObservationResult B = A;
+  B.Notes.push_back("sampling was stopped to keep within the run's budget");
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  EXPECT_EQ(Render(*Out.getAsObject()->getArray("notes")),
+            R"([{"in":["before"],)"
+            R"("note":"sampling was stopped to keep within the run's budget"}])");
+}
+
 TEST(ComparisonTest, TheFirstHitTheyDisagreeOnIsReportedWithWhatEachSaw) {
   // For a miscompile this is the answer: everything before it is the same
   // computation, and everything after is a consequence of this.
