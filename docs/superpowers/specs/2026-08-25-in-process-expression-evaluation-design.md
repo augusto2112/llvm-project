@@ -120,7 +120,7 @@ struct Injection {
 enum class PatchFailure {
   NotArm64, NoProcess, NoSourceFile, SourceNewerThanBinary, BodyNotFound,
   StaticLocal, EntryTooSmall, ThreadInPatchRange, BreakpointInPatchRange,
-  CompileFailed, CaptureNotScalar, TooManySites, Unsupported,
+  CompileFailed, CaptureNotScalar, Unsupported,
 };
 
 class FunctionPatchManager {
@@ -203,17 +203,16 @@ capturing `acc` and `p->x`.
 
 ```c
 // Preamble, attributed to a synthetic file so it never shadows real lines.
-struct __lldb_rec_t { unsigned short site, cap; unsigned int flags; /* zero */
-                      unsigned long long val; };
+struct __lldb_rec_t { unsigned int site, cap; unsigned long long val; };
 struct __lldb_hdr_t { unsigned long seq, drained, capacity, high_water;
-                      unsigned char gate[N];
-                      unsigned long hits[N], cond_true[N];
                       struct __lldb_rec_t ring[]; };
-#define __LLDB_HDR ((volatile struct __lldb_hdr_t *)0x104000000UL)
+struct __lldb_site_t { unsigned char gate; unsigned long hits, cond_true; };
+#define __LLDB_HDR    ((volatile struct __lldb_hdr_t  *)0x104000000UL)
+#define __LLDB_SITE_K ((volatile struct __lldb_site_t *)0x104010018UL)
 static void __lldb_rec(unsigned k, unsigned c, unsigned long long v) {
   unsigned long s = __atomic_fetch_add(&__LLDB_HDR->seq, 1, __ATOMIC_RELAXED);
   volatile struct __lldb_rec_t *r = &__LLDB_HDR->ring[s & (CAPACITY - 1)];
-  r->site = k; r->cap = c; r->flags = 0; r->val = v;
+  r->site = k; r->cap = c; r->val = v;
 }
 
 int target(struct Point *p, int n) __asm__("$__lldb_patched_target_1");
@@ -222,12 +221,12 @@ int target(struct Point *p, int n) {
   int acc = 0;
   for (int i = 0; i < n; i++) {
 #line 7 "/tmp/ipe/t.c"
-    if (__LLDB_HDR->gate[K]) {
+    if (__LLDB_SITE_K->gate) {
       unsigned long __h =
-          __atomic_add_fetch(&__LLDB_HDR->hits[K], 1, __ATOMIC_RELAXED);
+          __atomic_add_fetch(&__LLDB_SITE_K->hits, 1, __ATOMIC_RELAXED);
       if (__h > SKIP) {
         if (acc > 5) {
-          __atomic_add_fetch(&__LLDB_HDR->cond_true[K], 1, __ATOMIC_RELAXED);
+          __atomic_add_fetch(&__LLDB_SITE_K->cond_true, 1, __ATOMIC_RELAXED);
           __typeof__(acc)  __lldb_cap_K_0 = (acc);
           __typeof__(p->x) __lldb_cap_K_1 = (p->x);
           unsigned long long __v0 = 0, __v1 = 0;
@@ -310,20 +309,39 @@ handlers rather than unregistered, so a straggler cannot surface as a bare
 
 ## The control block
 
-One allocation per target on first install, via `Process::AllocateMemory`, read
-and write, not executable. Its address is baked into every generated patch as a
-literal, which is what keeps it stable across re-patches; a global defined inside
-a JIT module would move every time the function was recompiled.
+Two allocations, both made through `Process::AllocateMemory`, read and write, not
+executable.
 
-The debugger writes `drained`, `gate[]`, `capacity` and `high_water`. The
-inferior writes `seq`, `hits[]`, `cond_true[]` and ring records. The record's
-`flags` field is reserved and written as zero; the capture's type comes from
-debug info, so nothing needs to be encoded alongside the value. Defaults: 64
-sites, 4096 records (64 KB), `high_water` at three quarters of capacity.
+**The ring block**, allocated once per target on first install: `seq`,
+`drained`, `capacity`, `high_water`, and the record ring. Its address is baked
+into every generated patch as a literal, which is what keeps it stable across
+re-patches; a global defined inside a JIT module would move every time the
+function was recompiled.
+
+**Site slots**, one 24-byte slot per injection, sub-allocated from pool pages.
+Each slot's own absolute address is baked into the patch that uses it, so a slot
+holds `gate`, `hits` and `cond_true` for exactly one site.
+
+Per-site state deliberately does **not** live in arrays inside the ring block.
+It would work, but `hits[K]`'s offset depends on the array length, so growing the
+site count would silently invalidate the offsets compiled into every patch
+already in the program — making the site count a hard limit fixed at allocation.
+Giving each site its own address instead means adding a site allocates a slot,
+disturbs nothing, and needs no recompile. There is no site limit beyond memory,
+and the ring block's layout is fixed for good.
+
+A slot is not reclaimed when its injection is removed, because retired copies
+still reference it. At 24 bytes, and a page holding 170 of them, leaking one per
+install-and-remove cycle is not worth tracking liveness to avoid.
+
+The debugger writes `drained`, `capacity`, `high_water` and each slot's `gate`.
+The inferior writes `seq`, the ring records, and each slot's `hits` and
+`cond_true`. Defaults: 4096 records (64 KB), `high_water` at three quarters of
+capacity.
 
 Capacity is a power of two so the writer indexes with a mask rather than a
-division. It is fixed for the life of the control block, which lets the builder
-bake it into the generated source as a literal and spares the writer a load. The
+division. It is fixed for the life of the ring block, which lets the builder bake
+it into the generated source as a literal and spares the writer a load. The
 header carries it as well, written once by the debugger at allocation, so the
 reader and writer cannot disagree about it.
 
@@ -386,7 +404,6 @@ The manager returns a typed reason:
 | `BreakpointInPatchRange` | A breakpoint site overlaps them |
 | `CompileFailed` | Carries the clang diagnostic. The catch-all that absorbs macros, missing types, C++, Objective-C and Swift |
 | `CaptureNotScalar` | Per capture, determined after compiling |
-| `TooManySites` | The control block's 64 site slots are all taken. Its layout is fixed at allocation because its address is baked into every patch, so the bound is a hard one |
 | `Unsupported` | `on_return`, or an emit mode other than `EveryHit` |
 
 `SourceNewerThanBinary` is a refusal on principle rather than a convenience.
