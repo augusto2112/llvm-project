@@ -145,6 +145,31 @@ static Expected<DebuggerSP> createManagedDebugger() {
   // A debugger driven over MCP has no event loop to service asynchronous
   // stops, so a resume must not return before the process has stopped.
   debugger_sp->SetAsyncExecution(false);
+
+  // Data formatters are what make a captured value readable: with one,
+  // `llvm::StringRef` renders as its string, and without one it comes back as the
+  // two fields it is made of, its text one level down inside a `const char *`.
+  // They are not built in -- a project ships them as a script its developers
+  // import -- and a debugger created through the API sources nothing, so an
+  // observe session had none and no way for a caller to ask for any.
+  //
+  // The home init file is what makes this need no configuration: a developer
+  // whose `~/.lldbinit` already imports their project's formatters gets the same
+  // renderings here as at their own prompt, and the alternative -- a plan field
+  // naming formatter scripts -- requires an agent to know both that the field
+  // exists and where the scripts are, which in practice means it stays unused and
+  // a captured name stays a struct.
+  //
+  // `SourceInitFileHome` also reads `~/.lldbinit-lldb-mcp`, which is what lets a
+  // session driven by an agent be configured apart from an interactive one.
+  //
+  // It runs commands from the user's own home directory, which is the trust an
+  // interactive lldb already extends to the same file. Its result is not
+  // reported: a failing command there is a fact about that file rather than about
+  // this run, and there is no run yet to attach it to.
+  CommandReturnObject init(/*colors=*/false);
+  debugger_sp->GetCommandInterpreter().SourceInitFileHome(init,
+                                                          /*is_repl=*/false);
   return debugger_sp;
 }
 

@@ -1930,6 +1930,8 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
           SerializeValueOptions SOpts;
           SOpts.MaxDepth = Obs.Depth;
           SOpts.MaxRenderedChars = MaxCaptureChars;
+          SOpts.SawSummary = &m_saw_summary;
+          SOpts.SawExpansion = &m_saw_expansion;
           json::Value V = SerializeValue(Node, SOpts);
           AggregatedValue Filed = AggregateKey(V);
           if (!IsUnavailable(V))
@@ -2105,6 +2107,8 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     SOpts.MaxDepth = Obs.Depth;
     SOpts.MaxRenderedChars = MaxCaptureChars;
     SOpts.ArtifactRef = formatv("$artifact#seq={0}", Seq).str();
+    SOpts.SawSummary = &m_saw_summary;
+    SOpts.SawExpansion = &m_saw_expansion;
     json::Value V = SerializeValue(Node, SOpts);
 
     // A call returning void completes and leaves a value object with no type
@@ -2784,6 +2788,8 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
       ValueObjectNode Node(Value);
       SerializeValueOptions SOpts;
       SOpts.SharedBudget = &Budget;
+      SOpts.SawSummary = &m_saw_summary;
+      SOpts.SawExpansion = &m_saw_expansion;
       Terminal.Locals[Name] = SerializeValue(Node, SOpts);
       ++Rendered;
     }
@@ -2886,6 +2892,25 @@ Expected<ObservationResult> ObservationEngine::Run() {
                 "streams are reported; the earlier output was dropped.",
                 MaxInferiorOutput)
             .str());
+
+  // Said only when both halves hold: something was expanded into its members,
+  // and nothing anywhere in the run was rendered by a formatter. Either alone
+  // says nothing. A run that expanded a struct of integers expanded exactly what
+  // it should have, and a run where any value got a summary has formatters that
+  // work and merely does not have one for this type.
+  //
+  // Worth a note at all because the two cases are indistinguishable in the
+  // response and want opposite responses from the caller. A capture of
+  // `llvm::StringRef` with no formatter loaded comes back as two fields with the
+  // text one level down inside a `const char *`, which reads as the value the
+  // program holds -- so a caller re-spells the capture to reach the field, and
+  // keeps doing that for every type the project has a formatter for.
+  if (m_saw_expansion && !m_saw_summary)
+    m_result.Notes.push_back(
+        "no data formatter matched any value read in this run, so a value with a "
+        "custom rendering came back expanded into its members rather than as the "
+        "one thing it stands for. Formatters are not built in: a project ships a "
+        "script to import, and this session loads what \"~/.lldbinit\" imports.");
   // Said in words as well as in a number, because the wrong reading of the
   // number is expensive and self-confirming: a caller that attributes a fixed
   // per-image cost to the tracepoints concludes that observing is orders of

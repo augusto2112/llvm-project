@@ -1058,6 +1058,13 @@ private:
   /// can notice that its time is up.
   std::optional<Outcome> m_requested_end;
 
+  /// What the value renderings met over the whole run: whether a formatter ever
+  /// produced a summary, and whether anything was expanded into its members for
+  /// want of one. Read once at the end, to say that no formatter matched anything
+  /// -- see Run().
+  bool m_saw_summary = false;
+  bool m_saw_expansion = false;
+
   ObservationResult m_result;
 };
 

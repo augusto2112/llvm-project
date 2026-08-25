@@ -1535,6 +1535,47 @@ class ObserveTestCase(TestBase):
         failure = self.capture_failure(document, "o->nosuch")
         self.assertEqual(failure["reason"], "no_such_member", str(failure))
 
+    def test_a_formatter_renders_a_value_and_its_absence_is_reported(self):
+        """A type with a formatter comes back as the one thing it stands for, and
+        a run that met none says so.
+
+        What loads them is not tested here: the session sources `~/.lldbinit`,
+        which is the developer's own file and not a test's to write. What is
+        tested is the half that file reaches -- that a formatter present in the
+        session decides the rendering, and that a run which found none says so
+        rather than leaving a caller to read an expanded struct as the value.
+        """
+        self.build()
+
+        plan = {
+            "program": self.getBuildArtifact("a.out"),
+            "timeout_seconds": 300,
+            "observe": [{"label": "inner", "at": "nested", "capture": ["o->in"]}],
+        }
+
+        # With no formatter for Inner, and nothing else in the run to have one:
+        # two integer members and no summary anywhere.
+        without = self.observe(plan)
+        entry = without["aggregate"]["inner"]["o->in"]
+        self.assertEqual(
+            entry["value"], {"a": {"value": "1"}, "b": {"value": "2"}}, str(entry)
+        )
+        notes = " ".join(without.get("notes", []))
+        self.assertIn("no data formatter matched", notes, notes)
+
+        self.runCmd('type summary add --summary-string "a=${var.a}" Inner')
+        self.addTearDownHook(lambda: self.runCmd("type summary delete Inner"))
+
+        # The summary stands in for the subtree, which is the point of having one:
+        # expanding children past a good one costs tokens and adds nothing.
+        with_formatter = self.observe(plan)
+        entry = with_formatter["aggregate"]["inner"]["o->in"]
+        self.assertEqual(entry["value"], {"summary": "a=1"}, str(entry))
+        # And the note is gone, because it was never about this type: it says that
+        # nothing in the run was rendered by a formatter at all.
+        notes = " ".join(with_formatter.get("notes", []))
+        self.assertNotIn("no data formatter matched", notes, notes)
+
     def test_a_condition_that_cannot_be_evaluated_says_so(self):
         """A `when` that never resolves is reported as a condition, not left as
         an observation that recorded nothing."""

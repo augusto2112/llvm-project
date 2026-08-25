@@ -401,6 +401,27 @@ accessor is how a capture most often fails — `getName()` does not imply a `Nam
 and `size()` does not imply a `Size`. Where a member name is a guess, capture the
 accessor call as well and let the cheaper of the two be the one that resolves.
 
+#### Data formatters
+
+What a value *renders* as is a separate question from what path reaches it, and
+it is decided by data formatters. With one, a captured `llvm::StringRef` comes
+back as the string it holds; without, it comes back as the two fields it is made
+of, with the text a level down inside a `const char *`. Formatters are not built
+in — a project ships a script to import, and LLVM's own is
+`llvm/utils/lldbDataFormatters.py`.
+
+A session `trace_program` opens for itself sources `~/.lldbinit`, the same file an
+interactive lldb reads, so a developer who already imports their project's
+formatters there gets the same renderings from a plan as from their own prompt.
+`~/.lldbinit-lldb-mcp` is read too, which is what lets an agent-driven session be
+configured apart from an interactive one. A session passed in as `debugger` keeps
+whatever formatters it already has.
+
+A run that met no formatter at all — nothing it rendered had a summary, and
+something was expanded into its members for want of one — says so in `notes`. The
+two cases are otherwise indistinguishable in the response and want opposite
+responses: read the members, or load the formatters.
+
 A capture whose value renders large comes back as the value's own value alone --
 for a pointer, its address -- with a marker saying how much was left out. Depth and
 node budgets bound the walk without bounding the reading, and a capture is read at

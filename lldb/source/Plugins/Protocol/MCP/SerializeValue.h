@@ -59,6 +59,17 @@ struct SerializeValueOptions {
   /// When set, elision markers point here instead of dead-ending, so going
   /// deeper never requires re-running the program.
   std::string ArtifactRef;
+
+  /// When set, records what the walk met: whether any node had a formatter
+  /// summary, and whether any was expanded into its members for want of one.
+  ///
+  /// The two together are what let a run say something a caller cannot work out
+  /// alone. A value expanded into members looks the same whether the type has no
+  /// custom rendering or the formatter that would have given it one was never
+  /// loaded, and those want opposite responses: read the members, or load the
+  /// formatters.
+  bool *SawSummary = nullptr;
+  bool *SawExpansion = nullptr;
 };
 
 /// Reduces a compiler or debugger diagnostic to the one line that says what went

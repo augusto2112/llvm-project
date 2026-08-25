@@ -140,9 +140,12 @@ struct Serializer {
     // A formatter summary is the dense rendering, so it stands in for the
     // subtree: expanding children past a good summary costs tokens and adds
     // nothing.
-    if (std::optional<std::string> Summary = N.GetSummary())
+    if (std::optional<std::string> Summary = N.GetSummary()) {
+      if (Opts.SawSummary)
+        *Opts.SawSummary = true;
       return json::Object{
           {"summary", Truncate(std::move(*Summary), Opts.MaxStringLength)}};
+    }
 
     uint64_t Id = N.GetIdentity();
     if (Id != 0 && !Seen.insert(Id).second)
@@ -157,6 +160,14 @@ struct Serializer {
         return Elided(formatv("{0} children", NumChildren).str());
       return json::Object{{"value", ""}};
     }
+
+    // Reached only past the summary check above, so this is a node that has
+    // members and nothing that renders it as one thing. Recorded so a run can say
+    // once that it met such a value and no formatter matched anything, which is
+    // the only way a caller can tell "this type has no custom rendering" from
+    // "the formatters were never loaded".
+    if (Opts.SawExpansion)
+      *Opts.SawExpansion = true;
 
     json::Object Out;
 
