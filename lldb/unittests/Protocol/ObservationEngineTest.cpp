@@ -833,6 +833,20 @@ TEST(ObservationEngineTest, TailIsInlinedOnlyWhenTheProgramEndedBadly) {
   EXPECT_TRUE(IsAbnormal(Outcome::NoProgress));
 }
 
+TEST(ObservationEngineTest, ACeilingStopSaysWhatTheCeilingCounted) {
+  // A caller reading `timeout_seconds: 40` beside `elapsed_ms: 45799` has to
+  // account for 5.8 seconds it did not ask for, and the field that would -- the
+  // setup time -- is suppressed on a long run for being a small share of it. Both
+  // terms have to be in the one sentence that is always there.
+  const std::string S = DescribeWallClock(/*RunningMs=*/40122.0,
+                                          /*SetupMs=*/5677.0);
+  EXPECT_NE(S.find("40.1s"), std::string::npos) << S;
+  EXPECT_NE(S.find("5.7s"), std::string::npos) << S;
+  // Which of the two the ceiling bounds, rather than leaving a reader to guess
+  // from two numbers that both look like candidates.
+  EXPECT_NE(S.find("ceiling"), std::string::npos) << S;
+}
+
 //===----------------------------------------------------------------------===//
 // Stack profile
 //===----------------------------------------------------------------------===//

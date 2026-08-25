@@ -58,6 +58,20 @@ llvm::StringRef ToString(Outcome O);
 /// is read through its aggregate.
 bool IsAbnormal(Outcome O);
 
+/// Both terms of a run's wall clock, as a parenthetical for the sentence that
+/// reports a stop the ceiling delivered.
+///
+/// A ceiling bounds the running time, `elapsed_ms` is the whole call, and the
+/// term that closes the gap between them -- `setup_ms` -- is reported only when
+/// setup was most of the run, which is exactly what a long hang guarantees it
+/// was not. Left with the arithmetic and nothing to do it with, 16 of 38 agent
+/// runs concluded that `timeout_seconds` does not mean what it says: 25 seconds
+/// asked against 32.0 reported, 40 against 46.4, 45 against 64.6, 90 against
+/// 101.1. One stopped at "so I still don't know what it actually bounds", which
+/// is a caller who has lost confidence in a number it has to choose before every
+/// run.
+std::string DescribeWallClock(double RunningMs, double SetupMs);
+
 /// Separates one capture's rendering from the next in the tuple a hit is recorded
 /// as. A control character cannot occur inside a rendered value, so two different
 /// tuples cannot join into one identical string -- which is what lets an emission

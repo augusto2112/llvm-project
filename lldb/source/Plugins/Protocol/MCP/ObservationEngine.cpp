@@ -182,6 +182,14 @@ StringRef lldb_private::mcp::ToString(Outcome O) {
 
 bool lldb_private::mcp::IsAbnormal(Outcome O) { return O != Outcome::Exited; }
 
+std::string lldb_private::mcp::DescribeWallClock(double RunningMs,
+                                                double SetupMs) {
+  return formatv(" ({0:F1}s running after {1:F1}s of setup, which the ceiling "
+                 "does not count)",
+                 RunningMs / 1000.0, SetupMs / 1000.0)
+      .str();
+}
+
 StringRef lldb_private::mcp::ToString(EmitDecision D) {
   switch (D) {
   case EmitDecision::Emit:
@@ -2805,6 +2813,12 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
   TerminalEvent &Terminal = m_result.Terminal;
   lldb::ProcessSP P = m_target->GetProcessSP();
 
+  // Both terms of the wall clock, said in the sentence the run is already
+  // generating rather than in a field a bound might suppress.
+  const std::string Clocks = DescribeWallClock(
+      ToMs(std::chrono::duration_cast<Micros>(Clock::now() - m_running_since)),
+      m_result.SetupMs);
+
   switch (Result) {
   case Outcome::Exited:
     Terminal.Description = "the program ran to completion";
@@ -2814,8 +2828,8 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
     break;
   case Outcome::TimedOut:
     Terminal.Description =
-        formatv("the program was still running after {0}s and was stopped",
-                m_plan.TimeoutSeconds)
+        formatv("the program was still running after {0}s and was stopped{1}",
+                m_plan.TimeoutSeconds, Clocks)
             .str();
     break;
   case Outcome::NoProgress:
@@ -2824,8 +2838,8 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
     // Saying "emitted" would send a reader to change an emission mode that had
     // nothing to do with it.
     Terminal.Description =
-        formatv("no tracepoint was hit for {0}s and the program was stopped",
-                m_plan.NoProgressSeconds.value_or(0))
+        formatv("no tracepoint was hit for {0}s and the program was stopped{1}",
+                m_plan.NoProgressSeconds.value_or(0), Clocks)
             .str();
     break;
   }
