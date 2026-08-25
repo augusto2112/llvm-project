@@ -61,6 +61,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -977,6 +978,30 @@ json::Value TerminalEvent::Render() const {
   return O;
 }
 
+void InferiorOutput::Append(bool Stderr, StringRef Text, size_t Max) {
+  std::string &Stream = Stderr ? Err : Out;
+  Stream.append(Text.data(), Text.size());
+  if (Stream.size() <= Max)
+    return;
+  // The tail is the part that says how far the program got, so the front is what
+  // goes. Bounded per stream rather than over the pair, so that a program
+  // chattering on stdout cannot push a diagnostic off stderr -- the two are read
+  // for different reasons and one filling up says nothing about the other.
+  Stream.erase(0, Stream.size() - Max);
+  Truncated = true;
+}
+
+json::Value InferiorOutput::Render() const {
+  if (Empty())
+    return nullptr;
+  json::Object O;
+  if (!Out.empty())
+    O["stdout"] = Out;
+  if (!Err.empty())
+    O["stderr"] = Err;
+  return O;
+}
+
 json::Value ArtifactReport::Render() const {
   json::Object O{{"events", static_cast<int64_t>(Events)}};
   if (!Path.empty())
@@ -1049,8 +1074,8 @@ json::Value ObservationResult::Render() const {
 
   if (Artifact)
     O["artifact"] = Artifact->Render();
-  if (!InferiorOutput.empty())
-    O["inferior_output"] = InferiorOutput;
+  if (json::Value Written = Output.Render(); Written != nullptr)
+    O["inferior_output"] = std::move(Written);
   if (!Notes.empty()) {
     json::Array Rendered;
     for (const std::string &Note : Notes)
@@ -1155,6 +1180,23 @@ struct ObservationSite {
     /// way at every hit would pay for the same answer every time.
     CaptureCandidates Candidates;
     bool Diagnosed = false;
+
+    /// Whether this capture has been seen to print, learned at the first hit it
+    /// printed at.
+    ///
+    /// What it buys is a flush *before* the next evaluation as well as after it.
+    /// One flush is unavoidable -- a buffered stream holds what an expression
+    /// wrote until something empties it -- but a flush only after the expression
+    /// also empties whatever the program itself had buffered and not yet written,
+    /// and that text then arrives inside this capture's window and is credited to
+    /// it. Flushing first is what separates the two, and it is paid only for a
+    /// capture that has already been shown to print, since for every other one it
+    /// would be an expression evaluation per hit that changes no answer.
+    ///
+    /// So the first printing hit of a capture is the imprecise one. That is the
+    /// stated caveat rather than a thing to fix: knowing whether an expression
+    /// prints before running it would mean reading the program's code.
+    bool Prints = false;
 
     /// Modules loaded when the capture was turned off.
     ///
@@ -1294,6 +1336,35 @@ constexpr uint32_t TerminalSourceContext = 4;
 /// Bytes of the program's own output that are kept. A chatty program would
 /// otherwise put more into the response than the observations did.
 constexpr size_t MaxInferiorOutput = 8192;
+
+/// How long a drain waits for what an expression printed to reach the debugger.
+///
+/// The program writes down a pipe that LLDB reads on a thread of its own, so a
+/// write that has completed inside the process is not readable here at the
+/// instant it returns. Without a wait the usual result is nothing at all:
+/// measured on a capture calling a printer three times, the drain immediately
+/// after each call read zero bytes every time, and the text turned up in the
+/// run's own output at the end.
+///
+/// Bounded, and spent only where the capture is one that prints -- see the call
+/// site -- because a tracepoint hit thousands of times would otherwise pay it at
+/// every hit for output that was never coming.
+constexpr Micros AttributedOutputWait = std::chrono::milliseconds(50);
+
+/// How long the drain waits after the most recent byte before calling the text
+/// complete. A dump arrives in pipe-sized pieces, so stopping at the first
+/// non-empty read would cut most of them off.
+constexpr Micros AttributedOutputQuiet = std::chrono::milliseconds(5);
+
+/// Bytes of one capture's own printing that are kept, per hit.
+///
+/// Bounded per capture rather than out of the shared window above, which is the
+/// point of attributing it at all: a `dump()` at an early hit was silently
+/// dropped by the front-erase as soon as the program said enough else to fill
+/// that window, and for a compiler pass under any verbose flag that is every
+/// run. Smaller than the run's bound because a dump recurs at every hit and the
+/// same window is paid again each time.
+constexpr size_t MaxAttributedOutput = 4096;
 
 /// Hit locations kept for cycle detection. Enough for the longest period
 /// DetectCycle looks for to repeat several times over.
@@ -1889,15 +1960,69 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
                               ? StringRef(Capture.Expr)
                               : StringRef(Capture.FixedExpr);
 
+    // The near side of the bracket that attributes printing to the expression
+    // that printed it. Everything the program has written up to now is its own,
+    // so it goes to the run's output before this expression can run; whatever
+    // turns up afterwards arrived while this one expression was running.
+    //
+    // Per capture rather than once per stop, because two captures at one
+    // tracepoint would otherwise both be credited with everything either of them
+    // printed -- and a plan capturing two nodes' dumps at one location is the
+    // shape this exists for.
+    // Held for the whole bracket, so that the wait loop cannot drain the pipe in
+    // the middle of one. The two run on different threads -- a synchronous
+    // breakpoint callback is invoked on the private state thread while the wait
+    // loop sits on the caller's -- and evaluating a capture resumes the process,
+    // which is exactly what can wake that wait. Measured on the first printing
+    // hit of a run: the wait loop took the nine bytes the capture had just
+    // produced and filed them under the program's own output, at which point the
+    // hit that caused them had nothing to show.
+    //
+    // It is also what makes the output buffers and the stderr offset safe to touch
+    // from either thread at all.
     const Clock::time_point Started = Clock::now();
+    std::lock_guard<std::recursive_mutex> Window(m_output_mutex);
+    if (Capture.Prints)
+      FlushInferiorOutput();
+    DrainInferiorOutput();
+
     ValueResolution Resolved =
         ResolveValueDWIM(Effective, Obs.OnReturn ? nullptr : Frame, *m_target,
                          Scope, CaptureOptions());
-    const Micros Elapsed =
-        std::chrono::duration_cast<Micros>(Clock::now() - Started);
-    Capture.Spent += Elapsed;
     ++Capture.Evaluations;
     Capture.Tier = Resolved.Tier;
+
+    // Read only for a capture that ran code. The variable-path tier is a
+    // debug-info lookup and a memory read, so it executes nothing that could
+    // print, and draining after it would credit this capture with output the
+    // program produced on its own.
+    InferiorOutput Printed;
+    if (Resolved.Tier == ValueResolutionTier::Expression) {
+      // The flush and the wait are spent where they can change an answer: an
+      // expression whose value is void was run for its effect, and its effect is
+      // what it printed. A capture that returned something is a capture whose
+      // value is the answer, and paying a second evaluation plus a wait at every
+      // hit of it to look for printing it probably did not do is exactly what
+      // cost control exists to prevent.
+      //
+      // A capture already known to print keeps both however it resolves, since it
+      // has answered the question this guess stands in for.
+      const bool Effectful =
+          Capture.Prints ||
+          (Resolved.Value && !Resolved.Value->GetCompilerType().IsValid());
+      if (Effectful)
+        FlushInferiorOutput();
+      DrainInferiorOutput(&Printed,
+                          Effectful ? AttributedOutputWait : Micros::zero());
+      if (!Printed.Empty())
+        Capture.Prints = true;
+    }
+
+    // Measured over the whole bracket rather than over the resolution alone, so
+    // that cost control sees what a printing capture actually costs: two flushes
+    // and a wait at every hit is expensive whether or not the expense is the
+    // expression's own.
+    Capture.Spent += std::chrono::duration_cast<Micros>(Clock::now() - Started);
 
     if (Resolved.Tier == ValueResolutionTier::Unresolved) {
       ++Capture.Errors;
@@ -1946,11 +2071,27 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     // carrying a placeholder error, which serializes as a value that could not
     // be read. Reporting a call that ran as a failure costs more than saying
     // nothing: the caller re-spells a capture that was working, and stops
-    // looking in `inferior_output` for what it printed -- which is the whole
-    // point of capturing a dump.
+    // looking for what it printed -- which is the whole point of capturing a
+    // dump.
     if (Resolved.Tier == ValueResolutionTier::Expression && Resolved.Value &&
         !Resolved.Value->GetCompilerType().IsValid())
       V = json::Object{{"value", VoidValue}};
+
+    // What this expression printed, on the expression rather than in a shared
+    // buffer the caller has to guess at. It goes inside the value, so that it
+    // reaches the aggregate as part of the key: `emit: on_change` over a `dump()`
+    // is asking to be told when the dump changes, and a key that held only
+    // `(void)` would answer that it never does.
+    if (json::Value Written = Printed.Render(); Written != nullptr) {
+      if (json::Object *Obj = V.getAsObject()) {
+        Obj->try_emplace("printed", std::move(Written));
+        if (Printed.Truncated)
+          Obj->try_emplace("printed_elided",
+                           formatv("only the last {0} bytes per stream",
+                                   MaxAttributedOutput)
+                               .str());
+      }
+    }
 
     std::string Text = AggregateKey(V);
 
@@ -2169,6 +2310,45 @@ Error ObservationEngine::Launch() {
   if (!m_plan.CaptureInferiorOutput)
     Info.GetFlags().Set(lldb::eLaunchFlagDisableSTDIO);
 
+  // Standard error is given a file of this run's own rather than sharing the
+  // program's terminal with standard output. Two things follow, and both are the
+  // point.
+  //
+  // The streams become separable. Launched on one pty they arrive interleaved
+  // with no marker and no relative order -- two buffers drained in turn know
+  // nothing about which write came first -- so a `dump()` on stderr could not be
+  // told from the compiler's own result on stdout, which is the one distinction a
+  // reader of a compiler's output needs.
+  //
+  // And a file is read here synchronously at an offset, while a pty is read by a
+  // thread of LLDB's own. What an expression wrote is therefore readable the
+  // instant that expression returns, rather than whenever that thread next
+  // happens to run: measured on a capture calling a printer, the pty gave up
+  // nothing at all at the first hit and the text surfaced during the second.
+  //
+  // Only stderr moves. Redirecting stdout as well would take it off a terminal
+  // and make it fully buffered, so a program that hung would be reported with its
+  // last line still inside it -- and that line is the whole reason a run reports
+  // the program's output. stderr is unbuffered whatever it is connected to, so it
+  // loses nothing by moving.
+  if (m_plan.CaptureInferiorOutput) {
+    SmallString<128> Path;
+    if (!sys::fs::createTemporaryFile("lldb-observe-stderr", "txt", Path)) {
+      m_stderr_path = std::string(Path);
+      Info.AppendOpenFileAction(STDERR_FILENO, FileSpec(m_stderr_path),
+                                /*read=*/false, /*write=*/true);
+      if (Expected<sys::fs::file_t> Reader =
+              sys::fs::openNativeFileForRead(m_stderr_path))
+        m_stderr_reader = *Reader;
+      else
+        consumeError(Reader.takeError());
+    }
+    // A failure to make the file is not a failure of the run: stderr stays on the
+    // terminal, where it is still reported and still readable, just not
+    // separately and not promptly. Silent, because a caller can do nothing about
+    // a temp directory.
+  }
+
   // Stopping at entry is what lets the tracepoints be installed before any of
   // the program runs.
   //
@@ -2333,35 +2513,110 @@ ObservationReport *ObservationEngine::ReportFor(StringRef Label) {
   return nullptr;
 }
 
-void ObservationEngine::DrainInferiorOutput() {
+void ObservationEngine::DrainInferiorOutput(InferiorOutput *Into, Micros Wait) {
   if (!m_plan.CaptureInferiorOutput)
     return;
   lldb::ProcessSP P = m_target->GetProcessSP();
   if (!P)
     return;
 
-  // Drained as the run goes rather than only at the end, because a full pipe
-  // blocks the program that is writing to it.
-  char Buffer[1024];
-  for (bool Stderr : {false, true}) {
-    while (true) {
-      Status Err;
-      const size_t Read = Stderr ? P->GetSTDERR(Buffer, sizeof(Buffer), Err)
-                                 : P->GetSTDOUT(Buffer, sizeof(Buffer), Err);
-      if (Read == 0)
+  // Recursive because a capture's bracket already holds it across this call, and
+  // the point of that is to keep the other thread out for the whole window rather
+  // than for each read.
+  std::lock_guard<std::recursive_mutex> Reading(m_output_mutex);
+
+  InferiorOutput &Sink = Into ? *Into : m_result.Output;
+  const size_t Max = Into ? MaxAttributedOutput : MaxInferiorOutput;
+
+  auto ReadWhatIsThere = [&] {
+    size_t Total = 0;
+    char Buffer[1024];
+
+    // stderr first, out of this run's own file. Read at an offset, so it needs no
+    // waiting and cannot be a hit late.
+    while (m_stderr_reader != sys::fs::kInvalidFile) {
+      Expected<size_t> Read = sys::fs::readNativeFileSlice(
+          m_stderr_reader, MutableArrayRef<char>(Buffer, sizeof(Buffer)),
+          m_stderr_read);
+      if (!Read) {
+        consumeError(Read.takeError());
         break;
-      m_result.InferiorOutput.append(Buffer, Read);
-      if (m_result.InferiorOutput.size() > MaxInferiorOutput) {
-        // The tail is the part that says how far the program got, so the front
-        // is what goes.
-        m_result.InferiorOutput.erase(0, m_result.InferiorOutput.size() -
-                                             MaxInferiorOutput);
-        m_output_truncated = true;
       }
-      if (Read < sizeof(Buffer))
+      if (*Read == 0)
+        break;
+      m_stderr_read += *Read;
+      Sink.Append(/*Stderr=*/true, StringRef(Buffer, *Read), Max);
+      Total += *Read;
+      if (*Read < sizeof(Buffer))
         break;
     }
+
+    // Then whatever the process has handed over. Both of its streams are read to
+    // exhaustion whatever this is draining into: a capture's window is a window
+    // on *when*, not on which pipe, and leaving stdout unread while attributing
+    // stderr would deadlock a chatty program at its next write. Draining as the
+    // run goes rather than only at the end is the same rule.
+    //
+    // `GetSTDERR` is still asked, and returns nothing when the redirect above
+    // took effect. It is what covers the run where it did not.
+    for (bool Stderr : {false, true}) {
+      while (true) {
+        Status Err;
+        const size_t Read = Stderr ? P->GetSTDERR(Buffer, sizeof(Buffer), Err)
+                                   : P->GetSTDOUT(Buffer, sizeof(Buffer), Err);
+        if (Read == 0)
+          break;
+        Sink.Append(Stderr, StringRef(Buffer, Read), Max);
+        Total += Read;
+        if (Read < sizeof(Buffer))
+          break;
+      }
+    }
+    return Total;
+  };
+
+  if (Wait == Micros::zero()) {
+    ReadWhatIsThere();
+    return;
   }
+
+  // Waiting for a quiet period rather than for the first byte, because a dump
+  // arrives in pipe-sized pieces and the reader thread hands them over as it
+  // gets them.
+  const Clock::time_point Deadline = Clock::now() + Wait;
+  Clock::time_point Latest = Clock::now();
+  bool Seen = false;
+  while (Clock::now() < Deadline) {
+    if (ReadWhatIsThere() != 0) {
+      Seen = true;
+      Latest = Clock::now();
+      continue;
+    }
+    if (Seen && Clock::now() - Latest >= AttributedOutputQuiet)
+      break;
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  }
+}
+
+void ObservationEngine::FlushInferiorOutput() {
+  // `llvm::errs()` is unbuffered and `outs()` is not, so a capture that dumps
+  // through the buffered stream leaves nothing to read at the hit that produced
+  // it: the text surfaces whenever the buffer next fills, attributed to a hit
+  // that had nothing to do with it. Measured on an agent working around exactly
+  // this -- it appended `(void)fflush(0)` to two captures by hand and tried a
+  // third spelling three ways -- which is the caller doing the run's job for it.
+  //
+  // `fflush(0)` rather than a named stream: it flushes every open output stream,
+  // so it covers a program's own `FILE *` as well as the C++ streams, and it
+  // needs no symbol the program might not have beyond `fflush` itself.
+  ValueResolutionOptions Opts = CaptureOptions();
+  ValueResolution Flushed = ResolveValueDWIM("(void)fflush(0)", nullptr, *m_target,
+                                             m_target.get(), Opts);
+  // Nothing is reported. A program without a C library to call has buffered
+  // output that arrives late, which is the state this exists to improve on, and
+  // saying so once per hit would fill the response with a fact about the program
+  // rather than about the capture.
+  (void)Flushed;
 }
 
 void ObservationEngine::CollectTerminalEvent(Outcome Result) {
@@ -2505,6 +2760,18 @@ void ObservationEngine::Teardown() {
       P->Destroy(/*force_kill=*/true);
   m_debugger.GetTargetList().DeleteTarget(m_target);
   m_target.reset();
+
+  // The stderr file has been read into the response by now, so nothing outlives
+  // the run that needs it. Unlike the artifact, which is reported by path and is
+  // the caller's to read afterwards.
+  if (m_stderr_reader != sys::fs::kInvalidFile) {
+    sys::fs::closeFile(m_stderr_reader);
+    m_stderr_reader = sys::fs::kInvalidFile;
+  }
+  if (!m_stderr_path.empty()) {
+    sys::fs::remove(m_stderr_path);
+    m_stderr_path.clear();
+  }
 }
 
 Expected<ObservationResult> ObservationEngine::Run() {
@@ -2560,10 +2827,10 @@ Expected<ObservationResult> ObservationEngine::Run() {
       ToMs(std::chrono::duration_cast<Micros>(Clock::now() - m_start));
   m_result.Aggregate = m_aggregator.Render();
   m_result.Profile = m_profile.Render();
-  if (m_output_truncated)
+  if (m_result.Output.Truncated)
     m_result.Notes.push_back(
-        formatv("only the last {0} bytes of the program's own output are "
-                "reported; the earlier output was dropped.",
+        formatv("only the last {0} bytes of each of the program's own output "
+                "streams are reported; the earlier output was dropped.",
                 MaxInferiorOutput)
             .str());
   // Said in words as well as in a number, because the wrong reading of the

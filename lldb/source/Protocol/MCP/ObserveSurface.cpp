@@ -73,8 +73,8 @@ json::Value lldb_protocol::mcp::ObservationSchema() {
                 "declares rather than what it exposes, so the field behind an "
                 "accessor and not the accessor's name. A call to the program's "
                 "own printer, \"tok->dump()\", is how an object that knows how "
-                "to describe itself is read; what it prints comes back in "
-                "\"inferior_output\" rather than as the capture's value. Empty is "
+                "to describe itself is read; what it prints comes back beside "
+                "the capture in \"printed\" rather than as its value. Empty is "
                 "a bare tracepoint recording only hit counts, which already "
                 "answers whether the code runs at all.")},
            {"when",
@@ -144,7 +144,9 @@ json::Value lldb_protocol::mcp::ObservationPlanSchema() {
                  "Whether the program's own standard output and error are "
                  "recorded. A program's last line of output is often the only "
                  "evidence of how far it got, so this is on unless it is "
-                 "turned off."}}},
+                 "turned off. It also governs \"printed\", the text attributed "
+                 "to a capture that prints, since both are read from the same "
+                 "streams."}}},
            {"timeout_seconds",
             schemaNumber(30,
                          "Wall-clock ceiling on the program, measured from the "

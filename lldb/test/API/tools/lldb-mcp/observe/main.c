@@ -72,6 +72,21 @@ int parse_expr(int depth) { return depth * depth + 1; }
 /* Recursion gives a backtrace runs of identical frames to collapse. */
 int recurse(int n) { return n <= 0 ? 0 : recurse(n - 1) + 1; }
 
+/* Called from a capture expression rather than by the program, which is how an
+   object that knows how to describe itself is read. Void, so the capture has no
+   value and what it printed is the whole of its answer. Both streams, because
+   attributing output to the expression that produced it is only useful if the
+   two can be told apart -- and stdout is the buffered one, which is what makes
+   the flush load-bearing rather than tidy. */
+void describe(int n) {
+  printf("described %d\n", n);
+  fprintf(stderr, "warned %d\n", n);
+}
+
+/* Observed while a capture calls `describe`, so the attribution has more than
+   one hit to keep straight. */
+int step_printing(int n) { return n + 1; }
+
 /* Never returns, so that a wall-clock ceiling is the only way a run ends. */
 void spin(void) {
   for (volatile long i = 0;; ++i) {
@@ -152,6 +167,16 @@ int main(int argc, char **argv) {
      before the loops so that a no-progress ceiling has no events to see. */
   if (strcmp(mode, "spin") == 0)
     spin();
+
+  /* A run whose tracepoint is hit while a capture calls into the program. The
+     program's own line comes first and is left buffered, so a test can see both
+     that it is reported and that a capture's window did not swallow it. */
+  if (strcmp(mode, "printing") == 0) {
+    describe(-1);
+    for (i = 0; i < 3; ++i)
+      total += step_printing(i);
+    return 0;
+  }
 
   /* The modes below are the whole of the run they belong to: each one exists to
      give one observation something specific to see, and the loops that follow

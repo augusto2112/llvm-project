@@ -21,11 +21,13 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Error.h"
+#include "llvm/Support/FileSystem.h"
 #include "llvm/Support/JSON.h"
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -721,6 +723,33 @@ struct TerminalEvent {
   llvm::json::Value Render() const;
 };
 
+/// What a program wrote, with the two streams kept apart.
+///
+/// Used both for the run's own output and for the text one capture's expression
+/// printed, because the shapes are the same and the second is the first read over
+/// a narrower window: drain, evaluate, drain again, and what arrived in between
+/// belongs to that expression.
+struct InferiorOutput {
+  std::string Out;
+  std::string Err;
+
+  /// Whether a bound dropped anything. Reported rather than left implicit,
+  /// because a silently shortened buffer reads as the whole of what was written.
+  bool Truncated = false;
+
+  bool Empty() const { return Out.empty() && Err.empty(); }
+
+  /// Appends up to \p Max bytes, dropping from the front of whichever stream
+  /// overflows. The front is what goes because the tail says how far the program
+  /// got, which is the question this buffer exists to answer.
+  void Append(bool Stderr, llvm::StringRef Text, size_t Max);
+
+  /// An object carrying only the streams that produced anything, or null when
+  /// neither did. Null rather than an empty object so that a caller can test the
+  /// field's presence rather than its contents.
+  llvm::json::Value Render() const;
+};
+
 /// Where the full event stream went.
 struct ArtifactReport {
   /// Empty when no file could be opened, in which case the events exist only as
@@ -767,7 +796,15 @@ struct ObservationResult {
 
   /// The program's own output, which is often the only evidence of how far it
   /// got.
-  std::string InferiorOutput;
+  ///
+  /// The two streams are kept apart rather than appended into one buffer. They
+  /// were interleaved with no separator, which loses the one distinction a
+  /// reader of a compiler's output needs: a `dump()` goes to stderr and the
+  /// compiled result goes to stdout, and a caller looking for what a capture
+  /// printed could not tell which half was which. Nothing orders one against the
+  /// other -- two pipes drained in turn carry no relative timing -- so a single
+  /// buffer was claiming an interleaving it never knew.
+  InferiorOutput Output;
 
   /// Where the program was found while it ran, null when it finished before any
   /// sample was due.
@@ -870,7 +907,36 @@ private:
   void SampleStacks(Process &P);
 
   void CollectTerminalEvent(Outcome Result);
-  void DrainInferiorOutput();
+
+  /// Reads whatever the program has written since the last drain.
+  ///
+  /// Unconditional in the run loop, whatever the plan asked for: a full pipe
+  /// blocks the program writing to it, so a run that stopped draining would hang
+  /// the very program it is observing.
+  ///
+  /// \p Into names where the text goes. Null is the run's own output. A capture's
+  /// buffer is how an expression's printing is attributed to it, and it is only
+  /// correct because the drain that brackets the other side ran first: what is
+  /// here now arrived while that one expression was running.
+  ///
+  /// \p Wait is how long to keep looking. Zero takes what has already reached the
+  /// debugger and returns, which is what the run loop wants; a capture has to wait,
+  /// because the program's pipe is read on another thread and a write that has
+  /// returned inside the process is not readable here yet.
+  void DrainInferiorOutput(InferiorOutput *Into = nullptr,
+                           std::chrono::microseconds Wait =
+                               std::chrono::microseconds::zero());
+
+  /// Runs `fflush(0)` in the observed process, so that what an expression printed
+  /// through a buffered stream is readable now rather than at some later hit.
+  ///
+  /// Costs an expression evaluation, so it is spent only where it can change an
+  /// answer -- see the call site. Failure is silent: a program with no `fflush`
+  /// to call, or one whose call did not run, is a program whose buffered output
+  /// arrives late, which is the situation this is trying to improve rather than a
+  /// failure of the capture beside it.
+  void FlushInferiorOutput();
+
   void FlushHeldEvents();
   void WriteEvent(ObservationSite &Site, llvm::json::Object Event);
 
@@ -948,6 +1014,22 @@ private:
   std::chrono::steady_clock::time_point m_sample_started;
   std::unique_ptr<EventArtifact> m_artifact;
 
+  /// A file of this run's own holding the program's standard error, and how much
+  /// of it has been read. Empty and invalid when the redirect could not be set
+  /// up, in which case stderr stays on the program's terminal and is reported
+  /// there -- merged with stdout, and as late as that pipe delivers it.
+  ///
+  /// See Launch() for why only this stream moves.
+  std::string m_stderr_path;
+  llvm::sys::fs::file_t m_stderr_reader = llvm::sys::fs::kInvalidFile;
+  uint64_t m_stderr_read = 0;
+
+  /// Guards every read of the program's output, and is held across a capture's
+  /// whole attribution window. See the capture loop for why: the wait loop and a
+  /// breakpoint callback drain from different threads, and an expression
+  /// evaluation is what lets the two overlap.
+  std::recursive_mutex m_output_mutex;
+
   /// Locations of the hits most recently recorded, which is what a cycle is
   /// found over. The hit sequence rather than the emitted one, since an
   /// emission mode that drops repeats would destroy the very repetition being
@@ -975,8 +1057,6 @@ private:
   /// loop. A callback is the only place a run that keeps hitting tracepoints
   /// can notice that its time is up.
   std::optional<Outcome> m_requested_end;
-
-  bool m_output_truncated = false;
 
   ObservationResult m_result;
 };

@@ -243,8 +243,8 @@ program that did not terminate is usually the answer. The cycle is found in the
 event stream rather than on the stack, so it appears only for a plan that had
 tracepoints to emit events: a stuck run with an empty `observe` list reports
 where it was stopped and no cycle. `inferior_output` holds
-the program's own output, and `notes` holds what went wrong that no single
-observation owns.
+the program's own output, with `stdout` and `stderr` apart, and `notes` holds what
+went wrong that no single observation owns.
 
 Read `aggregate` first. For each captured expression it gives the distinct
 values with counts, the changes between them, and `outliers`: the values seen
@@ -268,7 +268,7 @@ generous as you like. Captures are read at that hit alone, so the aggregate of
 such a run covers it rather than the whole run — which is what the run that named
 the hit already reported. A capture whose value is a call that prints, which is
 how a compiler dumps a node, is worth having here for the same reason: it runs
-once, and what it printed arrives in `inferior_output`.
+once, and what it printed arrives in `printed` beside it.
 
 An outlier carries two numbers because they count different things.
 `first_hit` counts that observation's own hits and is what `only_hit` takes.
@@ -291,7 +291,7 @@ A value that could not be read comes back as `unavailable` with the kind, and a
 which is what decides whether to re-spell the capture, move it to another
 location, or stop asking. A capture that ran and produced nothing — a call
 returning void, which is how a compiler is asked to dump a node — reads `(void)`
-rather than as a failure, and what it printed is in `inferior_output`.
+rather than as a failure, and what it printed is in `printed` beside that value.
 
 A capture that was stopped keeps its numbers, and the reason it was stopped is
 reported once per observation under `stopped`, against the list of captures it
@@ -440,8 +440,28 @@ with the hit at which it first appeared, is usually the answer. Re-run with
 `only_hit` set to that `first_hit` to record that one hit in full detail, where a
 call is affordable because it runs once.
 
-The debuggee's own output does not come back as debugger output. It is captured
-into `inferior_output` in the result instead.
+The debuggee's own output does not come back as debugger output. It is reported in
+`inferior_output`, with `stdout` and `stderr` apart.
+
+A capture that prints instead of returning a value — `I->dump()`, which is how an
+object that knows how to describe itself is read — comes back with what it printed
+in `printed` beside it, per hit and per stream. That text is part of the capture's
+value, so `emit: on_change` over a printer emits when what it prints changes rather
+than never.
+
+The two streams are separated by giving the program's standard error a file of the
+run's own. Standard output stays on a terminal, which keeps it line-buffered so
+that a program that hangs is still reported with its last line — the reason a run
+reports the program's output at all — and which is also why its newlines arrive as
+CRLF. Standard error is unbuffered whatever it is connected to, so it loses nothing
+by moving, and a file read at an offset is readable the instant an expression
+returns rather than whenever LLDB's reader thread next runs.
+
+Attribution is best-effort, and the two ways it is approximate are worth knowing.
+The run flushes the program's streams around a capture that prints, so text the
+program had written and not yet flushed when that capture ran is credited to the
+capture. And a capture is only known to print once it has printed, so the first
+hit at which one does may have its text reported as the program's own.
 
 ## Attaching to a Running LLDB
 

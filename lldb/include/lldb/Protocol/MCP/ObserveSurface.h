@@ -125,8 +125,17 @@ inline constexpr llvm::StringLiteral ObserveToolDescription =
     "Read \"aggregate\" first. Its \"outliers\", the values seen once or twice "
     "among many hits, are usually the answer. Then re-run with \"only_hit\" "
     "set to that outlier's \"first_hit\", which records that one hit in full "
-    "detail: captures are read there alone, so a call is affordable, and what "
-    "one prints comes back in \"inferior_output\".";
+    "detail: captures are read there alone, so a call is affordable.\n"
+    "\n"
+    "A capture that prints rather than returning a value -- \"tok->dump()\" -- "
+    "comes back with what it printed beside it, in \"printed\", per hit and with "
+    "\"stdout\" and \"stderr\" apart. That text is part of the capture's value, so "
+    "\"emit\": \"on_change\" over a printer emits when what it prints changes. "
+    "The program's own output is reported separately in \"inferior_output\". "
+    "Attribution is best-effort: text the program had written and not yet "
+    "flushed when a capture ran is credited to that capture, and a capture that "
+    "prints for the first time may have that hit's text reported as the "
+    "program's.";
 
 /// What the `command` tool is for, and how it divides the work with
 /// `trace_program`.

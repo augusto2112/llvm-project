@@ -587,13 +587,17 @@ class ObserveTestCase(TestBase):
         )
 
         self.assertEqual(document["outcome"], "exited", str(document))
-        output = document["inferior_output"]
+        # The echo goes to stdout, and the two streams are reported apart: nothing
+        # orders one against the other, so a single buffer would be claiming an
+        # interleaving two pipes drained in turn never knew.
+        output = document["inferior_output"]["stdout"]
         self.assertIn("mode=probe", output)
         self.assertIn("env=from-plan", output)
         # The marker is opened by a relative path, so finding it proves the
         # working directory took effect rather than the path being absolute.
         self.assertIn("cwd_marker=1", output)
         self.assertIn("stdin=from-file", output)
+        self.assertNotIn("stderr", document["inferior_output"], str(document))
 
     def test_inferior_output_can_be_suppressed(self):
         """capture_inferior_output off leaves the program's own output out."""
@@ -608,7 +612,9 @@ class ObserveTestCase(TestBase):
         )
 
         self.assertEqual(document["outcome"], "exited", str(document))
-        self.assertNotIn("total=", document.get("inferior_output", ""))
+        # Absent entirely rather than present and empty, so that its presence is
+        # what a caller tests.
+        self.assertNotIn("inferior_output", document, str(document))
 
     def test_called_from_reduces_hits_not_just_events(self):
         """Gating on a caller excludes hits, rather than filtering emission."""
@@ -843,6 +849,95 @@ class ObserveTestCase(TestBase):
         self.assertEqual(report["condition_true"], 1, str(report))
         self.assertEqual(report["condition_errors"], 0, str(report))
         self.assertEqual(report["emitted"], 1, str(report))
+
+    def test_what_a_capture_printed_is_attributed_to_it(self):
+        """A capture that runs a printer carries what it printed, per hit and per
+        stream, and does not carry the program's own output."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["printing"],
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "printed",
+                        "at": "step_printing",
+                        "capture": ["describe(n)", "n"],
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        events = self.events(document)
+        self.assertEqual(len(events), 3, str(events))
+
+        for index, event in enumerate(events):
+            captured = event["values"]["describe(n)"]
+            # A call that ran and returned nothing is not a failure. Its value is
+            # void and its answer is what it wrote.
+            self.assertEqual(captured["value"], "(void)", str(captured))
+            printed = captured["printed"]
+            # Attributed per hit: hit 0 does not carry hit 2's line. Standard
+            # output is still on a terminal, whose line discipline turns each
+            # newline into a carriage return and a newline; standard error is a
+            # file of the run's own and is not translated. The bytes are reported
+            # as they arrived rather than normalised, since a translation invented
+            # here would misreport what the program wrote.
+            self.assertEqual(
+                printed["stdout"].replace("\r\n", "\n"),
+                f"described {index}\n",
+                str(printed),
+            )
+            self.assertEqual(printed["stderr"], f"warned {index}\n", str(printed))
+
+            # The path-tier capture at the same tracepoint runs no code, so it
+            # cannot have printed and is not credited with the neighbour that did.
+            self.assertNotIn("printed", event["values"]["n"], str(event))
+
+        # The program's own line, written before any tracepoint was hit, is still
+        # the program's. A capture's window opens after everything already written
+        # has been taken out of the pipe.
+        output = document["inferior_output"]
+        self.assertIn("described -1", output["stdout"], str(output))
+        self.assertIn("warned -1", output["stderr"], str(output))
+        # And it stayed out of the captures.
+        for event in events:
+            self.assertNotIn(
+                "-1", event["values"]["describe(n)"]["printed"]["stdout"], str(event)
+            )
+
+    def test_what_a_capture_printed_reaches_the_aggregate(self):
+        """Printed text is part of the value, so on_change over a printer emits
+        when what it prints changes."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["printing"],
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "label": "printed",
+                        "at": "step_printing",
+                        "capture": ["describe(n)"],
+                        "emit": "on_change",
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["printed"]
+        self.assertEqual(report["hits"], 3, str(report))
+        # Three hits printing three different things are three changes. Keyed on
+        # `(void)` alone they would have been one, and the mode would have
+        # answered that a dump that changes at every hit never changes.
+        self.assertEqual(report["emitted"], 3, str(report))
+        aggregate = document["aggregate"]["printed"]["describe(n)"]
+        self.assertEqual(aggregate["distinct"], 3, str(aggregate))
 
     def test_expression_capture_reports_its_tier(self):
         """A capture that is not a path is reported as an expression."""
