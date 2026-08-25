@@ -19,6 +19,7 @@
 #include <initializer_list>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace lldb_private;
@@ -77,6 +78,21 @@ ObservationResult MakeRun(Outcome How, uint64_t Hits,
   Report.HitTuples = std::move(Tuples);
   R.Observations.push_back(std::move(Report));
   return R;
+}
+
+/// The summary an aggregate renders for one capture over a run: a histogram of
+/// values with counts, bounded, with the number dropped beside it.
+llvm::json::Value Summary(int64_t Distinct,
+                          std::initializer_list<std::pair<llvm::StringRef, int64_t>>
+                              Values,
+                          int64_t Elided) {
+  llvm::json::Object Histogram;
+  for (const auto &[Value, Count] : Values)
+    Histogram[Value] = Count;
+  llvm::json::Object Out{{"distinct", Distinct}, {"values", std::move(Histogram)}};
+  if (Elided != 0)
+    Out["values_elided"] = Elided;
+  return Out;
 }
 
 std::vector<ComparedRun> Pair(ObservationResult A, ObservationResult B) {
@@ -259,6 +275,64 @@ TEST(ComparisonTest, TheDottedNameHoldsTheValueAndTheMetadataSitsUnderIt) {
   const std::string Agreed = Render(*Out.getAsObject()->getArray("agreed"));
   EXPECT_NE(Agreed.find("loop.n.capture"), std::string::npos) << Agreed;
   EXPECT_EQ(Agreed.find("summary of"), std::string::npos) << Agreed;
+}
+
+TEST(ComparisonTest, AComparedValueKeepsItsShapeInsteadOfBeingEscaped) {
+  // A value serialized into a string comes back double-quoted and a document comes
+  // back as a line of backslashes for the caller to undo by hand -- which is the
+  // complaint the capture aggregate exists to answer, reintroduced one level up.
+  ObservationResult A = MakeRun(Outcome::Exited, 1, {Tuple({"320"})});
+  ObservationResult B = MakeRun(Outcome::Exited, 1, {Tuple({"282"})});
+  A.Aggregate = llvm::json::Object{{"loop", llvm::json::Object{{"n", "320 x1"}}}};
+  B.Aggregate = llvm::json::Object{{"loop", llvm::json::Object{{"n", "282 x1"}}}};
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  EXPECT_EQ(Render(*Object(Out, "diverged")->getObject("loop.n")),
+            R"({"after":"320 x1","before":"282 x1"})");
+}
+
+TEST(ComparisonTest, TwoHistogramsAreShortenedToTheValuesTheyDisagreeOn) {
+  // A summary is bounded on its own, but two of them side by side in a document
+  // that exists to be short is a different budget: a measured pair was two
+  // 260-char histograms of twenty-eight values whose real difference was one of
+  // them. The rest is the part of the run they have in common, which nobody asked
+  // for twice.
+  ObservationResult A = MakeRun(Outcome::Exited, 30, {Tuple({"1"})});
+  ObservationResult B = A;
+  A.Aggregate = llvm::json::Object{
+      {"loop",
+       llvm::json::Object{{"n", Summary(28, {{"0", 2}, {"14", 1}, {"184", 2}}, 20)}}}};
+  B.Aggregate = llvm::json::Object{
+      {"loop",
+       llvm::json::Object{{"n", Summary(28, {{"0", 2}, {"14", 1}, {"198", 2}}, 20)}}}};
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  EXPECT_EQ(Render(*Object(Out, "diverged")->getObject("loop.n")),
+            R"({"after":{"distinct":28,"values":{"184":2},"values_elided":20},)"
+            R"("before":{"distinct":28,"values":{"198":2},"values_elided":20}})");
+}
+
+TEST(ComparisonTest, ALongValueIsShortenedWithoutLeavingAnUnparseableDocument) {
+  // Slicing the serialization produced `{"short":"{\"distinct\":12,...,\"..."`: a
+  // document cut mid-token, which nothing can parse and which reads as though the
+  // value itself ended there.
+  const std::string Long(MaxComparedSummaryChars + 200, 'x');
+  ObservationResult A = MakeRun(Outcome::Exited, 1, {Tuple({"1"})});
+  ObservationResult B = A;
+  A.Aggregate = llvm::json::Object{
+      {"loop", llvm::json::Object{{"n", llvm::json::Object{{"value", Long},
+                                                           {"count", 1}}}}}};
+  B.Aggregate =
+      llvm::json::Object{{"loop", llvm::json::Object{{"n", "short x1"}}}};
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  const llvm::json::Object *Diverged = Object(Out, "diverged")->getObject("loop.n");
+  ASSERT_NE(Diverged, nullptr) << Render(Out);
+  // Still a document, with the text inside it bounded rather than the document cut.
+  const llvm::json::Object *Shown = Diverged->getObject("after");
+  ASSERT_NE(Shown, nullptr) << Render(Out);
+  EXPECT_EQ(Shown->getInteger("count"), std::optional<int64_t>(1));
+  EXPECT_EQ(Shown->getString("value")->size(), MaxComparedSummaryChars + 3);
 }
 
 TEST(ComparisonTest, TheFirstHitTheyDisagreeOnIsReportedWithWhatEachSaw) {

@@ -45,13 +45,53 @@ std::string Truncate(std::string S) {
   return S;
 }
 
-/// One thing compared across runs: what each run said about it, keyed by label.
+/// \p V with the text it holds bounded, rather than the document it serializes
+/// to.
 ///
-/// Held as text because that is what makes "the same" decidable for values of
-/// every shape the runs can produce -- a number, a string, a summary object --
-/// without a comparison per shape.
+/// Cutting the serialization produced `{"short":"{\"distinct\":12,...,\"..."`: a
+/// document sliced mid-token, which nothing can parse and which reads as though
+/// the value itself ended there. A string is the only thing in a value that can be
+/// shortened and leave a document behind, so it is the only thing shortened.
+json::Value Bounded(const json::Value &V) {
+  if (const json::Object *O = V.getAsObject()) {
+    json::Object Out;
+    for (const auto &[Key, Field] : *O)
+      Out[Truncate(Key.str())] = Bounded(Field);
+    return Out;
+  }
+  if (const json::Array *A = V.getAsArray()) {
+    json::Array Out;
+    for (const json::Value &Element : *A)
+      Out.push_back(Bounded(Element));
+    return Out;
+  }
+  if (std::optional<StringRef> S = V.getAsString())
+    return Truncate(S->str());
+  return V;
+}
+
+/// One run's answer for one compared thing.
+struct Side {
+  /// What "the same" is decided against. Text, because that makes agreement
+  /// decidable for values of every shape a run can produce -- a number, a word, a
+  /// summary object -- without a comparison per shape.
+  std::string Key;
+
+  /// What the caller is shown when the runs disagree, kept apart from the key
+  /// because the key is the wrong thing to hand back. Serialized into the document
+  /// as text, a scalar came back double-quoted (`"\"282 x1\""`) and a summary came
+  /// back as a line of backslashes for the caller to undo by hand -- which is the
+  /// complaint the capture aggregate exists to answer, reintroduced one level up.
+  json::Value Shown = nullptr;
+};
+
+/// One thing compared across runs: what each run said about it, keyed by label.
 struct Compared {
-  std::map<std::string, std::string> ByLabel;
+  std::map<std::string, Side> ByLabel;
+
+  /// Whether the sides are each run's summary of one capture, which are shortened
+  /// against each other rather than each cut to a length.
+  bool Summaries = false;
 
   /// Whether every run that has a value for this said the same thing, against
   /// \p Runs runs that could say anything at all. A run that is missing it
@@ -66,9 +106,9 @@ struct Compared {
   bool Agrees(size_t Runs) const {
     if (ByLabel.size() != Runs)
       return false;
-    const std::string &First = ByLabel.begin()->second;
+    const std::string &First = ByLabel.begin()->second.Key;
     return all_of(ByLabel, [&](const auto &Entry) {
-      return Entry.second == First;
+      return Entry.second.Key == First;
     });
   }
 };
@@ -76,12 +116,19 @@ struct Compared {
 /// Everything compared, in the order it is reported.
 class Table {
 public:
-  void Add(StringRef Name, StringRef Label, std::string Value) {
-    if (!m_index.count(Name.str())) {
-      m_index[Name.str()] = m_order.size();
-      m_order.push_back(Name.str());
-    }
-    m_rows[Name.str()].ByLabel[Label.str()] = std::move(Value);
+  /// A row compared and shown as the same text.
+  void Add(StringRef Name, StringRef Label, std::string Text) {
+    Side &S = Ensure(Name).ByLabel[Label.str()];
+    S.Key = Text;
+    S.Shown = std::move(Text);
+  }
+
+  /// A row holding each run's summary of one capture: compared by its whole
+  /// serialization, and shown as the document it is.
+  void AddSummary(StringRef Name, StringRef Label, const json::Value &Summary) {
+    Compared &Row = Ensure(Name);
+    Row.Summaries = true;
+    Row.ByLabel[Label.str()] = Side{Render(Summary), Summary};
   }
 
   /// Names in the order they were added, so that a report follows the plan rather
@@ -90,10 +137,180 @@ public:
   const Compared &Row(StringRef Name) const { return m_rows.at(Name.str()); }
 
 private:
+  Compared &Ensure(StringRef Name) {
+    if (!m_index.count(Name.str())) {
+      m_index[Name.str()] = m_order.size();
+      m_order.push_back(Name.str());
+    }
+    return m_rows[Name.str()];
+  }
+
   std::vector<std::string> m_order;
   std::map<std::string, size_t> m_index;
   std::map<std::string, Compared> m_rows;
 };
+
+/// One run's histogram of one capture, read out of its summary.
+///
+/// A histogram is keyed by the value where every value is a scalar and is a list
+/// of value-and-count pairs where any of them is a document, so an entry is
+/// identified here by the value as text -- which is the same thing either way --
+/// and re-emitted in whichever shape the run used.
+struct Histogram {
+  bool Listed = false;
+  std::map<std::string, std::string> CountOf;
+  std::map<std::string, json::Value> EntryOf;
+};
+
+std::optional<Histogram> ReadHistogram(const json::Object &Summary) {
+  const json::Value *Values = Summary.get("values");
+  if (!Values)
+    return std::nullopt;
+
+  Histogram H;
+  if (const json::Object *Keyed = Values->getAsObject()) {
+    for (const auto &[Value, Count] : *Keyed) {
+      H.CountOf[Value.str()] = Render(Count);
+      H.EntryOf.insert_or_assign(Value.str(), Count);
+    }
+    return H;
+  }
+  if (const json::Array *Listed = Values->getAsArray()) {
+    H.Listed = true;
+    for (const json::Value &Entry : *Listed) {
+      const json::Object *Pair = Entry.getAsObject();
+      const json::Value *Value = Pair ? Pair->get("value") : nullptr;
+      if (!Value)
+        continue;
+      const std::string Key = Render(*Value);
+      const json::Value *Count = Pair->get("count");
+      H.CountOf[Key] = Count ? Render(*Count) : std::string();
+      H.EntryOf.insert_or_assign(Key, Entry);
+    }
+    return H;
+  }
+  return std::nullopt;
+}
+
+/// The names of the summary fields the runs do not agree on.
+std::set<std::string> DisagreedFields(const std::map<std::string, Side> &ByLabel) {
+  std::map<std::string, std::string> First;
+  std::set<std::string> Out;
+  for (const auto &[Label, S] : ByLabel) {
+    const json::Object *Summary = S.Shown.getAsObject();
+    if (!Summary)
+      continue;
+    for (const auto &[Field, Value] : *Summary) {
+      auto [Seen, Fresh] = First.try_emplace(Field.str(), Render(Value));
+      if (!Fresh && Seen->second != Render(Value))
+        Out.insert(Field.str());
+    }
+    // A field one run has and another does not is a disagreement about it.
+    for (const auto &[Field, Value] : First)
+      if (!Summary->get(Field))
+        Out.insert(Field);
+  }
+  return Out;
+}
+
+/// Each run's summary of one capture, cut down to what they disagree on.
+///
+/// A summary is bounded on its own, but two of them side by side in a document
+/// that exists to be short is a different budget: the compare-drift pair was two
+/// 260-char histograms of twenty-eight values whose real difference was one of
+/// them. What differs is the entries whose count is not the same in every run --
+/// the rest is the part of the run they have in common, which nobody asked for
+/// twice. `distinct` and `values_elided` stay, because they are what makes a short
+/// histogram read as a selection out of a longer one.
+///
+/// Transitions and outliers are dropped, since they are derived from the values
+/// and a difference in them that the values do not already carry is reported by
+/// name below rather than in full.
+json::Object ShortenSummaries(const std::map<std::string, Side> &ByLabel) {
+  std::map<std::string, Histogram> Histograms;
+  for (const auto &[Label, S] : ByLabel)
+    if (const json::Object *Summary = S.Shown.getAsObject())
+      if (std::optional<Histogram> H = ReadHistogram(*Summary))
+        Histograms.emplace(Label, std::move(*H));
+
+  // Values held a different number of times by any two runs, which a value a run
+  // never held at all is one of. Each run bounds its own histogram, so a value
+  // another run kept and this one elided is reported here as a difference; the
+  // `values_elided` beside it is what says the list is a selection.
+  std::set<std::string> Differs;
+  for (const auto &[Label, H] : Histograms)
+    for (const auto &[Value, Count] : H.CountOf)
+      for (const auto &[Other, OtherH] : Histograms) {
+        auto Found = OtherH.CountOf.find(Value);
+        if (Found == OtherH.CountOf.end() || Found->second != Count)
+          Differs.insert(Value);
+      }
+
+  json::Object Out;
+  for (const auto &[Label, S] : ByLabel) {
+    auto Found = Histograms.find(Label);
+    if (Found == Histograms.end()) {
+      // Nothing to shorten. A capture that never varied renders as one word and a
+      // single value renders as itself, which is already the shortest form there
+      // is.
+      Out[Label] = Bounded(S.Shown);
+      continue;
+    }
+
+    const json::Object &Summary = *S.Shown.getAsObject();
+    const Histogram &H = Found->second;
+    json::Object Short;
+    if (const json::Value *Distinct = Summary.get("distinct"))
+      Short["distinct"] = *Distinct;
+
+    json::Object Keyed;
+    json::Array Listed;
+    for (const std::string &Value : Differs) {
+      auto Entry = H.EntryOf.find(Value);
+      if (Entry == H.EntryOf.end())
+        continue;
+      if (H.Listed)
+        Listed.push_back(Bounded(Entry->second));
+      else
+        Keyed[Truncate(Value)] = Bounded(Entry->second);
+    }
+    if (!Listed.empty())
+      Short["values"] = std::move(Listed);
+    else if (!Keyed.empty())
+      Short["values"] = std::move(Keyed);
+    if (const json::Value *Elided = Summary.get("values_elided"))
+      Short["values_elided"] = *Elided;
+    Out[Label] = std::move(Short);
+  }
+
+  // A row claiming a difference has to show one. Where the histograms agree and
+  // the summaries differ in something derived from them -- the order the values
+  // were taken in, which values were rare -- what is left above is the same
+  // object twice, so the fields they actually disagree on are named and shown.
+  bool Indistinguishable = Out.size() > 1;
+  std::string First;
+  for (const auto &[Label, Shown] : Out) {
+    const std::string Text = Render(Shown);
+    if (First.empty())
+      First = Text;
+    else if (Text != First)
+      Indistinguishable = false;
+  }
+  if (!Indistinguishable)
+    return Out;
+
+  const std::set<std::string> Disagreed = DisagreedFields(ByLabel);
+  for (auto &[Label, Shown] : Out) {
+    const json::Object *Summary = ByLabel.at(Label.str()).Shown.getAsObject();
+    json::Object *Short = Shown.getAsObject();
+    if (!Summary || !Short)
+      continue;
+    for (const std::string &Field : Disagreed)
+      if (const json::Value *Value = Summary->get(Field))
+        (*Short)[Field] = Bounded(*Value);
+  }
+  return Out;
+}
 
 /// A hit's capture tuple as the values it holds, keyed by the expression each came
 /// from.
@@ -295,8 +512,8 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
       for (const auto &[Label, Captures] : *Agg)
         if (const json::Object *ByCapture = Captures.getAsObject())
           for (const auto &[Capture, Summary] : *ByCapture)
-            Compare.Add(Label.str() + "." + Capture.str(), Run.Label,
-                        Truncate(Render(Summary)));
+            Compare.AddSummary(Label.str() + "." + Capture.str(), Run.Label,
+                               Summary);
   }
 
   // Against the runs that answered, not the runs asked for.
@@ -312,8 +529,12 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
       continue;
     }
     json::Object Sides;
-    for (const auto &[Label, Value] : Row.ByLabel)
-      Sides[Label] = Value;
+    if (Row.Summaries) {
+      Sides = ShortenSummaries(Row.ByLabel);
+    } else {
+      for (const auto &[Label, Answer] : Row.ByLabel)
+        Sides[Label] = Bounded(Answer.Shown);
+    }
     Diverged[Name] = std::move(Sides);
   }
 

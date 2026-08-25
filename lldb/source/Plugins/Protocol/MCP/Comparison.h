@@ -56,9 +56,13 @@ struct ComparedRun {
 /// diffing exercise.
 llvm::json::Value CompareRuns(llvm::ArrayRef<ComparedRun> Runs);
 
-/// Values a differing capture summary reports per run before it is truncated. A
-/// summary is already bounded, but two of them side by side in a document that
-/// exists to be short is a different budget.
+/// Characters of text a compared value may show per run.
+///
+/// Two summaries side by side used to be cut to this length each, which sliced a
+/// serialized document mid-token and handed back something no caller could parse.
+/// Summaries are shortened structurally instead -- to the values the runs disagree
+/// on -- so this now bounds only the strings a value holds, where a single captured
+/// string is genuinely long.
 constexpr unsigned MaxComparedSummaryChars = 400;
 
 } // namespace lldb_private::mcp
