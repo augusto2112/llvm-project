@@ -58,6 +58,18 @@ llvm::StringRef ToString(Outcome O);
 /// is read through its aggregate.
 bool IsAbnormal(Outcome O);
 
+/// Whether the run was ended by one of the plan's ceilings rather than by the
+/// program.
+///
+/// Narrower than \ref IsAbnormal, and the distinction is load-bearing wherever a
+/// response tells the caller that running for longer would have shown it more. A
+/// crash is abnormal and is still the program reaching its own end: nothing it
+/// would have done later is missing from what was collected, and no ceiling would
+/// have changed that. Told otherwise, the crashed side of a comparison was
+/// informed that its ceiling had ended it after a fifth of a second against a
+/// ninety-second one.
+bool IsCeilingStop(Outcome O);
+
 /// Both terms of a run's wall clock, as a parenthetical for the sentence that
 /// reports a stop the ceiling delivered.
 ///
@@ -928,6 +940,10 @@ struct ObservationResult {
   /// from `outliers`, and indistinguishable there from a value the program never
   /// held at all. Those want opposite responses -- run for longer, or act on the
   /// answer -- and `outliers` is the field a caller is told is usually the answer.
+  ///
+  /// A ceiling stop only, not any abnormal one. A crash is the program reaching
+  /// its own end, so nothing it would have done later is missing from the
+  /// aggregate and no ceiling would have changed that.
   ///
   /// Measured on a program making 100,000 calls with one mishandled value at call
   /// 61,804: at a 120-second ceiling the run reached 30,000 of them and reported

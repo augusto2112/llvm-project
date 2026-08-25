@@ -926,6 +926,17 @@ TEST(ObservationEngineTest, AnAggregateOverAWholeRunIsNotQualified) {
 
   EXPECT_EQ(Render(Result.Render()).find("aggregate_covers"),
             std::string::npos);
+
+  // Nor a crashed one, which is decided by the outcome and not by the field. A
+  // crash is the program reaching its own end: every hit it made is in the
+  // aggregate, no ceiling would have found more, and `outcome` says what happened
+  // in the first field of the response. Treated as merely abnormal, the crashed
+  // side of a comparison was told in 400 characters that its ceiling had ended it,
+  // having run for a fifth of a second against a ninety-second one.
+  EXPECT_TRUE(IsCeilingStop(Outcome::TimedOut));
+  EXPECT_TRUE(IsCeilingStop(Outcome::NoProgress));
+  EXPECT_FALSE(IsCeilingStop(Outcome::Crashed));
+  EXPECT_FALSE(IsCeilingStop(Outcome::Exited));
 }
 
 TEST(ObservationEngineTest, TailIsInlinedOnlyWhenTheProgramEndedBadly) {

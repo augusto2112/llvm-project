@@ -182,6 +182,10 @@ StringRef lldb_private::mcp::ToString(Outcome O) {
 
 bool lldb_private::mcp::IsAbnormal(Outcome O) { return O != Outcome::Exited; }
 
+bool lldb_private::mcp::IsCeilingStop(Outcome O) {
+  return O == Outcome::TimedOut || O == Outcome::NoProgress;
+}
+
 std::string lldb_private::mcp::DescribeWallClock(double RunningMs,
                                                 double SetupMs) {
   return formatv(" ({0:F1}s running after {1:F1}s of setup, which the ceiling "
@@ -3003,7 +3007,7 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
   // returns 0 for a run that was never sampled, so a short hang falls through to
   // exactly the behaviour it had before.
   lldb::ThreadSP T;
-  if (Result == Outcome::TimedOut || Result == Outcome::NoProgress)
+  if (IsCeilingStop(Result))
     if (const lldb::tid_t Busiest = m_profile.BusiestThread())
       T = P->GetThreadList().FindThreadByID(Busiest);
   if (!T)
@@ -3337,9 +3341,12 @@ Expected<ObservationResult> ObservationEngine::Run() {
   // The rate is here because it is what a caller sizes the next ceiling with, and
   // it is the one number neither the elapsed time nor the hit count gives alone.
   //
-  // Only where there were hits: with none the aggregate is empty and never
-  // rendered, so there is nothing for a reader to mistake for a summary.
-  if (IsAbnormal(m_result.Result) && Hits != 0) {
+  // A ceiling stop and not merely an abnormal one. A crash is the program reaching
+  // its own end, so its aggregate holds every hit the program made and there is no
+  // ceiling to raise; `outcome: crashed` is the answer there, and it is the first
+  // field of the response. Only where there were hits, too: with none the aggregate
+  // is empty and never rendered, so there is nothing to mistake for a summary.
+  if (IsCeilingStop(m_result.Result) && Hits != 0) {
     m_result.AggregateCoversPrefix = true;
 
     // Of the running time rather than the elapsed, because that is what the
