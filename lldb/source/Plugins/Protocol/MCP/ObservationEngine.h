@@ -97,6 +97,23 @@ std::string DescribeWallClock(double RunningMs, double SetupMs);
 unsigned TerminalLocalRank(llvm::StringRef Name, bool IsScalar,
                            bool IsArgument);
 
+/// The one marker that stands for every local a stopped frame did not report:
+/// \p Starved for the ones the shared node budget ran out before, \p NotRead for
+/// the ones past the bound on how many locals are read at all. Empty when there
+/// were none of either.
+///
+/// One marker rather than one per local. A budget is documented as replacing what
+/// it cuts rather than dropping it silently, and calling the serializer with
+/// nothing left honours that by returning an elision marker for each: measured on
+/// one frame, 25 copies of `{"_elided":"node budget"}`, 901 characters announcing
+/// absence. A merged marker says the same thing at a tenth of the cost.
+///
+/// The names are the content. What a caller does with a local it did not get is
+/// name it in the next plan's `capture`, and a count alone does not let it.
+/// Bounded all the same, because a ninth name is not a ninth thing to do.
+std::string ElidedLocals(llvm::ArrayRef<llvm::StringRef> Starved,
+                         size_t NotRead);
+
 /// Separates one capture's rendering from the next in the tuple a hit is recorded
 /// as. A control character cannot occur inside a rendered value, so two different
 /// tuples cannot join into one identical string -- which is what lets an emission

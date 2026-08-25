@@ -389,6 +389,16 @@ ellipsis. What those arguments distinguish is one instantiation from another, an
 the file and line reported beside the name already do that; in template-heavy code
 they are most of its length.
 
+`terminal.locals` holds the frame's own variables within one node budget shared
+across all of them, so what a local gets depends on what the others need. The
+cheap and specific come first — scalars, then the body's own aggregates, then the
+parameters, then `this`, then the compiler's range-for temporaries — because a
+budget spent in declaration order goes to `this` and never reaches the
+loop-carried value a hang is explained by. A local too large to render collapses
+to its own value with a note of how much was left out; the locals the budget did
+not reach are named together in one `_elided` entry, because the name is what goes
+in the next plan's `capture`.
+
 `plan_report` keeps four numbers apart on purpose: how many locations the name
 resolved to, how many times the tracepoint was hit, how many of those hits had a
 true condition, and how many events were emitted. A misspelled function name, a

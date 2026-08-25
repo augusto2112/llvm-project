@@ -204,6 +204,38 @@ unsigned lldb_private::mcp::TerminalLocalRank(StringRef Name, bool IsScalar,
   return IsArgument ? 2 : 1;
 }
 
+std::string lldb_private::mcp::ElidedLocals(ArrayRef<StringRef> Starved,
+                                            size_t NotRead) {
+  /// Starved locals named. A name is what a caller needs in order to capture the
+  /// value on the next run; the ninth name is not a ninth thing to do.
+  constexpr size_t MaxNamed = 8;
+
+  std::string Out;
+  if (!Starved.empty()) {
+    // The count first, because it is what says whether the names are the whole
+    // list, and then as many names as the bound allows. No advice after them: at
+    // three locals a sentence telling the caller to capture one cost more than
+    // the per-local markers this replaces, and `capture` is where a reader of the
+    // documentation already knows to go.
+    Out = formatv("no budget for {0} locals: ", Starved.size()).str();
+    for (size_t I = 0, E = std::min(Starved.size(), MaxNamed); I < E; ++I) {
+      if (I != 0)
+        Out += ", ";
+      Out += Starved[I];
+    }
+    if (Starved.size() > MaxNamed)
+      Out += ", ...";
+  }
+  if (NotRead != 0) {
+    if (!Out.empty())
+      Out += ". ";
+    // Not named, because these are past the bound on how many locals are read at
+    // all: nothing here has read them, so there is no name to give.
+    Out += formatv("{0} more locals not read", NotRead).str();
+  }
+  return Out;
+}
+
 StringRef lldb_private::mcp::ToString(EmitDecision D) {
   switch (D) {
   case EmitDecision::Emit:
@@ -3072,11 +3104,20 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
     // reference to a compiler's pass manager reaches everything the compiler
     // owns in two hops, and a per-local budget lets each of forty locals spend
     // it: measured at 8.6 kB of interior, against 5 kB for the backtrace it was
-    // meant to annotate. Exhausting it leaves the remaining locals as elision
-    // markers, which is what the reader wants of a local it has not asked about.
+    // meant to annotate.
     unsigned Budget = MaxTerminalLocalNodes;
     size_t Rendered = 0;
+    std::vector<StringRef> Starved;
     for (const Local &L : Ordered) {
+      // Stopped rather than called with an empty budget. A call with none returns
+      // an elision marker, and twenty-five of those was 901 characters spending
+      // 36 apiece to say one thing twenty-five times. What a reader needs from a
+      // local that got nothing is the name, so that the next plan can capture it.
+      if (Budget == 0) {
+        Starved.push_back(L.Name);
+        continue;
+      }
+
       ValueObjectNode Node(L.Value);
       SerializeValueOptions SOpts;
       // A slice of the shared budget rather than the whole of it, so that the
@@ -3092,9 +3133,16 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
       Budget -= Given - Slice;
       ++Rendered;
     }
-    if (Locals->GetSize() > Rendered)
-      Terminal.Locals["_elided"] =
-          formatv("{0} more locals", Locals->GetSize() - Rendered).str();
+
+    // One marker for all of them, naming as many as a caller can act on. The
+    // budgets are documented as replacing what they cut rather than dropping it
+    // silently, and a merged marker honours that at a tenth of the cost. The
+    // names are in the order the budget would have reached them, so the ones
+    // nearest to having been shown are the ones named.
+    if (std::string Note = ElidedLocals(
+            Starved, Locals->GetSize() - Rendered - Starved.size());
+        !Note.empty())
+      Terminal.Locals["_elided"] = std::move(Note);
   }
 
   SymbolContext SC = Frame->GetSymbolContext(lldb::eSymbolContextEverything);

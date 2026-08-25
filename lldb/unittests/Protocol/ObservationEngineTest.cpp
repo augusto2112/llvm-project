@@ -573,6 +573,46 @@ TEST(ObservationEngineTest, LocalsAreReadScalarsFirstAndThisLast) {
             Temporary);
 }
 
+TEST(ObservationEngineTest, StarvedLocalsAreOneMarkerThatNamesThem) {
+  // Twenty-five copies of `{"_elided":"node budget"}` was 901 characters
+  // announcing absence, and a name is the only part of that a caller can act on:
+  // it is what goes in the next plan's `capture`.
+  const std::string Note = ElidedLocals(
+      {"Worklist", "PhiNodes", "ConvertTy"}, /*NotRead=*/0);
+  EXPECT_NE(Note.find("3 locals"), std::string::npos) << Note;
+  EXPECT_NE(Note.find("Worklist"), std::string::npos) << Note;
+  EXPECT_NE(Note.find("ConvertTy"), std::string::npos) << Note;
+  // A tenth of what one marker per local cost, names included.
+  EXPECT_LT(Note.size(), 3u * 26u);
+}
+
+TEST(ObservationEngineTest, TheNamesInThatMarkerAreBoundedAndTheCountIsNot) {
+  const std::vector<llvm::StringRef> Many = {"a1", "a2", "a3", "a4", "a5",
+                                            "a6", "a7", "a8", "a9", "a10"};
+  const std::string Note = ElidedLocals(Many, /*NotRead=*/0);
+  // The count covers all of them even where the list does not, so eight names do
+  // not read as everything that was left out.
+  EXPECT_NE(Note.find("10 locals"), std::string::npos) << Note;
+  EXPECT_NE(Note.find("a8"), std::string::npos) << Note;
+  EXPECT_EQ(Note.find("a9"), std::string::npos) << Note;
+  EXPECT_NE(Note.find("..."), std::string::npos) << Note;
+}
+
+TEST(ObservationEngineTest, LocalsNeverReadAreCountedNotNamed) {
+  // Past the bound on how many locals are read at all, nothing has read them, so
+  // there is no name to offer -- only the count, which is what says the list is a
+  // selection.
+  EXPECT_EQ(ElidedLocals({}, /*NotRead=*/9), "9 more locals not read");
+
+  // Both at once, in one marker, because they are one fact about the same set.
+  const std::string Both = ElidedLocals({"V"}, /*NotRead=*/4);
+  EXPECT_NE(Both.find("V"), std::string::npos) << Both;
+  EXPECT_NE(Both.find("4 more"), std::string::npos) << Both;
+
+  // Nothing left out means no marker, rather than a marker saying zero.
+  EXPECT_TRUE(ElidedLocals({}, /*NotRead=*/0).empty());
+}
+
 TEST(ObservationEngineTest, SystemPathsAreJudgedByRoot) {
   EXPECT_TRUE(IsSystemSourcePath("/usr/include/stdio.h"));
   EXPECT_TRUE(IsSystemSourcePath("/opt/homebrew/include/foo.h"));
