@@ -125,6 +125,50 @@ TEST(ComparisonTest, WhatDivergedCarriesBothSidesAndIsNotAlsoCalledAgreed) {
   EXPECT_NE(Agreed.find("loop.resolved_locations"), std::string::npos) << Agreed;
 }
 
+TEST(ComparisonTest, TwoRunsDifferingOnlyInExitStatusDoNotAgree) {
+  // A pass/fail pair is the commonest before-and-after there is, and the outcome,
+  // the description and every count are identical across one: the status is the
+  // whole of the difference, so omitting it reported the pair as no difference.
+  ObservationResult A = MakeRun(Outcome::Exited, 2, {Tuple({"1"}), Tuple({"2"})});
+  ObservationResult B = A;
+  A.Terminal.ExitStatus = 0;
+  B.Terminal.ExitStatus = 1;
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  const llvm::json::Object *Diverged = Object(Out, "diverged");
+  ASSERT_NE(Diverged, nullptr) << Render(Out);
+  EXPECT_EQ(Render(*Diverged->getObject("exit_status")),
+            R"({"after":"0","before":"1"})");
+}
+
+TEST(ComparisonTest, WhereARunEndedIsALineAndNotJustAFunction) {
+  // A crashed run that reports a signal and a function name and no line leaves
+  // the caller to spend a second call finding out where. The directory goes: two
+  // builds of one source differ in every character of it and in nothing else.
+  ObservationResult A = MakeRun(Outcome::Crashed, 2, {Tuple({"1"}), Tuple({"2"})});
+  ObservationResult B = A;
+  A.Terminal.File = "/tmp/build-a/drift.c";
+  A.Terminal.Line = 41;
+  B.Terminal.File = "/tmp/build-b/drift.c";
+  B.Terminal.Line = 52;
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  EXPECT_EQ(Render(*Object(Out, "diverged")->getObject("ended_at")),
+            R"({"after":"drift.c:41","before":"drift.c:52"})");
+}
+
+TEST(ComparisonTest, ARunWithNoLineToReportDoesNotGetAnEmptyOne) {
+  // A program that exited normally was never anywhere in particular, and a row
+  // reading `:0` is a name in the report costing bytes to say nothing.
+  const std::vector<std::string> Tuples = {Tuple({"1"})};
+  const llvm::json::Value Out = CompareRuns(
+      Pair(MakeRun(Outcome::Exited, 1, Tuples), MakeRun(Outcome::Exited, 1, Tuples)));
+
+  const std::string Agreed = Render(*Out.getAsObject()->getArray("agreed"));
+  EXPECT_EQ(Agreed.find("ended_at"), std::string::npos) << Agreed;
+  EXPECT_EQ(Agreed.find("exit_status"), std::string::npos) << Agreed;
+}
+
 TEST(ComparisonTest, TheFirstHitTheyDisagreeOnIsReportedWithWhatEachSaw) {
   // For a miscompile this is the answer: everything before it is the same
   // computation, and everything after is a consequence of this.

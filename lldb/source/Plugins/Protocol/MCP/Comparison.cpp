@@ -14,6 +14,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include <cstdint>
 #include <map>
@@ -185,9 +186,26 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
     // How it ended, and where. A fix that turns a hang into an exit is the whole
     // answer and belongs at the top of the comparison.
     Compare.Add("outcome", Run.Label, ToString(R.Result).str());
+    // The status is the difference in the commonest before-and-after there is: a
+    // compiler that starts exiting non-zero has the same outcome, the same
+    // description and the same everything else, so leaving this out reported a
+    // pass/fail pair as no difference at all.
+    if (R.Terminal.ExitStatus)
+      Compare.Add("exit_status", Run.Label,
+                  std::to_string(*R.Terminal.ExitStatus));
     Compare.Add("ended", Run.Label, R.Terminal.Description);
     if (!R.Terminal.Function.empty())
       Compare.Add("ended_in", Run.Label, R.Terminal.Function);
+    // The line, without which a crashed run gives a signal and a function name
+    // and leaves the caller to spend a second call finding out where. The path is
+    // reduced to its filename because two runs of the same source built in
+    // different directories differ in every character of the prefix and in
+    // nothing that matters.
+    if (R.Terminal.Line != 0)
+      Compare.Add("ended_at", Run.Label,
+                  formatv("{0}:{1}", sys::path::filename(R.Terminal.File),
+                          R.Terminal.Line)
+                      .str());
 
     for (const std::string &Label : Labels) {
       const ObservationReport *Report = FindObservation(R, Label);
