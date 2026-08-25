@@ -412,6 +412,40 @@ TEST(FunctionBodySourceTest, AllowsStaticAsPartOfAnotherWord) {
   EXPECT_THAT_EXPECTED(Body, llvm::Succeeded());
 }
 
+// `static` on the declaration gives the function internal linkage, which says
+// nothing about whether a copy would behave differently. Refusing it would
+// refuse most of the C worth patching.
+TEST(FunctionBodySourceTest, AllowsAStaticFunction) {
+  llvm::StringRef Buffer = "static int f(int x) {\n"
+                           "  return x + 1;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 1);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ("static int f(int x) {\n  return x + 1;\n}", Body->Text);
+}
+
+// A static local inside a static function is still refused: the storage is what
+// the copy cannot share, and the linkage is beside the point.
+TEST(FunctionBodySourceTest, RefusesAStaticLocalInAStaticFunction) {
+  llvm::StringRef Buffer = "static int f(void) {\n"
+                           "  static int n = 0;\n"
+                           "  return ++n;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 1);
+  EXPECT_THAT_EXPECTED(Body, llvm::Failed());
+}
+
+// A brace inside a comment closes nothing, so a `static` inside one declares
+// nothing either.
+TEST(FunctionBodySourceTest, IgnoresStaticInAComment) {
+  llvm::StringRef Buffer = "int f(void) {\n"
+                           "  // static int n = 0;\n"
+                           "  return 0;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 1);
+  EXPECT_THAT_EXPECTED(Body, llvm::Succeeded());
+}
+
 TEST(FunctionBodySourceTest, FailsWhenBracesNeverBalance) {
   llvm::StringRef Buffer = "int f(void) {\n"
                            "  return 0;\n";
@@ -575,62 +609,20 @@ size_t OffsetOfLine(llvm::StringRef Buffer, uint32_t Line) {
   return Offset <= Buffer.size() ? Offset : llvm::StringRef::npos;
 }
 
-/// Whether \p Text contains the keyword `static` outside strings, characters
-/// and comments.
+/// Whether the keyword `static` begins at \p I in \p Text.
 ///
 /// A textual check, which is what keeps this callable before anything is
-/// compiled. It over-reports in one direction only: a `static` that a macro
-/// would have removed still refuses the patch, and refusing is the safe
-/// answer.
-bool DeclaresStatic(llvm::StringRef Text) {
-  enum { Code, InString, InChar, InLineComment, InBlockComment } State = Code;
-  for (size_t I = 0, E = Text.size(); I != E; ++I) {
-    char C = Text[I];
-    switch (State) {
-    case Code:
-      if (C == '"')
-        State = InString;
-      else if (C == '\'')
-        State = InChar;
-      else if (C == '/' && I + 1 < E && Text[I + 1] == '/')
-        State = InLineComment;
-      else if (C == '/' && I + 1 < E && Text[I + 1] == '*')
-        State = InBlockComment;
-      else if (C == 's' && Text.substr(I).starts_with("static")) {
-        bool StartsWord = I == 0 || !(llvm::isAlnum(Text[I - 1]) ||
-                                      Text[I - 1] == '_');
-        size_t After = I + 6;
-        bool EndsWord = After >= E || !(llvm::isAlnum(Text[After]) ||
-                                        Text[After] == '_');
-        if (StartsWord && EndsWord)
-          return true;
-      }
-      break;
-    case InString:
-      if (C == '\\')
-        ++I;
-      else if (C == '"')
-        State = Code;
-      break;
-    case InChar:
-      if (C == '\\')
-        ++I;
-      else if (C == '\'')
-        State = Code;
-      break;
-    case InLineComment:
-      if (C == '\n')
-        State = Code;
-      break;
-    case InBlockComment:
-      if (C == '*' && I + 1 < E && Text[I + 1] == '/') {
-        ++I;
-        State = Code;
-      }
-      break;
-    }
-  }
-  return false;
+/// compiled. It over-reports in one direction only: a `static` a macro would
+/// have removed still refuses the patch, and refusing is the safe answer.
+bool StaticKeywordAt(llvm::StringRef Text, size_t I) {
+  if (!Text.substr(I).starts_with("static"))
+    return false;
+  const bool StartsWord =
+      I == 0 || !(llvm::isAlnum(Text[I - 1]) || Text[I - 1] == '_');
+  const size_t After = I + 6;
+  const bool EndsWord =
+      After >= Text.size() || !(llvm::isAlnum(Text[After]) || Text[After] == '_');
+  return StartsWord && EndsWord;
 }
 
 } // namespace
@@ -644,6 +636,7 @@ lldb_private::ExtractFunctionBody(llvm::StringRef Buffer, uint32_t DeclLine) {
   enum { Code, InString, InChar, InLineComment, InBlockComment } State = Code;
   int Depth = 0;
   bool SawBrace = false;
+  bool SawStaticLocal = false;
   size_t End = llvm::StringRef::npos;
 
   for (size_t I = Start, E = Buffer.size(); I != E; ++I) {
@@ -674,6 +667,12 @@ lldb_private::ExtractFunctionBody(llvm::StringRef Buffer, uint32_t DeclLine) {
       } else if (C == ';' && !SawBrace) {
         // A declaration rather than a definition.
         return Fail(BodyExtractFailure::NotFound);
+      } else if (Depth > 0 && C == 's' && StaticKeywordAt(Buffer, I)) {
+        // Only inside the body. On the declaration `static` gives the function
+        // internal linkage, which says nothing about whether a copy of it would
+        // behave differently -- and refusing every file-local function would
+        // refuse most of the C worth patching.
+        SawStaticLocal = true;
       }
       break;
     case InString:
@@ -705,13 +704,12 @@ lldb_private::ExtractFunctionBody(llvm::StringRef Buffer, uint32_t DeclLine) {
     return Fail(BodyExtractFailure::NotFound);
   if (End == llvm::StringRef::npos)
     return Fail(BodyExtractFailure::Unbalanced);
+  if (SawStaticLocal)
+    return Fail(BodyExtractFailure::StaticLocal);
 
   FunctionBodyText Body;
   Body.Text = Buffer.substr(Start, End - Start).str();
   Body.FirstLine = DeclLine;
-
-  if (DeclaresStatic(Body.Text))
-    return Fail(BodyExtractFailure::StaticLocal);
 
   Body.LineStarts.push_back(0);
   for (size_t I = 0, E = Body.Text.size(); I != E; ++I)
@@ -737,9 +735,9 @@ ninja -C /Users/work/Developer/llvm/build TargetTests && \
   /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='FunctionBodySourceTest.*'
 ```
 
-Expected: `[  PASSED  ] 14 tests.`
+Expected: `[  PASSED  ] 18 tests.`
 
-If `RefusesAStaticLocal` fails because `DeclaresStatic` never runs, check that it is called before `LineStarts` is filled — the order matters only for which error wins, but the test asserts failure.
+If `AllowsAStaticFunction` fails, the `Depth > 0` guard on the `static` check is missing or wrong: without it the keyword on the declaration is mistaken for storage inside the body.
 
 - [ ] **Step 7: Commit**
 
