@@ -1147,6 +1147,8 @@ json::Value ObservationReport::Render() const {
       {"emitted", static_cast<int64_t>(Emitted)}};
   if (ResolutionError)
     O["error"] = *ResolutionError;
+  if (SourceNewerThanBinary)
+    O["source_newer_than_binary"] = *SourceNewerThanBinary;
 
   // Reported only for an observation that carried a condition, so that their
   // absence says "no condition" rather than "a condition that never held".
@@ -2728,6 +2730,7 @@ Error ObservationEngine::InstallObservations() {
                     : m_plan.Observations[I].At;
     Report.ResolvedLocations = Resolved[I].ResolvedLocations;
     Report.ResolutionError = Resolved[I].Error;
+    Report.SourceNewerThanBinary = Resolved[I].SourceNewerThanBinary;
     Report.HasCondition = m_plan.Observations[I].WhenExpr.has_value();
     m_result.Observations.push_back(std::move(Report));
   }

@@ -8,9 +8,12 @@
 
 #include "ObservationPlan.h"
 #include "lldb/Breakpoint/Breakpoint.h"
+#include "lldb/Breakpoint/BreakpointLocation.h"
+#include "lldb/Host/FileSystem.h"
 #include "lldb/Core/Module.h"
 #include "lldb/Core/ModuleList.h"
 #include "lldb/Core/Mangled.h"
+#include "lldb/Symbol/LineEntry.h"
 #include "lldb/Symbol/SymbolContext.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Utility/ConstString.h"
@@ -943,6 +946,82 @@ lldb_private::mcp::ObservationPlan::WithVariant(const RunVariant &Variant) const
   return Out;
 }
 
+namespace {
+
+/// How far apart two mtimes have to be before their order says anything.
+///
+/// A build reads the source and then writes the binary, so a freshly built pair
+/// is always the right way round -- but only by however long the compile took,
+/// and a build system that touches its inputs, an unpacked archive, or a
+/// filesystem with coarse timestamps can leave the two within a second of each
+/// other either way. A warning that fires on that noise is a warning a caller
+/// learns to ignore, which costs more than the case it was meant to catch.
+constexpr std::chrono::seconds MinSourceSkew{2};
+
+/// Whether the source a `file:line` resolved through has been written since the
+/// binary holding its line table was, and by how much.
+///
+/// The file is taken from the resolved location rather than from what the caller
+/// wrote, because that spelling may be a bare filename while the line table
+/// holds the path the compiler saw -- and the compiler's copy is the one the line
+/// number came from. The binary is likewise the module the location landed in,
+/// which for a tracepoint in a shared library is that library and not the
+/// program.
+std::optional<std::string> DescribeSourceNewerThanBinary(Breakpoint &BP) {
+  lldb::BreakpointLocationSP Loc = BP.GetLocationAtIndex(0);
+  if (!Loc)
+    return std::nullopt;
+
+  SymbolContext SC;
+  Loc->GetAddress().CalculateSymbolContext(
+      &SC, lldb::eSymbolContextLineEntry | lldb::eSymbolContextModule);
+  if (!SC.line_entry.IsValid() || !SC.module_sp)
+    return std::nullopt;
+
+  const FileSpec &Source = SC.line_entry.GetFile();
+  FileSystem &FS = FileSystem::Instance();
+  return DescribeSourceSkew(Source.GetFilename(),
+                            FS.GetModificationTime(Source),
+                            FS.GetModificationTime(SC.module_sp->GetFileSpec()));
+}
+
+} // namespace
+
+std::optional<std::string> lldb_private::mcp::DescribeSourceSkew(
+    StringRef Filename, sys::TimePoint<> Source, sys::TimePoint<> Binary) {
+  // An unreadable mtime comes back as the epoch. Either file may be missing:
+  // debug info records the path the compiler saw, which on a binary built
+  // elsewhere names a directory this machine does not have. Nothing is reported
+  // then, because a comparison that cannot be made is not a finding.
+  if (Source == sys::TimePoint<>() || Binary == sys::TimePoint<>())
+    return std::nullopt;
+  if (Source - Binary < MinSourceSkew)
+    return std::nullopt;
+
+  // Stated as the fact it is -- these two mtimes, in this order -- and not as a
+  // verdict that the line moved. Detecting *what* moved would need the source as
+  // it was compiled, which nothing here has; and a source file may be newer than
+  // a binary for reasons that changed no code, a checked-out tree being the
+  // common one. The skew is what lets a reader tell the two apart: minutes is an
+  // edit, days is a checkout.
+  const auto Skew =
+      std::chrono::duration_cast<std::chrono::seconds>(Source - Binary);
+  std::string Ago;
+  if (Skew < std::chrono::minutes(1))
+    Ago = formatv("{0}s", Skew.count()).str();
+  else if (Skew < std::chrono::hours(1))
+    Ago = formatv("{0}m", Skew.count() / 60).str();
+  else if (Skew < std::chrono::hours(48))
+    Ago = formatv("{0}h", Skew.count() / 3600).str();
+  else
+    Ago = formatv("{0}d", Skew.count() / 86400).str();
+
+  return formatv("\"{0}\" was written {1} after the binary holding its line "
+                 "table, so this line is resolved from the older copy",
+                 Filename, Ago)
+      .str();
+}
+
 std::vector<LocationResolution>
 lldb_private::mcp::ResolveObservationLocations(ObservationPlan &Plan,
                                                Target &Tgt) {
@@ -973,6 +1052,12 @@ lldb_private::mcp::ResolveObservationLocations(ObservationPlan &Plan,
     if (Resolution.Breakpoint)
       Resolution.ResolvedLocations =
           static_cast<uint32_t>(Resolution.Breakpoint->GetNumLocations());
+
+    // Only for a line anchor. A function name does not depend on line numbers,
+    // so editing its file moves nothing a tracepoint on it was pointing at.
+    if (Obs.AtLine && Resolution.ResolvedLocations != 0)
+      Resolution.SourceNewerThanBinary =
+          DescribeSourceNewerThanBinary(*Resolution.Breakpoint);
 
     if (Resolution.ResolvedLocations == 0) {
       if (Obs.AtLine) {

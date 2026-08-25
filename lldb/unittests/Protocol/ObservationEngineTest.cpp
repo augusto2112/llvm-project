@@ -1796,3 +1796,29 @@ TEST(ObservationEngineTest, ACaptureThatReadNothingHasNoPartialAggregateToWarnOf
 
   EXPECT_EQ(Render(Report.Render()).find("covers those"), std::string::npos);
 }
+
+TEST(ObservationEngineTest, ALineWhoseSourceMovedSaysSoBesideResolvedLocations) {
+  // `resolved_locations` is what a reader takes as the assurance that the
+  // tracepoint is where they asked for, and it is true and says nothing about
+  // whether the line still is what it was when the binary was built. The two
+  // belong in the same object for that reason.
+  ObservationReport Report;
+  Report.At = "X86ISelLowering.cpp:49038";
+  Report.ResolvedLocations = 1;
+  Report.Hits = 12;
+  Report.SourceNewerThanBinary = "\"X86ISelLowering.cpp\" was written 4m after "
+                                 "the binary holding its line table";
+
+  const std::string S = Render(Report.Render());
+  EXPECT_NE(S.find("\"resolved_locations\":1"), std::string::npos) << S;
+  EXPECT_NE(S.find("source_newer_than_binary"), std::string::npos) << S;
+}
+
+TEST(ObservationEngineTest, AnObservationWhoseSourceIsOlderCarriesNoSuchField) {
+  // Additive, and silent by default: the field's presence is the whole signal,
+  // so a healthy run must not carry it saying nothing is wrong.
+  ObservationReport Report;
+  Report.At = "visit";
+  Report.ResolvedLocations = 1;
+  EXPECT_EQ(Render(Report.Render()).find("source_newer"), std::string::npos);
+}

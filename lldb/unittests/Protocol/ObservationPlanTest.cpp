@@ -501,3 +501,69 @@ TEST(ObservationPlanTest, TooManyRunsIsRefusedWithTheReason) {
                         "]}"),
               HasSubstr("at most"));
 }
+
+//===----------------------------------------------------------------------===//
+// Source older than the line table it resolved through
+//===----------------------------------------------------------------------===//
+
+namespace {
+
+/// A time relative to a fixed instant, so the rule is exercised without a clock.
+llvm::sys::TimePoint<> At(std::chrono::seconds Offset) {
+  return llvm::sys::TimePoint<>(std::chrono::seconds(1000000000)) + Offset;
+}
+
+using Secs = std::chrono::seconds;
+
+} // namespace
+
+TEST(SourceSkewTest, ASourceEditedAfterTheBuildIsReportedWithHowLongAfter) {
+  // The case this exists for, from a live run: a tracepoint was set on a
+  // statement, four lines of comment were added above it, and any re-run of the
+  // same plan would have traced what had moved four lines down -- with
+  // `resolved_locations: 1` still saying the location resolved, because it had.
+  std::optional<std::string> Note =
+      DescribeSourceSkew("X86ISelLowering.cpp", At(Secs(600)), At(Secs(0)));
+  ASSERT_TRUE(Note.has_value());
+  EXPECT_THAT(*Note, HasSubstr("X86ISelLowering.cpp"));
+  EXPECT_THAT(*Note, HasSubstr("10m"));
+}
+
+TEST(SourceSkewTest, AFreshlyBuiltBinaryIsNewerThanItsSourceAndSaysNothing) {
+  // The ordinary case, and it has to be silent: a warning on every run of a
+  // healthy tree is a warning nobody reads by the second day.
+  EXPECT_FALSE(DescribeSourceSkew("f.cpp", At(Secs(0)), At(Secs(600))));
+  EXPECT_FALSE(DescribeSourceSkew("f.cpp", At(Secs(0)), At(Secs(0))));
+}
+
+TEST(SourceSkewTest, ASecondApartIsBuildNoiseRatherThanAnEdit) {
+  // A build system that touches its inputs, an unpacked archive, or a coarse
+  // filesystem timestamp can leave the two within a second either way, and the
+  // order then says nothing about whether anyone edited anything.
+  EXPECT_FALSE(DescribeSourceSkew("f.cpp", At(Secs(1)), At(Secs(0))));
+  EXPECT_TRUE(DescribeSourceSkew("f.cpp", At(Secs(2)), At(Secs(0))));
+}
+
+TEST(SourceSkewTest, AnUnreadableMtimeIsNotAFinding) {
+  // Debug info records the path the compiler saw, so on a binary built
+  // elsewhere the source names a directory this machine does not have. An
+  // unreadable mtime arrives as the epoch, and a comparison that cannot be made
+  // must not be reported as one that came out badly.
+  const llvm::sys::TimePoint<> Missing;
+  EXPECT_FALSE(DescribeSourceSkew("f.cpp", Missing, At(Secs(0))));
+  EXPECT_FALSE(DescribeSourceSkew("f.cpp", At(Secs(600)), Missing));
+  EXPECT_FALSE(DescribeSourceSkew("f.cpp", Missing, Missing));
+}
+
+TEST(SourceSkewTest, TheSkewIsScaledSoAnEditReadsDifferentlyFromACheckout) {
+  // Minutes is somebody editing between two runs, which is the failure. Days is
+  // a tree that was checked out after the binary was built, which usually is
+  // not. The fact is the same either way and the number is what separates them,
+  // so it has to be legible without arithmetic.
+  EXPECT_THAT(*DescribeSourceSkew("f.cpp", At(Secs(30)), At(Secs(0))),
+              HasSubstr("30s"));
+  EXPECT_THAT(*DescribeSourceSkew("f.cpp", At(Secs(7200)), At(Secs(0))),
+              HasSubstr("2h"));
+  EXPECT_THAT(*DescribeSourceSkew("f.cpp", At(Secs(864000)), At(Secs(0))),
+              HasSubstr("10d"));
+}

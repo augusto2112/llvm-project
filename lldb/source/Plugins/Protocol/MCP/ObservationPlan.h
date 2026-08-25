@@ -13,6 +13,7 @@
 #include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
+#include "llvm/Support/Chrono.h"
 #include "llvm/Support/Error.h"
 #include "llvm/Support/JSON.h"
 #include <cstdint>
@@ -188,11 +189,41 @@ struct LocationResolution {
   /// \ref ResolvedLocations is zero.
   std::optional<std::string> Error;
 
+  /// The source file a `file:line` observation resolved through, and how much
+  /// newer than the binary it is, where it is newer at all.
+  ///
+  /// A line number means whatever the line table says, and the line table was
+  /// written when the binary was built. Edit the file afterwards and the same
+  /// plan traces a different statement, silently -- the report still says the
+  /// location resolved, because it did. From a live run: a tracepoint was set on
+  /// a statement at line 49038, four lines of comment were added above it, and
+  /// any re-run would have traced what had moved to 49042 with nothing to say
+  /// otherwise. That is the loop a debugger has to win to beat a print statement,
+  /// and losing it silently is worse than not being there.
+  ///
+  /// Only the ordering of two mtimes, which is cheap and is the whole of the
+  /// claim: not what moved, and not that anything did. Unset whenever either
+  /// mtime cannot be read -- a source path from another machine's build, most
+  /// often -- because a scan that cries wolf gets switched off.
+  std::optional<std::string> SourceNewerThanBinary;
+
   /// The breakpoint created for the observation, set whether or not the name
   /// resolved. An unresolved breakpoint is kept rather than removed, since a
   /// name in a library that has not been loaded yet resolves at load time.
   lldb::BreakpointSP Breakpoint;
 };
+
+/// What to say about a `file:line` whose source is newer than the binary its
+/// line table came from, or nothing where there is nothing to say.
+///
+/// The whole decision, kept apart from reading the two mtimes so that the rule
+/// can be exercised without a build tree: nothing when either time is the epoch,
+/// which is how an unreadable mtime arrives; nothing when the source is older,
+/// equal, or newer by less than the noise a build itself leaves; otherwise the
+/// fact and how far apart the two are.
+std::optional<std::string> DescribeSourceSkew(llvm::StringRef Filename,
+                                              llvm::sys::TimePoint<> Source,
+                                              llvm::sys::TimePoint<> Binary);
 
 /// Creates one breakpoint per observation and reports what each name matched.
 /// The result is parallel to \p Plan.Observations.

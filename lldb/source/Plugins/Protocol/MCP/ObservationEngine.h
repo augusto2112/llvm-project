@@ -724,6 +724,12 @@ struct ObservationReport {
   /// Why nothing matched, with the nearest names that did.
   std::optional<std::string> ResolutionError;
 
+  /// See \ref LocationResolution::SourceNewerThanBinary. Reported beside
+  /// \ref ResolvedLocations, because that is the number a reader takes as the
+  /// assurance that the tracepoint is where they asked for -- and it says
+  /// nothing about whether the line still is.
+  std::optional<std::string> SourceNewerThanBinary;
+
   /// Times the location was reached, counting the hits that were skipped and
   /// those whose condition was false. This is the number that answers whether
   /// the code ran at all, so nothing is filtered out of it.

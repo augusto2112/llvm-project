@@ -111,6 +111,18 @@ trailing colon and digits is what tells the two apart, so a qualified name like
 meaningful inside the run that produced it, so in the next run the same number
 names a different instruction or none at all.
 
+A line number means whatever the line table says, and the line table was written
+when the binary was built — so a `file:line` tracepoint that outlives an edit
+traces a different statement while still reporting `resolved_locations: 1`. Where
+the source is newer than the binary its line table came from, the observation
+carries `source_newer_than_binary` beside that count, naming the file and how far
+apart the two are. It is the ordering of two mtimes and nothing more: not what
+moved, not that anything did. Minutes usually means somebody edited between two
+runs; days usually means a tree checked out after the build. Nothing is said when
+either mtime cannot be read — a binary built on another machine names source
+directories this one does not have — because a check that fires when it cannot
+tell is a check that gets ignored.
+
 An observation may also carry `when` (a condition), `called_from` (restrict to
 hits reached from another function), `enabled_after` (hold it disabled until
 another observation has been hit), `skip_first`, `only_hit`, `backtrace`,
