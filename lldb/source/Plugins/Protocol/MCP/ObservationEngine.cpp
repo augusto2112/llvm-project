@@ -1258,8 +1258,16 @@ json::Value ObservationResult::Render() const {
     O["plan_report"] = std::move(Report);
   }
 
-  if (const json::Object *Agg = Aggregate.getAsObject(); Agg && !Agg->empty())
+  if (const json::Object *Agg = Aggregate.getAsObject(); Agg && !Agg->empty()) {
     O["aggregate"] = Aggregate;
+
+    // Beside the aggregate rather than inside it, and only where it qualifies
+    // what is there: a caller testing one key learns whether every field under
+    // it describes the program or a prefix of it. Absent means the program
+    // reached its own end, which is the case every field is read as by default.
+    if (AggregateCoversPrefix)
+      O["aggregate_covers"] = "partial";
+  }
 
   // Above the aggregate in the reading order that matters: a capture that could
   // not be read is a fault in the request, and the aggregate is where a caller
@@ -3054,6 +3062,39 @@ void ObservationEngine::Teardown() {
   }
 }
 
+namespace {
+
+/// The observations that were hit, quoted, for a sentence that has to say which
+/// tracepoints the numbers beside it came from.
+///
+/// Only the ones that were hit, because a plan's other observations contributed
+/// nothing to the count and naming them would make the sentence disagree with
+/// `plan_report`. Bounded, and the remainder counted: a plan of twenty
+/// observations would otherwise put twenty labels in one sentence, which is the
+/// list `plan_report` already is.
+std::string HitLabels(ArrayRef<std::unique_ptr<ObservationSite>> Sites) {
+  constexpr size_t MaxNamed = 3;
+  std::string Out;
+  size_t Named = 0, Beyond = 0;
+  for (const std::unique_ptr<ObservationSite> &Site : Sites) {
+    if (Site->Hits == 0)
+      continue;
+    if (Named == MaxNamed) {
+      ++Beyond;
+      continue;
+    }
+    if (Named != 0)
+      Out += ", ";
+    Out += formatv("\"{0}\"", Site->Obs->Label).str();
+    ++Named;
+  }
+  if (Beyond != 0)
+    Out += formatv(" and {0} more", Beyond).str();
+  return Out;
+}
+
+} // namespace
+
 Expected<ObservationResult> ObservationEngine::Run() {
   m_start = Clock::now();
   m_running_since = m_start;
@@ -3150,6 +3191,42 @@ Expected<ObservationResult> ObservationEngine::Run() {
                 "legitimate.",
                 m_result.ElapsedMs / 1000.0)
             .str());
+
+  // The complementary case, and the one that manufactures a wrong answer rather
+  // than an empty one. A ceiling that ends a run leaves an aggregate over the
+  // hits that happened, shaped exactly like an aggregate over the program: the
+  // value the program would have held at a hit the run never reached is absent
+  // from `values` and absent from `outliers`, where absent already means "never
+  // occurred". This is the argument the `command` tool makes for reporting a
+  // command its ceiling ended as one, made at the field callers are told is
+  // usually the answer.
+  //
+  // The rate is here because it is what a caller sizes the next ceiling with, and
+  // it is the one number neither the elapsed time nor the hit count gives alone.
+  //
+  // Only where there were hits: with none the aggregate is empty and never
+  // rendered, so there is nothing for a reader to mistake for a summary.
+  if (IsAbnormal(m_result.Result) && Hits != 0) {
+    m_result.AggregateCoversPrefix = true;
+
+    // Of the running time rather than the elapsed, because that is what the
+    // ceiling counted and what raising it would extend. Floored so that a run
+    // that ended in its first millisecond divides by something.
+    const double RunningSeconds =
+        std::max(m_result.ElapsedMs - m_result.SetupMs, 1.0) / 1000.0;
+    m_result.Notes.push_back(
+        formatv("the ceiling ended this run with the program still working, so "
+                "\"aggregate\" summarises the {0} hits of {1} reached in {2:F1}s "
+                "-- about {3} a second -- and no later ones. A value missing "
+                "from \"values\" or \"outliers\" may be one the run never "
+                "reached rather than one the program never held. "
+                "\"aggregate_covers\" says this as a field; raise "
+                "\"timeout_seconds\" past what that rate implies to cover the "
+                "whole program.",
+                Hits, HitLabels(m_sites), RunningSeconds,
+                static_cast<uint64_t>(Hits / RunningSeconds))
+            .str());
+  }
 
   if (m_result.Output.Truncated)
     m_result.Notes.push_back(

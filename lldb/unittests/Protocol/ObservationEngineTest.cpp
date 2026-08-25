@@ -826,6 +826,32 @@ TEST(ObservationEngineTest, CycleIsReportedWhenOneWasFound) {
   EXPECT_NE(S.find("\"repeats\":40"), std::string::npos);
 }
 
+TEST(ObservationEngineTest, AnAggregateOverAPrefixSaysSoBesideItself) {
+  // Every field of an aggregate is shaped the same whether the run reached the
+  // end of the program or a ceiling stopped it a third of the way through, so a
+  // value the run never got to is reported exactly as a value the program never
+  // held. Beside the aggregate rather than inside it, because it qualifies all
+  // of it.
+  ObservationResult Result;
+  Result.Result = Outcome::TimedOut;
+  Result.Aggregate = llvm::json::Object{{"scale", llvm::json::Object{}}};
+  Result.AggregateCoversPrefix = true;
+
+  EXPECT_NE(Render(Result.Render()).find("\"aggregate_covers\":\"partial\""),
+            std::string::npos);
+}
+
+TEST(ObservationEngineTest, AnAggregateOverAWholeRunIsNotQualified) {
+  // Absent is what a reader takes as "this describes the program", which is the
+  // ordinary case and must not spend a field saying so.
+  ObservationResult Result;
+  Result.Result = Outcome::Exited;
+  Result.Aggregate = llvm::json::Object{{"scale", llvm::json::Object{}}};
+
+  EXPECT_EQ(Render(Result.Render()).find("aggregate_covers"),
+            std::string::npos);
+}
+
 TEST(ObservationEngineTest, TailIsInlinedOnlyWhenTheProgramEndedBadly) {
   EXPECT_FALSE(IsAbnormal(Outcome::Exited));
   EXPECT_TRUE(IsAbnormal(Outcome::Crashed));

@@ -861,6 +861,21 @@ struct ObservationResult {
   /// the emitted events.
   llvm::json::Value Aggregate = nullptr;
 
+  /// Whether \ref Aggregate covers a prefix of the program rather than the whole
+  /// of it, because a ceiling ended the run while it still had work to do.
+  ///
+  /// Reported because the two are otherwise the same response. A summary of a
+  /// prefix is shaped exactly like a summary of a run: a value the program would
+  /// have held at a hit that was never reached is missing from `values`, missing
+  /// from `outliers`, and indistinguishable there from a value the program never
+  /// held at all. Those want opposite responses -- run for longer, or act on the
+  /// answer -- and `outliers` is the field a caller is told is usually the answer.
+  ///
+  /// Measured on a program making 100,000 calls with one mishandled value at call
+  /// 61,804: at a 120-second ceiling the run reached 30,000 of them and reported
+  /// an aggregate that read like the whole program's.
+  bool AggregateCoversPrefix = false;
+
   /// A repeating block the end of the run kept traversing. For a program that
   /// did not terminate this is the answer.
   std::optional<CycleReport> Cycle;

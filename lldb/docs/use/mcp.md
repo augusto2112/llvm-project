@@ -280,6 +280,14 @@ Read `aggregate` first. For each captured expression it gives the distinct
 values with counts, the changes between them, and `outliers`: the values seen
 only once or twice among many hits. That last field is usually the answer.
 
+`aggregate_covers: "partial"` appears beside it when a ceiling ended the run while
+the program still had work to do, and every field under `aggregate` then describes
+the hits that were reached rather than the program. That distinction is invisible
+otherwise: a value the run never got to is missing from `values` and missing from
+`outliers`, where missing already reads as "never happened". The accompanying note
+gives the hit rate, which is what a second run's `timeout_seconds` should be sized
+against.
+
 A scalar capture is keyed by its value, so `values` is an object and a capture
 that never varied collapses to `"false x4012"`. A capture with structure keeps
 that structure: `values` becomes a list of `value`/`count` pairs and each `value`
