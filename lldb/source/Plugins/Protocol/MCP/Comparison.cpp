@@ -130,7 +130,7 @@ enum class Shape {
 struct Compared {
   std::map<std::string, Side> ByLabel;
 
-  Shape Shown = Shape::AsIs;
+  Shape How = Shape::AsIs;
 
   /// Whether every run that has a value for this said the same thing, against
   /// \p Runs runs that could say anything at all. A run that is missing it
@@ -166,7 +166,7 @@ public:
   /// serialization, and shown as the document it is.
   void AddSummary(StringRef Name, StringRef Label, const json::Value &Summary) {
     Compared &Row = Ensure(Name);
-    Row.Shown = Shape::Summary;
+    Row.How = Shape::Summary;
     Row.ByLabel[Label.str()] = Side{Render(Summary), Summary};
   }
 
@@ -175,7 +175,7 @@ public:
   /// part company on.
   void AddStream(StringRef Name, StringRef Label, std::string Text) {
     Compared &Row = Ensure(Name);
-    Row.Shown = Shape::Stream;
+    Row.How = Shape::Stream;
     Row.ByLabel[Label.str()].Key = std::move(Text);
   }
 
@@ -675,7 +675,7 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
       continue;
     }
     json::Object Sides;
-    switch (Row.Shown) {
+    switch (Row.How) {
     case Shape::AsIs:
       for (const auto &[Label, Answer] : Row.ByLabel)
         Sides[Label] = Bounded(Answer.Shown);
@@ -794,12 +794,19 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
       std::string Key = Render(json::Object(Described));
       if (FailureByKey.try_emplace(Key, std::move(Described)).second)
         FailureOrder.push_back(Key);
-      FailureIn[std::move(Key)].push_back(Run.Label);
+      // Once per run: a run that reported one failure twice must not count twice
+      // towards "every run said this", which is what decides whether the labels
+      // appear at all.
+      std::vector<std::string> &In = FailureIn[std::move(Key)];
+      if (In.empty() || In.back() != Run.Label)
+        In.push_back(Run.Label);
     }
     for (const std::string &Note : Run.Result->Notes) {
       if (!NoteIn.count(Note))
         NoteOrder.push_back(Note);
-      NoteIn[Note].push_back(Run.Label);
+      std::vector<std::string> &In = NoteIn[Note];
+      if (In.empty() || In.back() != Run.Label)
+        In.push_back(Run.Label);
     }
   }
 

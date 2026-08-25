@@ -186,19 +186,42 @@ read, so a longer series is a series of calls whose answers are read one at a ti
 The response is the differences rather than one report per run. `runs` is a row per
 run — how it ended, how long it took, its hit counts — and then:
 
-- `diverged` names each thing that differed and what each run said about it.
-- `first_divergent_hit` is the hit at which two runs stopped agreeing, with what
+- `diverged` names each thing that differed and what each run said about it. What is
+  compared is how each run ended, its exit status and the line it stopped on, what it
+  wrote on `stdout` and on `stderr`, and per observation its counts and each
+  capture's value under `<label>.<expr>`. How a capture resolved is compared apart
+  from its value, at `<label>.<expr>.capture`, and only where it resolved some way
+  other than as a plain variable path. What a capture cost is not compared at all:
+  two timings are never equal, and a clock is a property of the machine rather than
+  of the run.
+- `first_divergent_hit` is the hit at which the runs stopped agreeing, with what
   each saw there keyed by capture. For a miscompile that is the answer: everything
-  before it is the same computation and everything after is a consequence. When one
-  run simply got further, that is not a disagreement about any hit and it says
-  `identical_through` instead. The comparison is over the hits each run kept, and
-  says when there were more than that.
+  before it is the same computation and everything after is a consequence. The
+  baseline is the first run that produced a result and every later run is compared
+  against it, so `saw` carries the baseline plus each run that differed at that hit —
+  a run that agreed there is not listed. When one run simply got further, that is not
+  a disagreement about any hit and it says `identical_through` instead. The
+  comparison is over the hits each run kept, and says when there were more than that.
+- `capture_failures` and `notes` are reported once each, deduplicated across the
+  runs, carrying an `in` that names the runs only where the runs disagree about them:
+  two runs failing at the same name is one fault in the request rather than a
+  difference between them.
 - `agreed` is a list of **names**, not values: the answer to "did my change affect
   anything else" is a line rather than a diffing exercise.
 
+Two things are shortened rather than given whole, because a comparison holds two of
+everything and a response is charged for its size on every later turn. A pair of
+capture summaries is cut to the histogram entries whose counts differ, keeping
+`distinct` and `values_elided`, so a difference of one value among twenty-eight costs
+one value and not two histograms. And a program's output never goes in the document:
+identical output collapses to one name under `agreed`, and output that differs is
+reported as `first_differing_line` with that line from each run.
+
 A run that could not be made at all is a row carrying its error, and the other runs
 still answer — a change that stops the program from starting is the difference being
-looked for, not a reason to fail the call.
+looked for, not a reason to fail the call. Agreement is decided against the runs that
+produced a result, so one run failing to launch does not turn every row of the others
+into a one-sided difference.
 
 #### Sampled stacks
 
