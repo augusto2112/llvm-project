@@ -59,6 +59,7 @@
 #include <cmath>
 #include <cstdint>
 #include <memory>
+#include <numeric>
 #include <optional>
 #include <string>
 #include <thread>
@@ -2886,6 +2887,50 @@ Expected<ObservationResult> ObservationEngine::Run() {
       ToMs(std::chrono::duration_cast<Micros>(Clock::now() - m_start));
   m_result.Aggregate = m_aggregator.Render();
   m_result.Profile = m_profile.Render();
+
+  // A run whose tracepoints all resolved and none of which ever fired. Said in
+  // one sentence because it is the one conclusion the per-observation numbers do
+  // not draw: each one reports `"hits": 0` truthfully, and a caller reading a
+  // list of them has to notice that every entry says the same thing before it can
+  // ask why. Measured on a run that spent 325 seconds arriving at that list.
+  //
+  // Only when something resolved. Where nothing did, the observation's own error
+  // names what matched no code and suggests the nearest thing that would have,
+  // which is a better answer than this one and already there.
+  //
+  // `no_progress_seconds` is named and no value is suggested, and the default
+  // stays off. A plan whose tracepoints legitimately fire near the end of a long
+  // run is not a plan to cut short, and nothing here knows which kind this was:
+  // two agents that reached this state picked 40 and 20 seconds, neither from
+  // anything the run had told them.
+  // Read from the sites rather than from the reports, which are filled in
+  // further down: reading them here reported that nothing had been hit on a run
+  // whose own `plan_report` said a hundred hits, which is worse than saying
+  // nothing.
+  //
+  // Locations are read from the breakpoint for the same reason the report re-reads
+  // them there -- a name in a library that loaded during the run resolves when it
+  // loads, and the count taken before the launch would call that unresolved.
+  const uint64_t Hits =
+      std::accumulate(m_sites.begin(), m_sites.end(), uint64_t{0},
+                      [](uint64_t Sum, const std::unique_ptr<ObservationSite> &S) {
+                        return Sum + S->Hits;
+                      });
+  const bool AnyResolved =
+      any_of(m_sites, [](const std::unique_ptr<ObservationSite> &S) {
+        return S->Breakpoint && S->Breakpoint->GetNumLocations() != 0;
+      });
+  if (Hits == 0 && AnyResolved)
+    m_result.Notes.push_back(
+        formatv("no tracepoint in this plan was hit in the {0:F2} s the run "
+                "took, though every location resolved: the code they name was "
+                "never reached. \"no_progress_seconds\" ends a run like this "
+                "early, and is off unless asked for because a plan whose "
+                "tracepoints only fire near the end of a long run is "
+                "legitimate.",
+                m_result.ElapsedMs / 1000.0)
+            .str());
+
   if (m_result.Output.Truncated)
     m_result.Notes.push_back(
         formatv("only the last {0} bytes of each of the program's own output "

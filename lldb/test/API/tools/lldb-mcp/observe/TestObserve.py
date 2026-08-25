@@ -1576,6 +1576,62 @@ class ObserveTestCase(TestBase):
         notes = " ".join(with_formatter.get("notes", []))
         self.assertNotIn("no data formatter matched", notes, notes)
 
+    def test_a_run_that_hit_nothing_says_so(self):
+        """A plan whose tracepoints all resolved and never fired draws the
+        conclusion the per-observation counts leave to the reader."""
+        self.build()
+
+        # crash_now is only reached in the crash mode, so in any other run the
+        # location resolves and the code is never reached.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "crash_now", "capture": ["null_pointer"]}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["crash_now"]
+        # The numbers that were already there, and are individually true.
+        self.assertGreaterEqual(report["resolved_locations"], 1)
+        self.assertEqual(report["hits"], 0, str(report))
+
+        notes = " ".join(document.get("notes", []))
+        self.assertIn("no tracepoint in this plan was hit", notes, notes)
+        # Named, because a caller that has just spent a whole timeout arriving
+        # here has no other way to find it. Not given a value: nothing in the run
+        # knows whether these tracepoints were late or unreachable.
+        self.assertIn("no_progress_seconds", notes, notes)
+
+        # And not said when nothing resolved: there the observation's own error
+        # names what matched no code and suggests the nearest name that would
+        # have, which is the better answer and already reported.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "compute_valu"}],
+            }
+        )
+        notes = " ".join(document.get("notes", []))
+        self.assertNotIn("no tracepoint in this plan was hit", notes, notes)
+
+        # Nor when a tracepoint was hit, which is the case that has to be read
+        # from the same place the hit counts come from. Reading it from the
+        # reports instead said "nothing was hit" on a run whose own plan_report
+        # said a hundred hits, because the reports are filled in afterwards.
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "record_bucket", "capture": ["bucket"]}],
+            }
+        )
+        self.assertEqual(document["plan_report"]["record_bucket"]["hits"], 100)
+        notes = " ".join(document.get("notes", []))
+        self.assertNotIn("no tracepoint in this plan was hit", notes, notes)
+
     def test_a_condition_that_cannot_be_evaluated_says_so(self):
         """A `when` that never resolves is reported as a condition, not left as
         an observation that recorded nothing."""

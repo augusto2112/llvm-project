@@ -136,6 +136,13 @@ separately as `setup_ms` -- does not spend the budget for running it. That last 
 because a plan whose triggers only fire near the end of a long run is
 legitimate.
 
+A run whose tracepoints all resolved and none of which ever fired says so in
+`notes`, and names `no_progress_seconds` there. Each observation reports `hits: 0`
+truthfully, and drawing the conclusion from a list of them is left to the reader
+otherwise — which for a plan that spends its whole timeout getting there is a
+whole timeout too late. No value is suggested: nothing in the run knows whether
+those tracepoints were unreachable or merely late.
+
 **An empty `observe` list is crash triage.** The program runs untouched and the
 result is how it ended, with a ranked backtrace, locals and source at the
 failure. That is the shortest useful plan:
