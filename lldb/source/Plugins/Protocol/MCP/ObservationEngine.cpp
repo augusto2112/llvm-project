@@ -834,6 +834,46 @@ void StackProfile::Record(lldb::tid_t Tid, ArrayRef<RawFrame> InnermostFirst) {
   }
 }
 
+lldb::tid_t StackProfile::BusiestThread() const {
+  /// What one thread's samples hold, which is what separates a thread doing work
+  /// from a thread that merely existed for the same length of time.
+  struct Work {
+    /// Samples whose innermost frame resolved to source.
+    uint64_t Resolved = 0;
+
+    /// Distinct innermost frames, which is one for a thread parked in a wait
+    /// however long the run lasted.
+    uint64_t Sites = 0;
+
+    /// Samples the thread was alive across, which is all this used to rank on.
+    uint64_t Alive = 0;
+  };
+
+  std::map<lldb::tid_t, Work> Threads;
+  for (const auto &[Key, S] : m_sites) {
+    Work &W = Threads[Key.first];
+    if (!S.File.empty())
+      W.Resolved += S.Samples;
+    ++W.Sites;
+  }
+  for (auto &[Tid, W] : Threads)
+    if (auto It = m_per_thread.find(Tid); It != m_per_thread.end())
+      W.Alive = It->second;
+
+  lldb::tid_t Busiest = 0;
+  Work Best;
+  // Ascending thread id, with a strict comparison, so that a genuine tie is
+  // resolved the same way every run rather than by whatever order the map was
+  // built in.
+  for (const auto &[Tid, W] : Threads)
+    if (Busiest == 0 || std::tie(W.Resolved, W.Sites, W.Alive) >
+                            std::tie(Best.Resolved, Best.Sites, Best.Alive)) {
+      Busiest = Tid;
+      Best = W;
+    }
+  return Busiest;
+}
+
 json::Value StackProfile::Render() const {
   // Too few samples to be a profile rather than a coincidence.
   if (m_samples < MinProfileSamples)
@@ -907,14 +947,13 @@ json::Value StackProfile::Render() const {
   // actually spinning appeared in every sample and in none of them as the leaf.
   //
   // Of the busiest thread's samples, because two threads share nothing but the
-  // bottom of the stack and a path common to both would describe neither.
-  lldb::tid_t Busiest = 0;
+  // bottom of the stack and a path common to both would describe neither. Which
+  // thread that is is a question about what the samples hold, not about how many
+  // there were: see \ref BusiestThread.
+  const lldb::tid_t Busiest = BusiestThread();
   uint64_t Best = 0;
-  for (const auto &[Tid, Count] : m_per_thread)
-    if (Count > Best) {
-      Best = Count;
-      Busiest = Tid;
-    }
+  if (auto It = m_per_thread.find(Busiest); It != m_per_thread.end())
+    Best = It->second;
 
   struct Covering {
     StringRef Function;
@@ -938,8 +977,15 @@ json::Value StackProfile::Render() const {
   json::Array Under;
   for (const Covering &Frame : Path)
     Under.push_back(Frame.Function);
-  if (!Under.empty())
+  if (!Under.empty()) {
     O["under"] = std::move(Under);
+    // Which thread the path belongs to. `hot` carries a `tid` per entry and this
+    // carried none, so nothing in the response said that the two describe
+    // different threads -- and on a program with one thread spinning and several
+    // parked, that is the whole of what a reader is trying to establish.
+    if (Threaded)
+      O["under_tid"] = static_cast<int64_t>(Busiest);
+  }
   return O;
 }
 
@@ -2854,11 +2900,31 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
     return;
   }
 
-  lldb::ThreadSP T = P->GetThreadList().GetSelectedThread();
+  // A halt is delivered to the process and reported on its first thread, so a run
+  // this engine stopped named the thread that was *waiting for* the answer:
+  // measured on a program whose main thread was parked in `pthread_join` while a
+  // worker spun, the whole terminal event described `main` in the join, 339 of the
+  // response's 1,100 characters spent saying the program was waiting for itself.
+  // The profile already knows which thread was working, and it has finished
+  // sampling by the time this runs.
+  //
+  // A crash needs none of this and must not get it: the faulting thread is the
+  // answer, and it is the thread the stop is already reported on. `BusiestThread`
+  // returns 0 for a run that was never sampled, so a short hang falls through to
+  // exactly the behaviour it had before.
+  lldb::ThreadSP T;
+  if (Result == Outcome::TimedOut || Result == Outcome::NoProgress)
+    if (const lldb::tid_t Busiest = m_profile.BusiestThread())
+      T = P->GetThreadList().FindThreadByID(Busiest);
+  if (!T)
+    T = P->GetThreadList().GetSelectedThread();
   if (!T)
     T = P->GetThreadList().GetThreadAtIndex(0);
   if (!T)
     return;
+
+  Terminal.Tid = T->GetID();
+  Terminal.ThreadCount = static_cast<uint32_t>(P->GetThreadList().GetSize());
 
   // The thread's own account of why it stopped is the better description of a
   // crash, which is where it says something like EXC_BAD_ACCESS. It is the

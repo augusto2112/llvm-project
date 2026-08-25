@@ -504,6 +504,29 @@ public:
   /// ordinary case for a program that finishes before the first sample is due.
   llvm::json::Value Render() const;
 
+  /// The thread whose samples say what the run was doing, or 0 when nothing was
+  /// sampled.
+  ///
+  /// Not the one with the most samples. Every live thread is recorded at every
+  /// sample, so a per-thread count measures how long a thread existed and not
+  /// what it did, and any two threads alive across the same samples tie exactly:
+  /// measured on five subjects, 14 against 14, 14 against 14, 15 against 15. On a
+  /// tie an ordered scan hands the answer to the lowest thread id, which is the
+  /// one created first. Two programs differing only in the order of two
+  /// `pthread_create` calls, both threads spinning identically, reported a
+  /// different thread as the busy one.
+  ///
+  /// Ranked instead on what the samples of each thread contain. First on samples
+  /// whose innermost frame resolved to source, which is the same partition a
+  /// backtrace is ranked by and for the same reason: a thread parked in a library
+  /// wait is sampled as often as one burning a core and resolves nothing. Then on
+  /// how many distinct places the thread was found in, because a parked thread has
+  /// exactly one innermost frame for the whole run and a working thread's moves.
+  /// Then on how long it was alive, and last on the thread id, so that two threads
+  /// that really are doing the same thing get a stable answer rather than an
+  /// arbitrary one.
+  lldb::tid_t BusiestThread() const;
+
   /// Functions named in `hot`. The innermost frame of every sample is one
   /// function, so this is a bound on how many distinct places the program was
   /// found in, and past a handful the tail is noise however long the run.

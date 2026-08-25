@@ -900,10 +900,16 @@ TEST(StackProfileTest, AWaitingThreadDoesNotOutrankAWorkingOne) {
   // thread is sampled as often, and its innermost frame is the same every time
   // while the working thread's moves, so counting alone reported the idle thread
   // as the hottest place in the program.
+  //
+  // The counts are equal here because on a real program they are: every live
+  // thread is recorded at every sample, so two threads alive across the same
+  // samples tie exactly -- 14 against 14, 15 against 15 on the subjects this was
+  // measured on. A fixture where the working thread has more samples tests a case
+  // that does not arise.
   StackProfile Profile;
-  for (int I = 0; I < 19; ++I)
+  for (int I = 0; I < 15; ++I)
     Profile.Record(2, Stack({{"__semwait_signal", ""}, {"parked", "p.cpp"}}));
-  for (int I = 0; I < 11; ++I)
+  for (int I = 0; I < 15; ++I)
     Profile.Record(1, Stack({{"mix", "p.cpp"}, {"loop", "p.cpp"}}));
 
   const llvm::json::Value Rendered = Profile.Render();
@@ -918,6 +924,72 @@ TEST(StackProfileTest, AWaitingThreadDoesNotOutrankAWorkingOne) {
             std::optional<llvm::StringRef>("__semwait_signal"));
   EXPECT_EQ(Rendered.getAsObject()->getInteger("threads"),
             std::optional<int64_t>(2));
+
+  // `under` is the field that answers "what is this program doing", and it was
+  // the one still deciding on sample counts alone: with the counts tied it went to
+  // the lowest thread id, describing the sleeping thread while `hot` right above
+  // it described the working one.
+  EXPECT_EQ(Profile.BusiestThread(), 1u);
+  const llvm::json::Array *Under = Rendered.getAsObject()->getArray("under");
+  ASSERT_NE(Under, nullptr);
+  EXPECT_EQ(Render(llvm::json::Value(llvm::json::Array(*Under))),
+            R"(["mix","loop"])");
+  // Which thread the path is of. `hot` says so per entry and this said nothing,
+  // so a response could describe two threads without ever admitting it.
+  EXPECT_EQ(Rendered.getAsObject()->getInteger("under_tid"),
+            std::optional<int64_t>(1));
+}
+
+TEST(StackProfileTest, TwoEquallyBusyThreadsGetTheSameAnswerEveryRun) {
+  // Two threads spinning identically tie on everything there is to rank them by,
+  // and the answer then has to depend on nothing but their identity. Measured on a
+  // pair of programs differing only in the order of two `pthread_create` calls,
+  // `under` described alpha's stack in one and beta's in the other, which is a
+  // report following creation order and saying nothing about the run.
+  auto Sample = [](StackProfile &P, bool AlphaFirst) {
+    for (int I = 0; I < 12; ++I) {
+      if (AlphaFirst) {
+        P.Record(10, Stack({{"alpha_grind", "p.c"}, {"alpha", "p.c"}}));
+        P.Record(11, Stack({{"beta_grind", "p.c"}, {"beta", "p.c"}}));
+      } else {
+        P.Record(11, Stack({{"beta_grind", "p.c"}, {"beta", "p.c"}}));
+        P.Record(10, Stack({{"alpha_grind", "p.c"}, {"alpha", "p.c"}}));
+      }
+    }
+  };
+
+  StackProfile One;
+  Sample(One, /*AlphaFirst=*/true);
+  StackProfile Other;
+  Sample(Other, /*AlphaFirst=*/false);
+  EXPECT_EQ(One.BusiestThread(), Other.BusiestThread());
+  EXPECT_EQ(One.BusiestThread(), 10u);
+}
+
+TEST(StackProfileTest, ThreadRankingCountsWhatASampleHeldNotHowManyThereWere) {
+  // A thread that ran for the whole run and a thread that was created for it are
+  // recorded at the same samples, so the count separates neither from the other.
+  // What separates them is whether their samples resolved to the caller's own
+  // source, and how many distinct places they were found in.
+  StackProfile Parked;
+  for (int I = 0; I < 20; ++I) {
+    Parked.Record(1, Stack({{"__ulock_wait", ""}, {"_pthread_join", ""}}));
+    Parked.Record(2, Stack({{"advance", "p.c"}, {"worker", "p.c"}}));
+  }
+  EXPECT_EQ(Parked.BusiestThread(), 2u);
+
+  // Neither thread resolved anything, so the tie falls to how many places each was
+  // found in: a thread parked in a wait has exactly one for the whole run.
+  StackProfile Blind;
+  for (int I = 0; I < 20; ++I) {
+    Blind.Record(1, Stack({{"__psynch_cvwait", ""}}));
+    Blind.Record(2, Stack({{I % 2 ? "memcpy" : "memmove", ""}}));
+  }
+  EXPECT_EQ(Blind.BusiestThread(), 2u);
+
+  // Nothing sampled has no busiest thread, which is what lets a caller fall back
+  // to whatever the debugger selected.
+  EXPECT_EQ(StackProfile().BusiestThread(), 0u);
 }
 
 TEST(StackProfileTest, TheCoveringPathIsWhereTheRunIsRatherThanWhereTheLeafIs) {
