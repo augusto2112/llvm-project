@@ -11,6 +11,7 @@
 #include "llvm/ADT/StringRef.h"
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/raw_ostream.h"
+#include "gmock/gmock.h"
 #include "gtest/gtest.h"
 #include <cstddef>
 #include <cstdint>
@@ -1109,7 +1110,14 @@ TEST(AggregateTest, NothingIsRareWhenTheTypicalHitIsItselfRare) {
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "p");
   ASSERT_NE(Fields, nullptr);
-  EXPECT_EQ(Fields->get("outliers"), nullptr) << ToString(*Fields).substr(0, 300);
+  // Said rather than left absent, and said as a string where the array would be:
+  // absent is what "nothing was rare" looks like, and these are opposite
+  // readings of the field a caller is told to read first.
+  EXPECT_EQ(Fields->getArray("outliers"), nullptr)
+      << ToString(*Fields).substr(0, 300);
+  EXPECT_THAT(Fields->getString("outliers").value_or("").str(),
+              testing::HasSubstr("withheld"));
+  EXPECT_EQ(Fields->getInteger("outliers_of"), std::optional<int64_t>(1202));
   // Withheld, not hidden: the histogram still shows what dominated.
   EXPECT_NE(Fields->getObject("values")->getInteger("hot0"), std::nullopt);
 }
@@ -1144,11 +1152,64 @@ TEST(AggregateTest, NothingIsRareWhenEveryValueIsDistinct) {
   const llvm::json::Value Summary = Aggregate.Render();
   const llvm::json::Object *Fields = FindFields(Summary, "loop", "id");
   ASSERT_NE(Fields, nullptr);
-  EXPECT_EQ(Fields->get("outliers"), nullptr);
+  EXPECT_EQ(Fields->getArray("outliers"), nullptr);
   EXPECT_EQ(Fields->get("outliers_elided"), nullptr);
+  // The opposite reading of an absent `outliers` is that nothing was rare, and on
+  // this run the two are opposite: everything was. `distinct: 30266` over 30,266
+  // hits and `distinct: 0` rendered the same way, one label apart in the same
+  // response.
+  EXPECT_THAT(Fields->getString("outliers").value_or("").str(),
+              testing::HasSubstr("withheld"));
+  // The denominator of the claim being declined, which `values_elided` makes
+  // unrecoverable from the histogram.
+  EXPECT_EQ(Fields->getInteger("outliers_of"), std::optional<int64_t>(200));
   // Withheld, not hidden: the cardinality that makes the claim meaningless is
   // the first field of the summary.
   EXPECT_EQ(Fields->getInteger("distinct"), std::optional<int64_t>(200));
+}
+
+TEST(AggregateTest, NothingRareAndEverythingRareAreDifferentAnswers) {
+  // Both of these came out of one run, one label apart, and read identically.
+  // `kind` had no outliers because nothing was rare among the hits it saw; `seq`
+  // had none because everything was, `distinct: 30266` over 30,266 hits. Those are
+  // opposite readings of the field a caller is told is usually the answer.
+  Aggregator Aggregate;
+  uint64_t Seq = 0;
+  for (uint64_t I = 0; I < 60; ++I, ++Seq)
+    Aggregate.Record("scale", "kind", I % 2 == 0 ? "0" : "1",
+                     /*IsDocument=*/false, Seq, Seq);
+  for (uint64_t I = 0; I < 60; ++I, ++Seq)
+    Aggregate.Record("scale", "seq", ValueName(I), /*IsDocument=*/false, Seq,
+                     Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Kind = FindFields(Summary, "scale", "kind");
+  const llvm::json::Object *Uniq = FindFields(Summary, "scale", "seq");
+  ASSERT_NE(Kind, nullptr);
+  ASSERT_NE(Uniq, nullptr);
+
+  // Nothing was rare: absent, which is now the only thing absent can mean.
+  EXPECT_EQ(Kind->get("outliers"), nullptr) << ToString(*Kind);
+  // Everything was: a string where the array would be, so a client that reads the
+  // field as a list gets a type error at the point where it would otherwise have
+  // concluded that nothing rare happened.
+  EXPECT_NE(Uniq->getString("outliers"), std::nullopt) << ToString(*Uniq);
+}
+
+TEST(AggregateTest, AShortRunIsSilentRatherThanExplaining) {
+  // Below the observation threshold nothing is said either way. The counts are in
+  // front of the reader -- a run of four hits renders all four values -- so a
+  // sentence declining to call one of them rare costs more than it says.
+  Aggregator Aggregate;
+  for (uint64_t Seq = 0; Seq < Aggregator::MinObservationsForOutliers - 1; ++Seq)
+    Aggregate.Record("loop", "id", ValueName(Seq), /*IsDocument=*/false, Seq,
+                     Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "id");
+  ASSERT_NE(Fields, nullptr);
+  EXPECT_EQ(Fields->get("outliers"), nullptr) << ToString(*Fields);
+  EXPECT_EQ(Fields->get("outliers_of"), nullptr) << ToString(*Fields);
 }
 
 TEST(AggregateTest, ARareValueSurvivesALongTailOfLessRareOnes) {

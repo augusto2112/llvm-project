@@ -222,41 +222,64 @@ json::Value Aggregator::RenderCapture(const CaptureSummary &Summary) {
   // "many" for a value to be rare among, and a run whose typical hit holds a value
   // seen once or twice has nothing for a rare one to be rare against -- there,
   // every value is an outlier, which is another way of saying none is.
-  if (Summary.Total >= MinObservationsForOutliers &&
-      RarityIsMeaningful(ByCount, Summary.Total)) {
-    struct Outlier {
-      std::string Rendered;
-      uint64_t Count;
-      uint64_t FirstSeq;
-      uint64_t FirstHit;
-    };
-    std::vector<Outlier> Rare;
-    for (const auto &[Rendered, Stats] : Summary.Values)
-      if (Stats.Count <= MaxOutlierCount)
-        Rare.push_back({Rendered, Stats.Count, Stats.FirstSeq, Stats.FirstHit});
+  //
+  // The second gate says so rather than staying silent. An absent `outliers` on a
+  // run of 30,266 hits meant either that nothing was rare or that everything was,
+  // and those are opposite readings of the field a caller is told is usually the
+  // answer. The first gate stays silent because a run of a dozen hits has its
+  // counts in front of the reader already.
+  if (Summary.Total >= MinObservationsForOutliers) {
+    if (!RarityIsMeaningful(ByCount, Summary.Total)) {
+      // A string where an array would be, deliberately: a client that reads this
+      // field as a list of outliers cannot mistake it for an empty one, and gets
+      // a type error at the point where it would otherwise conclude that nothing
+      // rare happened.
+      Out["outliers"] = "withheld: a value seen once or twice is what a typical "
+                        "hit here held, so rarity says nothing";
+      Out["outliers_of"] = Summary.Total;
+    } else {
+      struct Outlier {
+        std::string Rendered;
+        uint64_t Count;
+        uint64_t FirstSeq;
+        uint64_t FirstHit;
+      };
+      std::vector<Outlier> Rare;
+      for (const auto &[Rendered, Stats] : Summary.Values)
+        if (Stats.Count <= MaxOutlierCount)
+          Rare.push_back(
+              {Rendered, Stats.Count, Stats.FirstSeq, Stats.FirstHit});
 
-    // Rarest first, and ties broken by where the value was first seen, so the
-    // array never depends on the order the values happen to be stored in.
-    llvm::stable_sort(Rare, [](const Outlier &LHS, const Outlier &RHS) {
-      return std::tie(LHS.Count, LHS.FirstSeq) <
-             std::tie(RHS.Count, RHS.FirstSeq);
-    });
+      // Rarest first, and ties broken by where the value was first seen, so the
+      // array never depends on the order the values happen to be stored in.
+      llvm::stable_sort(Rare, [](const Outlier &LHS, const Outlier &RHS) {
+        return std::tie(LHS.Count, LHS.FirstSeq) <
+               std::tie(RHS.Count, RHS.FirstSeq);
+      });
 
-    if (!Rare.empty()) {
-      // Bounded like the histogram and for the same reason. The order above
-      // puts the rarest first and breaks ties by first sighting, so the entries
-      // a bound drops are the least rare and latest of them.
-      const size_t KeptRare = std::min<size_t>(Rare.size(), MaxOutliers);
-      json::Array Outliers;
-      for (size_t I = 0; I < KeptRare; ++I)
-        Outliers.push_back(json::Object{
-            {"value", Displayed(Rare[I].Rendered, DocumentOf(Rare[I].Rendered))},
-            {"count", Rare[I].Count},
-            {"first_hit", Rare[I].FirstHit},
-            {"first_seq", Rare[I].FirstSeq}});
-      Out["outliers"] = std::move(Outliers);
-      if (KeptRare < Rare.size())
-        Out["outliers_elided"] = Rare.size() - KeptRare;
+      // Absent still means nothing was rare, which is now the only thing it can
+      // mean and is what a reader wants of it.
+      if (!Rare.empty()) {
+        // Bounded like the histogram and for the same reason. The order above
+        // puts the rarest first and breaks ties by first sighting, so the entries
+        // a bound drops are the least rare and latest of them.
+        const size_t KeptRare = std::min<size_t>(Rare.size(), MaxOutliers);
+        json::Array Outliers;
+        for (size_t I = 0; I < KeptRare; ++I)
+          Outliers.push_back(json::Object{
+              {"value",
+               Displayed(Rare[I].Rendered, DocumentOf(Rare[I].Rendered))},
+              {"count", Rare[I].Count},
+              {"first_hit", Rare[I].FirstHit},
+              {"first_seq", Rare[I].FirstSeq}});
+        Out["outliers"] = std::move(Outliers);
+        // What the rare ones were rare among, which is the denominator of the
+        // claim and not recoverable once `values_elided` says the histogram is a
+        // selection. "Seen twice" is not a finding without it.
+        Out["outliers_of"] = Summary.Total;
+        if (KeptRare < Rare.size())
+          Out["outliers_elided"] = Rare.size() - KeptRare;
+      }
     }
   }
 

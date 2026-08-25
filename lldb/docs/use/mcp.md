@@ -317,6 +317,16 @@ approximated. There have to be enough hits for "rare" to be a claim about the ru
 and the values have to repeat: where a capture renders something new at every hit —
 an address, a node id — every value is seen once, so every value is an outlier,
 which is another way of saying that none is.
+That second case *says* so, as `"outliers": "withheld: …"` — a string where the
+array would be, so a client reading it as a list gets a type error rather than an
+empty one. Absent `outliers` therefore means one thing only: nothing was rare. The
+two used to be the same silence, and in one run they were the same silence one
+label apart, where a capture with `distinct: 30266` over 30,266 hits and one where
+nothing was rare read identically. The short-run case stays silent, since a run of
+a dozen hits has all of its counts in front of the reader. Where `outliers` is
+present, `outliers_of` gives the hits they were rare among — the denominator of
+the claim, and not recoverable once `values_elided` says the histogram is a
+selection.
 One vector type among four thousand integers, with the hit where it first
 appeared, is the bug — computed rather than left to be found. Re-run with
 `only_hit` set to that `first_hit` to record that single hit in full detail;
