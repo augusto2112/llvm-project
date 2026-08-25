@@ -356,6 +356,56 @@ TEST(ComparisonTest, TheFirstHitTheyDisagreeOnIsReportedWithWhatEachSaw) {
             R"({"after":{"n":"32"},"before":{"n":"64"}})");
 }
 
+TEST(ComparisonTest, EveryRunIsComparedAgainstTheBaselineAndNotJustTheLast) {
+  // Comparing the first run with the last skipped everything in between, so a
+  // three-run plan whose middle run was the wrong one reported no divergent hit at
+  // all and the wrong run survived as one changed histogram bucket.
+  std::vector<ComparedRun> Runs;
+  Runs.push_back({"good",
+                  MakeRun(Outcome::Exited, 3,
+                          {Tuple({"1"}), Tuple({"2"}), Tuple({"3"})}),
+                  ""});
+  Runs.push_back({"bad",
+                  MakeRun(Outcome::Exited, 3,
+                          {Tuple({"1"}), Tuple({"9"}), Tuple({"3"})}),
+                  ""});
+  Runs.push_back({"also-good",
+                  MakeRun(Outcome::Exited, 3,
+                          {Tuple({"1"}), Tuple({"2"}), Tuple({"3"})}),
+                  ""});
+
+  const llvm::json::Value Out = CompareRuns(Runs);
+  const llvm::json::Object *Loop =
+      Object(Out, "first_divergent_hit")->getObject("loop");
+  ASSERT_NE(Loop, nullptr) << Render(Out);
+  EXPECT_EQ(Loop->getInteger("hit"), std::optional<int64_t>(2));
+  // The baseline and the run that differed from it. The third run saw what the
+  // baseline saw, and listing it would read as three-way disagreement about a hit
+  // two of them agreed on.
+  EXPECT_EQ(Render(*Loop->getObject("saw")),
+            R"({"bad":{"n":"9"},"good":{"n":"2"}})");
+}
+
+TEST(ComparisonTest, TheBaselineIsTheFirstRunThatProducedAResult) {
+  // The field was skipped entirely when the first run failed to launch, so the
+  // documented answer went missing for the case a comparison is most often made to
+  // investigate: a change that stops the program from starting.
+  std::vector<ComparedRun> Runs;
+  Runs.push_back({"missing", std::nullopt, "'/tmp/gone' does not exist"});
+  Runs.push_back({"good",
+                  MakeRun(Outcome::Exited, 2, {Tuple({"1"}), Tuple({"2"})}), ""});
+  Runs.push_back({"bad",
+                  MakeRun(Outcome::Exited, 2, {Tuple({"1"}), Tuple({"9"})}), ""});
+
+  const llvm::json::Value Out = CompareRuns(Runs);
+  const llvm::json::Object *Loop =
+      Object(Out, "first_divergent_hit")->getObject("loop");
+  ASSERT_NE(Loop, nullptr) << Render(Out);
+  EXPECT_EQ(Loop->getInteger("hit"), std::optional<int64_t>(2));
+  EXPECT_EQ(Render(*Loop->getObject("saw")),
+            R"({"bad":{"n":"9"},"good":{"n":"2"}})");
+}
+
 TEST(ComparisonTest, OneRunBeingLongerIsNotADisagreementAboutAnyHit) {
   // Two runs of a program racing a clock differ in how far they got, which is
   // timing rather than behaviour. Reporting a divergence would name a hit at

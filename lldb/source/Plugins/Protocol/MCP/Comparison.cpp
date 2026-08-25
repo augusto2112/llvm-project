@@ -538,43 +538,89 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
     Diverged[Name] = std::move(Sides);
   }
 
-  // The hit at which two runs stopped agreeing, which for a miscompile or a hang
+  // The hit at which the runs stopped agreeing, which for a miscompile or a hang
   // is the answer: everything before it is the same computation and everything
   // after is a consequence.
+  //
+  // Measured against the first run that produced a result rather than against the
+  // last run. Comparing the first with the last skipped every run in between, so a
+  // three-run plan whose middle run was the wrong one reported no divergent hit at
+  // all and left the wrong run visible as one changed histogram bucket; and a first
+  // run that could not be launched suppressed the whole field rather than yielding
+  // the baseline to the run behind it.
   json::Object FirstDiverged;
-  if (Runs.size() >= 2 && Runs.front().Result && Runs.back().Result) {
-    const ComparedRun &A = Runs.front();
-    const ComparedRun &B = Runs.back();
-    for (const std::string &Label : Labels) {
-      const ObservationReport *LHS = FindObservation(*A.Result, Label);
-      const ObservationReport *RHS = FindObservation(*B.Result, Label);
-      if (!LHS || !RHS || LHS->HitTuples.empty() || RHS->HitTuples.empty())
-        continue;
-
-      json::Object Entry;
-      std::optional<size_t> At =
-          FirstDifference(LHS->HitTuples, RHS->HitTuples);
-      if (!At) {
-        // A prefix of the other is not a disagreement about any hit: one run just
-        // kept going. Reported as the count, because that is the difference.
-        if (LHS->HitTuples.size() == RHS->HitTuples.size() &&
-            LHS->HitTuplesDropped == 0 && RHS->HitTuplesDropped == 0)
-          continue;
-        Entry["identical_through"] =
-            static_cast<int64_t>(std::min(LHS->HitTuples.size(),
-                                          RHS->HitTuples.size()));
-        if (LHS->HitTuplesDropped != 0 || RHS->HitTuplesDropped != 0)
-          Entry["beyond_that"] =
-              "not compared; more hits were taken than are kept for comparison";
-      } else {
-        Entry["hit"] = static_cast<int64_t>(*At + 1);
-        json::Object Saw;
-        Saw[A.Label] = DescribeTuple(LHS->HitTuples[*At], LHS->Captures);
-        Saw[B.Label] = DescribeTuple(RHS->HitTuples[*At], RHS->Captures);
-        Entry["saw"] = std::move(Saw);
-      }
-      FirstDiverged[Label] = std::move(Entry);
+  const ComparedRun *Baseline = nullptr;
+  size_t BaselineAt = 0;
+  for (const auto &[At, Run] : enumerate(Runs))
+    if (Run.Result) {
+      Baseline = &Run;
+      BaselineAt = At;
+      break;
     }
+
+  for (const std::string &Label : Labels) {
+    if (!Baseline)
+      break;
+    const ObservationReport *Base = FindObservation(*Baseline->Result, Label);
+    if (!Base || Base->HitTuples.empty())
+      continue;
+
+    // The runs after the baseline with hits of this observation to compare.
+    SmallVector<std::pair<const ComparedRun *, const ObservationReport *>, 4>
+        Others;
+    for (const ComparedRun &Run : Runs.drop_front(BaselineAt + 1)) {
+      if (!Run.Result)
+        continue;
+      const ObservationReport *Report = FindObservation(*Run.Result, Label);
+      if (Report && !Report->HitTuples.empty())
+        Others.emplace_back(&Run, Report);
+    }
+    if (Others.empty())
+      continue;
+
+    // The earliest hit any run disagreed with the baseline at. One entry per
+    // observation, because the question is where the plan first came apart and not
+    // where each run did.
+    std::optional<size_t> Earliest;
+    for (const auto &[Run, Report] : Others)
+      if (std::optional<size_t> At =
+              FirstDifference(Base->HitTuples, Report->HitTuples))
+        Earliest = Earliest ? std::min(*Earliest, *At) : *At;
+
+    json::Object Entry;
+    if (Earliest) {
+      Entry["hit"] = static_cast<int64_t>(*Earliest + 1);
+      json::Object Saw;
+      Saw[Baseline->Label] =
+          DescribeTuple(Base->HitTuples[*Earliest], Base->Captures);
+      // Only the runs that differ there. A run whose own divergence comes later
+      // agrees with the baseline at this hit, and listing it would read as
+      // three-way disagreement about a hit two of them saw the same way.
+      for (const auto &[Run, Report] : Others)
+        if (Report->HitTuples.size() > *Earliest &&
+            Report->HitTuples[*Earliest] != Base->HitTuples[*Earliest])
+          Saw[Run->Label] =
+              DescribeTuple(Report->HitTuples[*Earliest], Report->Captures);
+      Entry["saw"] = std::move(Saw);
+    } else {
+      // A prefix of the others is not a disagreement about any hit: one run just
+      // kept going. Reported as the count, because that is the difference.
+      size_t Shortest = Base->HitTuples.size();
+      bool Dropped = Base->HitTuplesDropped != 0;
+      bool SameLength = true;
+      for (const auto &[Run, Report] : Others) {
+        Shortest = std::min(Shortest, Report->HitTuples.size());
+        Dropped |= Report->HitTuplesDropped != 0;
+        SameLength &= Report->HitTuples.size() == Base->HitTuples.size();
+      }
+      if (SameLength && !Dropped)
+        continue;
+      Entry["identical_through"] = static_cast<int64_t>(Shortest);
+      if (Dropped)
+        Entry["beyond_that"] =
+            "not compared; more hits were taken than are kept for comparison";
+    }
+    FirstDiverged[Label] = std::move(Entry);
   }
 
   json::Object Out{{"runs", std::move(Rows)}};
