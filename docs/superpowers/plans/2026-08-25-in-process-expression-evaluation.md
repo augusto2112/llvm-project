@@ -36,7 +36,7 @@ These were measured against a real arm64 process, not assumed. Do not re-litigat
 
 | File | Responsibility |
 | --- | --- |
-| `lldb/include/lldb/Target/EntryTrampoline.h`, `lldb/source/Target/EntryTrampoline.cpp` | arm64 trampoline encoding and the safety predicate. Pure. |
+| `lldb/include/lldb/Target/EntryTrampoline.h`, `lldb/source/Target/EntryTrampoline.cpp` | arm64 trampoline byte encoding. Pure. |
 | `lldb/include/lldb/Target/FunctionBodySource.h`, `lldb/source/Target/FunctionBodySource.cpp` | Locate a function's textual body. Pure. |
 | `lldb/include/lldb/Target/PatchControlBlock.h`, `lldb/source/Target/PatchControlBlock.cpp` | Inferior-side layout, record codec, ring drain. Pure. |
 | `lldb/include/lldb/Target/PatchSourceBuilder.h`, `lldb/source/Target/PatchSourceBuilder.cpp` | Assemble the generated top-level source. Pure. |
@@ -56,14 +56,14 @@ Tasks 1-4 are pure and independent of each other — they can be built in any or
 
 ### Task 1: arm64 entry trampoline encoder
 
-Pure byte encoding plus the predicate that decides whether a function can be patched at all. No process required.
+Pure byte encoding. The checks that decide whether a function *can* be patched -- its size, a thread parked in the range, a breakpoint overlapping it -- need live process state, so they belong to the manager in Task 7 rather than here.
 
 **Files:**
 - Create: `lldb/include/lldb/Target/EntryTrampoline.h`
 - Create: `lldb/source/Target/EntryTrampoline.cpp`
-- Modify: `lldb/source/Target/CMakeLists.txt` (add `EntryTrampoline.cpp` to the `add_lldb_library(lldbTarget` source list, alphabetically after `DynamicRegisterInfo.cpp`)
+- Modify: `lldb/source/Target/CMakeLists.txt` (add `EntryTrampoline.cpp` to the `add_lldb_library(lldbTarget` source list, in alphabetical order)
 - Create: `lldb/unittests/Target/EntryTrampolineTest.cpp`
-- Modify: `lldb/unittests/Target/CMakeLists.txt` (add `EntryTrampolineTest.cpp` to the `add_lldb_unittest(TargetTests` source list, alphabetically after `ExecutionContextTest.cpp`)
+- Modify: `lldb/unittests/Target/CMakeLists.txt` (add `EntryTrampolineTest.cpp` to the `add_lldb_unittest(TargetTests` source list, in alphabetical order)
 
 **Interfaces:**
 - Consumes: nothing.
