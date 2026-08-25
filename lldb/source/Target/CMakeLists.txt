@@ -19,6 +19,7 @@ add_lldb_library(lldbTarget
   EntryTrampoline.cpp
   CoreFileMemoryRanges.cpp
   ExecutionContext.cpp
+  FunctionBodySource.cpp
   InstrumentationRuntime.cpp
   InstrumentationRuntimeStopInfo.cpp
   JITLoader.cpp
