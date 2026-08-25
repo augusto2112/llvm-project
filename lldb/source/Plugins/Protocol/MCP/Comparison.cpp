@@ -16,6 +16,7 @@
 #include "llvm/Support/JSON.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include <cmath>
 #include <cstdint>
 #include <map>
 #include <optional>
@@ -172,7 +173,13 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
     }
     const ObservationResult &R = *Run.Result;
     Row["outcome"] = ToString(R.Result);
-    Row["elapsed_ms"] = R.ElapsedMs;
+    // Whole milliseconds. `llvm::json` prints a double at max_digits10, so an
+    // elapsed 358.432 goes into the document as 358.43200000000002 and no amount
+    // of rounding beforehand changes that -- the only shape that prints short is
+    // an integer. Nothing is lost: the same binary under the same plan measured
+    // 182 ms and 558 ms in one session, so a fraction of a millisecond is a
+    // digit of noise reported to the width of a measurement.
+    Row["elapsed_ms"] = static_cast<int64_t>(std::llround(R.ElapsedMs));
     if (!R.Terminal.Description.empty())
       Row["ended"] = R.Terminal.Description;
 

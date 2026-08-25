@@ -169,6 +169,28 @@ TEST(ComparisonTest, ARunWithNoLineToReportDoesNotGetAnEmptyOne) {
   EXPECT_EQ(Agreed.find("exit_status"), std::string::npos) << Agreed;
 }
 
+TEST(ComparisonTest, HowLongARunTookIsWholeMilliseconds) {
+  // A double goes into the document at max_digits10, so 358.432 is printed as
+  // 358.43200000000002: thirteen characters per row of a response that is charged
+  // for its size on every later turn, spent on precision the measurement does not
+  // have. The same binary under the same plan measured 182 ms and 558 ms.
+  ObservationResult A = MakeRun(Outcome::Exited, 1, {Tuple({"1"})});
+  ObservationResult B = A;
+  A.ElapsedMs = 358.432;
+  B.ElapsedMs = 0.4;
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  const llvm::json::Array *Rows = Out.getAsObject()->getArray("runs");
+  ASSERT_NE(Rows, nullptr);
+  EXPECT_EQ((*Rows)[0].getAsObject()->getInteger("elapsed_ms"),
+            std::optional<int64_t>(358));
+  EXPECT_EQ(Render(*Rows),
+            R"([{"elapsed_ms":358,"ended":"the program ran to completion",)"
+            R"("hits":{"loop":1},"label":"after","outcome":"exited"},)"
+            R"({"elapsed_ms":0,"ended":"the program ran to completion",)"
+            R"("hits":{"loop":1},"label":"before","outcome":"exited"}])");
+}
+
 TEST(ComparisonTest, TheFirstHitTheyDisagreeOnIsReportedWithWhatEachSaw) {
   // For a miscompile this is the answer: everything before it is the same
   // computation, and everything after is a consequence of this.
