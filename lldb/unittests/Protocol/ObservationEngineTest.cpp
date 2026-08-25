@@ -1730,3 +1730,69 @@ TEST(PrintedValueTest, TwoDumpsSharingAPrefixAndALengthAreTwoValues) {
   EXPECT_NE(PrintedAsValue(Wrote("", A), 300).Text,
             PrintedAsValue(Wrote("", B), 300).Text);
 }
+
+TEST(ObservationEngineTest, ACostNoteDoesNotClaimATotalItCannotKnow) {
+  // The decision is taken while the program is still running, so the only total
+  // available is the hits reached so far -- which made every such note read
+  // "after 66 of 66 hits", a fraction of one, for a run that went on to have
+  // four thousand. The share belongs to the rendered numbers, which are
+  // corrected once the run's total is known.
+  CaptureCostInput In = Cost(Ms(5000), 66, Ms(19639));
+  In.Tier = ValueResolutionTier::Expression;
+  In.Expr = "N->dump()";
+  const CaptureCostDecision D = AssessCaptureCost(In);
+  ASSERT_TRUE(D.Disable);
+  EXPECT_NE(D.Note.find("after 66 hits"), std::string::npos) << D.Note;
+  EXPECT_EQ(D.Note.find("66 of 66"), std::string::npos) << D.Note;
+}
+
+TEST(ObservationEngineTest, AStoppedCaptureSaysWhatItsAggregateCovers) {
+  // A capture turned off partway leaves the aggregate a sample presented as a
+  // summary. Measured on a printer stopped after 66 of 4000 hits: four buckets
+  // totalling 66, with nothing saying the other 3934 were not in them. `hits`
+  // and `observed_hits` sit in different objects, so noticing meant comparing
+  // two numbers three fields apart.
+  ObservationReport Report;
+  Report.At = "visit";
+  Report.Hits = 4000;
+
+  CaptureReport Capture;
+  Capture.Expr = "N->dump()";
+  Capture.Tier = ValueResolutionTier::Expression;
+  Capture.Evaluations = 66;
+  CaptureCostDecision Stopped;
+  Stopped.Disable = true;
+  Stopped.ObservedHits = 66;
+  Stopped.TotalHits = 4000;
+  Stopped.Note = "stopped evaluating \"N->dump()\" after 66 hits.";
+  Capture.Disabled = std::move(Stopped);
+  Report.Captures.push_back(std::move(Capture));
+
+  const std::string S = Render(Report.Render());
+  EXPECT_NE(S.find("covers those 66 hits and not the 4000"), std::string::npos)
+      << S;
+}
+
+TEST(ObservationEngineTest, ACaptureThatReadNothingHasNoPartialAggregateToWarnOf) {
+  // A capture stopped because it never resolved contributed nothing to the
+  // aggregate, so there is no sample to mistake for a summary, and its own
+  // reason already says why it stopped. The coverage sentence there would be a
+  // second explanation of the same fact.
+  ObservationReport Report;
+  Report.At = "visit";
+  Report.Hits = 4000;
+
+  CaptureReport Capture;
+  Capture.Expr = "Node.chidren";
+  Capture.Tier = ValueResolutionTier::Unresolved;
+  Capture.Evaluations = 1;
+  Capture.Errors = 1;
+  CaptureCostDecision Stopped;
+  Stopped.Disable = true;
+  Stopped.ObservedHits = 1;
+  Stopped.Note = "stopped at the first failure.";
+  Capture.Disabled = std::move(Stopped);
+  Report.Captures.push_back(std::move(Capture));
+
+  EXPECT_EQ(Render(Report.Render()).find("covers those"), std::string::npos);
+}

@@ -549,11 +549,16 @@ lldb_private::mcp::AssessCaptureCost(const CaptureCostInput &In) {
   D.Disable = true;
 
   raw_string_ostream OS(D.Note);
-  OS << formatv("stopped evaluating \"{0}\" after {1} of {2} hits: {3:F2} ms "
-                "per hit projects {4:F2} ms over the {5:F2} ms left, which is "
-                "more than the 1/{6} of it one capture may take.",
-                In.Expr, In.ObservedHits, In.TotalHits, D.PerHitMs,
-                D.ProjectedMs, D.RemainingMs, CaptureCostBudgetDivisor);
+  // "after N hits" rather than "after N of M hits". The M available here is the
+  // hits so far, so the pair always read "after 66 of 66 hits" -- a fraction of
+  // one, from a run that went on to have four thousand. The share is reported
+  // instead by \ref CaptureCostDecision::Render, whose numbers are corrected once
+  // the run's own total is known.
+  OS << formatv("stopped evaluating \"{0}\" after {1} hits: {2:F2} ms "
+                "per hit projects {3:F2} ms over the {4:F2} ms left, which is "
+                "more than the 1/{5} of it one capture may take.",
+                In.Expr, In.ObservedHits, D.PerHitMs, D.ProjectedMs,
+                D.RemainingMs, CaptureCostBudgetDivisor);
   if (std::optional<std::string> Path = SuggestPathForm(In.Expr))
     OS << formatv(" Capture \"{0}\" instead: a path is a memory read, while an "
                   "expression compiles and calls into the observed process.",
@@ -1174,11 +1179,31 @@ json::Value ObservationReport::Render() const {
     for (const CaptureReport &Capture : Captures) {
       if (!Capture.Disabled || Capture.Disabled->Note.empty())
         continue;
-      auto It = llvm::find_if(ByReason, [&](const auto &Entry) {
-        return Entry.first == Capture.Disabled->Note;
-      });
+      std::string Note = Capture.Disabled->Note;
+
+      // What the aggregate holds for a capture that was stopped partway, said
+      // where the reader is told it was stopped. Without this the histogram is a
+      // sample presented as a summary: measured on a printer disabled after 66
+      // of 4000 hits, `values` came back as four buckets totalling 66 with
+      // nothing anywhere saying the other 3934 hits were not in it, and the
+      // counts read as the run's distribution. `hits` and `evaluations` sit in
+      // different objects, so seeing it meant noticing that two numbers three
+      // fields apart disagreed.
+      //
+      // Only for a capture that read something. One stopped because it never
+      // resolved contributed nothing to the aggregate, so there is no partial
+      // summary to warn about, and its own reason already says why.
+      if (Capture.Errors != Capture.Evaluations &&
+          Capture.Disabled->ObservedHits < Hits)
+        Note += formatv(" What \"aggregate\" holds for it covers those {0} hits "
+                        "and not the {1} this observation went on to have.",
+                        Capture.Disabled->ObservedHits, Hits)
+                    .str();
+
+      auto It = llvm::find_if(
+          ByReason, [&](const auto &Entry) { return Entry.first == Note; });
       if (It == ByReason.end())
-        ByReason.push_back({Capture.Disabled->Note, json::Array{Capture.Expr}});
+        ByReason.push_back({std::move(Note), json::Array{Capture.Expr}});
       else
         It->second.push_back(Capture.Expr);
     }
@@ -3541,6 +3566,13 @@ Expected<ObservationResult> ObservationEngine::Run() {
       Rendered.Errors = Capture.Errors;
       Rendered.TotalMs = ToMs(Capture.Spent);
       Rendered.Disabled = Capture.Disabled;
+      // The total the decision was taken against was the hits reached by then,
+      // which for a capture stopped early is a small fraction of the run and
+      // rendered as `"total_hits": 66` beside `"observed_hits": 66`. Corrected
+      // here, where the run is over and the real total is known, so that the pair
+      // is the share of the program the capture actually covered.
+      if (Rendered.Disabled)
+        Rendered.Disabled->TotalHits = Site->Hits;
       Rendered.FromABI =
           Site->Obs->OnReturn && Capture.Expr == ReturnValueCapture;
       Report.Captures.push_back(std::move(Rendered));

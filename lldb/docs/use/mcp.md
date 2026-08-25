@@ -391,6 +391,13 @@ covers. The usual reason is a fact about where the observation is taken rather
 than about any one expression — at a return site none of the function's own names
 can be read — and stating it per capture repeated one sentence once per name.
 
+Where a capture was stopped for cost after reading real values — which is what a
+printer at a hot tracepoint does, since a call costs about 75 ms against a path's
+0.17 ms — the note also says how many hits its part of `aggregate` covers, against
+how many the observation went on to have. Nothing exempts a printer from cost
+control; what changes is that a histogram over 65 of 4000 hits says so where it is
+read, rather than looking like the run's distribution.
+
 A capture that could not be read *at all* is reported at top level in
 `capture_failures`, not only as a count beside the expression. Each entry names
 the observation, the capture as it was written, a `reason` — `no_such_name`,
