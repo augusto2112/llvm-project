@@ -735,7 +735,7 @@ ninja -C /Users/work/Developer/llvm/build TargetTests && \
   /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='FunctionBodySourceTest.*'
 ```
 
-Expected: `[  PASSED  ] 18 tests.`
+Expected: `[  PASSED  ] 17 tests.`
 
 If `AllowsAStaticFunction` fails, the `Depth > 0` guard on the `static` check is missing or wrong: without it the keyword on the declaration is mistaken for storage inside the body.
 
