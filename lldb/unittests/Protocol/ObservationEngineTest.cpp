@@ -68,8 +68,18 @@ CaptureCostInput Cost(Ms Spent, uint64_t ObservedHits, Ms Remaining,
   return In;
 }
 
-RawFrame Frame(std::string Function, std::string File, uint32_t Line = 1) {
-  return RawFrame{std::move(Function), std::move(File), Line};
+RawFrame Frame(std::string Function, std::string File, uint32_t Line = 1,
+               uint32_t Index = 0) {
+  return RawFrame{std::move(Function), std::move(File), Line, Index};
+}
+
+/// A backtrace with the unwinder's own frame indices filled in, which is the only
+/// way a real one arrives and what anything read out of a frame afterwards
+/// depends on.
+std::vector<RawFrame> Backtrace(std::vector<RawFrame> Frames) {
+  for (size_t I = 0, E = Frames.size(); I != E; ++I)
+    Frames[I].Index = static_cast<uint32_t>(I);
+  return Frames;
 }
 
 } // namespace
@@ -471,6 +481,62 @@ TEST(ObservationEngineTest, RankingOfNothingIsNothing) {
   EXPECT_TRUE(RankFrames({}).empty());
 }
 
+TEST(ObservationEngineTest, RankingCarriesTheUnwinderIndexOfEachFrame) {
+  // Everything read out of a frame afterwards -- its locals, its source listing,
+  // a `frame select` in a follow-up run -- is addressed by the unwinder's index,
+  // and ranking folds, drops and reorders, so a position in the ranked list says
+  // nothing about a position on the stack. Measured on a null dereference reached
+  // through `strlen`: frame 0 is `_platform_strlen` with no source and no
+  // variables, and the frame the report names is frame 1.
+  std::vector<RankedFrame> Ranked = RankFrames(
+      Backtrace({Frame("_platform_strlen", ""), Frame("sum_labels", "/s/a.c", 29),
+                 Frame("score", "/s/a.c", 35)}));
+  ASSERT_EQ(Ranked.size(), 2u);
+  EXPECT_EQ(Ranked[0].Function, "sum_labels");
+  EXPECT_EQ(Ranked[0].Index, 1u);
+  EXPECT_EQ(Ranked[1].Index, 2u);
+}
+
+TEST(ObservationEngineTest, AFoldedRunIsIndexedWhereItsLocationCameFrom) {
+  // A run of one function keeps the location nearest the failure, so the index
+  // has to follow the location: read from the run's outermost frame instead, the
+  // locals would belong to a different call than the line the entry reports.
+  std::vector<RankedFrame> Ranked = RankFrames(Backtrace(
+      {Frame("thunk", ""), Frame("recurse", ""), Frame("recurse", "/s/a.c", 7),
+       Frame("main", "/s/a.c", 40)}));
+  ASSERT_EQ(Ranked.size(), 2u);
+  EXPECT_EQ(Ranked[0].Function, "recurse");
+  EXPECT_EQ(Ranked[0].Repeats, 2u);
+  EXPECT_EQ(Ranked[0].Line, 7u);
+  EXPECT_EQ(Ranked[0].Index, 2u);
+}
+
+TEST(ObservationEngineTest, RankingCountsTheSourcelessFramesItDropped) {
+  // A shorter list is not a quieter one. Reported against `frames_total`, a
+  // reduction that counts nothing reads as one that never happened: measured on a
+  // crash reporting `frames_total: 5` beside three frames and no omission at all.
+  uint32_t Dropped = 99;
+  std::vector<RankedFrame> Ranked = RankFrames(
+      Backtrace({Frame("stub", ""), Frame("MyPass::run", "/src/Pass.cpp", 3),
+                 Frame("thunk", "")}),
+      &Dropped);
+  ASSERT_EQ(Ranked.size(), 1u);
+  EXPECT_EQ(Dropped, 2u);
+
+  // A run of identical sourceless frames counts once per raw frame, so that the
+  // total a caller checks against is a count of frames throughout.
+  Dropped = 99;
+  RankFrames(Backtrace({Frame("thunk", ""), Frame("thunk", ""),
+                        Frame("thunk", ""), Frame("f", "/src/a.cpp", 1)}),
+             &Dropped);
+  EXPECT_EQ(Dropped, 3u);
+
+  // Nothing was dropped when nothing had source: the frames were kept instead.
+  Dropped = 99;
+  RankFrames(Backtrace({Frame("stub", ""), Frame("thunk", "")}), &Dropped);
+  EXPECT_EQ(Dropped, 0u);
+}
+
 TEST(ObservationEngineTest, SystemPathsAreJudgedByRoot) {
   EXPECT_TRUE(IsSystemSourcePath("/usr/include/stdio.h"));
   EXPECT_TRUE(IsSystemSourcePath("/opt/homebrew/include/foo.h"));
@@ -508,6 +574,127 @@ TEST(ObservationEngineTest, ResultAlwaysCarriesAnOutcomeAndATerminalEvent) {
   EXPECT_NE(S.find("\"outcome\":\"crashed\""), std::string::npos);
   EXPECT_NE(S.find("signal SIGSEGV"), std::string::npos);
   EXPECT_NE(S.find("MyPass::run"), std::string::npos);
+}
+
+TEST(ObservationEngineTest, TerminalNamesTheFrameItsLocalsWereReadFrom) {
+  // The trio names a frame that is generally not frame zero, and everything else
+  // under the key was read there. Without the index a reader cannot select it in
+  // a follow-up run, and cannot tell that the locals belong to the frame the trio
+  // names rather than to the innermost one.
+  TerminalEvent Terminal;
+  Terminal.Description = "EXC_BAD_ACCESS";
+  Terminal.Function = "sum_labels";
+  Terminal.File = "/s/a.c";
+  Terminal.Line = 29;
+  Terminal.FrameIndex = 1;
+
+  const llvm::json::Value Rendered = Terminal.Render();
+  EXPECT_EQ(Rendered.getAsObject()->getInteger("frame"),
+            std::optional<int64_t>(1));
+
+  // Frame zero is the case a reader assumes, so saying so is bytes spent on
+  // nothing.
+  Terminal.FrameIndex = 0;
+  EXPECT_EQ(Terminal.Render().getAsObject()->get("frame"), nullptr);
+}
+
+TEST(ObservationEngineTest, TerminalNamesTheThreadOnlyWhenThereWereSeveral) {
+  // A crash names the thread that faulted and a halt names the thread that was
+  // working, neither of which need be the first one; with several threads running,
+  // which one the frames belong to is a choice the report made.
+  TerminalEvent Terminal;
+  Terminal.Description = "the program was still running";
+  Terminal.Tid = 4211;
+  Terminal.ThreadCount = 3;
+  EXPECT_EQ(Terminal.Render().getAsObject()->getInteger("tid"),
+            std::optional<int64_t>(4211));
+
+  Terminal.ThreadCount = 1;
+  EXPECT_EQ(Terminal.Render().getAsObject()->get("tid"), nullptr);
+}
+
+TEST(ObservationEngineTest, TerminalNamesTheDirectoryItsFramesShareOnce) {
+  // Measured on a compiler backtrace of 14 frames over 7 files: the `file` keys
+  // and values were 1,478 of the 3,207 characters the list cost, and a
+  // 65-character build-directory prefix appeared in every one of them.
+  TerminalEvent Terminal;
+  Terminal.Description = "EXC_BAD_ACCESS";
+  Terminal.File = "/Users/me/build/src/llvm/lib/CodeGen/CodeGenPrepare.cpp";
+  Terminal.Line = 7052;
+  Terminal.Frames = {
+      RankedFrame{"optimizePhiType",
+                  "/Users/me/build/src/llvm/lib/CodeGen/CodeGenPrepare.cpp",
+                  7052},
+      RankedFrame{"PassManager::run",
+                  "/Users/me/build/src/llvm/include/llvm/IR/PassManagerImpl.h",
+                  76}};
+
+  const llvm::json::Value Value = Terminal.Render();
+  const llvm::json::Object *O = Value.getAsObject();
+  EXPECT_EQ(O->getString("file_root"),
+            std::optional<llvm::StringRef>("/Users/me/build/src/llvm"));
+  EXPECT_EQ(O->getString("file"),
+            std::optional<llvm::StringRef>("lib/CodeGen/CodeGenPrepare.cpp"));
+  EXPECT_EQ((*O->getArray("frames"))[1].getAsObject()->getString("file"),
+            std::optional<llvm::StringRef>("include/llvm/IR/PassManagerImpl.h"));
+
+  // Never expressed by leaving `file` out: an absent file already means the frame
+  // resolved no source, and a reader cannot be made to read it two ways.
+  for (const llvm::json::Value &Frame : *O->getArray("frames"))
+    EXPECT_NE(Frame.getAsObject()->get("file"), nullptr);
+}
+
+TEST(ObservationEngineTest, ASharedRootIsOnlyNamedWhenItPays) {
+  // The field costs its own key and the root's own length, so it has to remove
+  // more than it adds: one frame shares a prefix with nothing, and a short prefix
+  // is not worth a term.
+  TerminalEvent Terminal;
+  Terminal.Description = "EXC_BAD_ACCESS";
+  Terminal.File = "/Users/me/build/src/llvm/lib/CodeGen/CodeGenPrepare.cpp";
+  Terminal.Frames = {RankedFrame{
+      "optimizePhiType", "/Users/me/build/src/llvm/lib/CodeGen/CodeGenPrepare.cpp",
+      7052}};
+  EXPECT_EQ(Terminal.Render().getAsObject()->get("file_root"), nullptr);
+
+  Terminal.File = "/a/x.c";
+  Terminal.Frames = {RankedFrame{"f", "/a/x.c", 1}, RankedFrame{"g", "/a/y.c", 2}};
+  const llvm::json::Value Value = Terminal.Render();
+  const llvm::json::Object *O = Value.getAsObject();
+  EXPECT_EQ(O->get("file_root"), nullptr);
+  EXPECT_EQ(O->getString("file"), std::optional<llvm::StringRef>("/a/x.c"));
+}
+
+TEST(ObservationEngineTest, ASharedRootNeverSplitsADirectoryName) {
+  // `slot-3` and `slot-30` share six characters and no directory at all, and a
+  // reader joining that prefix onto a relative path would name a file that is not
+  // there.
+  TerminalEvent Terminal;
+  Terminal.Description = "EXC_BAD_ACCESS";
+  Terminal.Frames = {
+      RankedFrame{"f", "/Users/me/experiment/work/slot-3/src/a.cpp", 1},
+      RankedFrame{"g", "/Users/me/experiment/work/slot-30/src/b.cpp", 2}};
+  EXPECT_EQ(Terminal.Render().getAsObject()->getString("file_root"),
+            std::optional<llvm::StringRef>("/Users/me/experiment/work"));
+}
+
+TEST(ObservationEngineTest, TerminalFrameTotalIsWhatItShowsPlusWhatItLeftOut) {
+  // `frames_total` is the number the shorter list is checked against, so every
+  // reduction has to be counted into the omission or the two cannot be made to
+  // meet.
+  TerminalEvent Terminal;
+  Terminal.Description = "EXC_BAD_ACCESS";
+  Terminal.FramesTotal = 9;
+  Terminal.FramesOmitted = 4;
+  Terminal.Frames = {RankedFrame{"f", "/a/x.c", 1, /*Index=*/0, /*Repeats=*/3},
+                     RankedFrame{"g", "/a/x.c", 2, /*Index=*/3, /*Repeats=*/2}};
+
+  const llvm::json::Value Value = Terminal.Render();
+  const llvm::json::Object *O = Value.getAsObject();
+  int64_t Shown = 0;
+  for (const llvm::json::Value &Frame : *O->getArray("frames"))
+    Shown += Frame.getAsObject()->getInteger("repeats").value_or(1);
+  EXPECT_EQ(Shown + O->getInteger("frames_omitted").value_or(0),
+            O->getInteger("frames_total").value_or(0));
 }
 
 TEST(ObservationEngineTest, ReportKeepsTheThreeHitCountsApart) {

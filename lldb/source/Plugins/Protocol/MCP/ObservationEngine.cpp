@@ -53,6 +53,7 @@
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/JSON.h"
+#include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
 #include <algorithm>
 #include <chrono>
@@ -610,7 +611,10 @@ bool lldb_private::mcp::IsSystemSourcePath(StringRef File) {
 }
 
 std::vector<RankedFrame>
-lldb_private::mcp::RankFrames(ArrayRef<RawFrame> Frames) {
+lldb_private::mcp::RankFrames(ArrayRef<RawFrame> Frames, uint32_t *RawDropped) {
+  if (RawDropped)
+    *RawDropped = 0;
+
   // Folding comes first and runs over unwinder order, because adjacency is what
   // makes a repeated name recursion rather than a coincidence.
   std::vector<RankedFrame> Folded;
@@ -619,10 +623,13 @@ lldb_private::mcp::RankFrames(ArrayRef<RawFrame> Frames) {
       RankedFrame &Run = Folded.back();
       ++Run.Repeats;
       // A run entered through more than one call site carries the location
-      // nearest the failure, which is the innermost one to resolve a file.
+      // nearest the failure, which is the innermost one to resolve a file. The
+      // index follows the location: it exists so that what is read out of the
+      // frame agrees with what the entry says about it.
       if (Run.File.empty() && !Frame.File.empty()) {
         Run.File = Frame.File;
         Run.Line = Frame.Line;
+        Run.Index = Frame.Index;
         Run.IsSystem = IsSystemSourcePath(Run.File);
       }
       continue;
@@ -632,20 +639,30 @@ lldb_private::mcp::RankFrames(ArrayRef<RawFrame> Frames) {
     Ranked.Function = Frame.Function;
     Ranked.File = Frame.File;
     Ranked.Line = Frame.Line;
+    Ranked.Index = Frame.Index;
     Ranked.IsSystem = IsSystemSourcePath(Frame.File);
     Folded.push_back(std::move(Ranked));
   }
 
   std::vector<RankedFrame> WithSource;
+  uint32_t Dropped = 0;
   for (const RankedFrame &Frame : Folded)
-    if (!Frame.File.empty())
+    if (Frame.File.empty())
+      Dropped += Frame.Repeats;
+    else
       WithSource.push_back(Frame);
 
   // Keeping the sourceless frames when none has source is what stops a stripped
   // binary from reporting no location at all. Where the program is remains the
   // answer even where the source does not exist.
-  std::vector<RankedFrame> Kept =
-      WithSource.empty() ? std::move(Folded) : std::move(WithSource);
+  std::vector<RankedFrame> Kept;
+  if (WithSource.empty()) {
+    Kept = std::move(Folded);
+  } else {
+    Kept = std::move(WithSource);
+    if (RawDropped)
+      *RawDropped = Dropped;
+  }
 
   // Stable, so that within each group the innermost frame stays innermost:
   // among the program's own frames, order is the answer.
@@ -689,10 +706,81 @@ std::string lldb_private::mcp::CollapseTemplateArguments(StringRef Function) {
   return Out;
 }
 
-json::Value RankedFrame::Render() const {
+namespace {
+
+/// Characters a shared directory prefix has to reach before naming it once pays
+/// for the field that names it.
+///
+/// Measured on a compiler backtrace of 14 frames over 7 distinct files: the
+/// `file` keys and values were 1,478 of the 3,207 characters the frame list cost,
+/// and a 65-character build-directory prefix appeared in every one of them. It is
+/// the same argument template arguments are collapsed by -- what the repetition
+/// distinguishes between the entries is nothing, because it is identical in all
+/// of them.
+constexpr size_t MinSharedFileRoot = 24;
+
+/// The directory every path in \p Files lies under, or empty when they share too
+/// little of one for naming it to pay.
+///
+/// Compared component by component rather than character by character, so the
+/// answer is always a directory and never a prefix stopping halfway through the
+/// name of one: sibling directories `slot-3` and `slot-30` share six characters
+/// and no directory at all, and a reader joining that prefix back onto a relative
+/// path would name a file that does not exist.
+std::string CommonSourceDirectory(ArrayRef<StringRef> Files) {
+  if (Files.size() < 2)
+    return std::string();
+
+  const StringRef First = sys::path::parent_path(Files.front());
+  SmallVector<StringRef, 16> Shared;
+  for (auto It = sys::path::begin(First), E = sys::path::end(First); It != E;
+       ++It)
+    Shared.push_back(*It);
+
+  for (const StringRef File : Files.drop_front()) {
+    const StringRef Dir = sys::path::parent_path(File);
+    size_t Common = 0;
+    auto It = sys::path::begin(Dir), E = sys::path::end(Dir);
+    for (; Common < Shared.size() && It != E && *It == Shared[Common];
+         ++Common, ++It) {
+    }
+    Shared.truncate(Common);
+    if (Shared.empty())
+      return std::string();
+  }
+
+  // Cut out of the path the components were walked from rather than rebuilt by
+  // joining them, so the root is spelled with the separators the program's own
+  // paths use.
+  const StringRef Last = Shared.back();
+  const StringRef Root =
+      First.take_front(Last.data() - First.data() + Last.size());
+  if (Root.size() < MinSharedFileRoot)
+    return std::string();
+  return Root.str();
+}
+
+/// \p File with \p Root and the separator after it removed, or \p File whole
+/// when it does not lie under \p Root.
+std::string RelativeToRoot(StringRef File, StringRef Root) {
+  if (Root.empty() || !File.starts_with(Root))
+    return File.str();
+  StringRef Rest = File.drop_front(Root.size());
+  while (!Rest.empty() && sys::path::is_separator(Rest.front()))
+    Rest = Rest.drop_front();
+  // A path that is the root itself keeps its own spelling, because a relative
+  // path of nothing names no file.
+  if (Rest.empty())
+    return File.str();
+  return Rest.str();
+}
+
+} // namespace
+
+json::Value RankedFrame::Render(StringRef FileRoot) const {
   json::Object O{{"function", Function}};
   if (!File.empty()) {
-    O["file"] = File;
+    O["file"] = RelativeToRoot(File, FileRoot);
     if (Line != 0)
       O["line"] = static_cast<int64_t>(Line);
   }
@@ -993,15 +1081,50 @@ json::Value TerminalEvent::Render() const {
     O["exit_status"] = static_cast<int64_t>(*ExitStatus);
   if (!Function.empty())
     O["function"] = Function;
+
+  // The directory the frames share, said once. A backtrace of a build tree is
+  // the same absolute prefix once per frame, which distinguishes nothing between
+  // them; what a reader needs an absolute path for is opening the file, and the
+  // root plus a relative path is that path.
+  //
+  // Only from two frames up, where there is something to share, and only past a
+  // length where the field that names it costs less than the repetition it
+  // removes.
+  std::string FileRoot;
+  if (Frames.size() >= 2) {
+    SmallVector<StringRef, 24> Paths;
+    for (const RankedFrame &Frame : Frames)
+      if (!Frame.File.empty())
+        Paths.push_back(Frame.File);
+    if (!File.empty())
+      Paths.push_back(File);
+    FileRoot = CommonSourceDirectory(Paths);
+  }
+  if (!FileRoot.empty())
+    O["file_root"] = FileRoot;
+
   if (!File.empty()) {
-    O["file"] = File;
+    O["file"] = RelativeToRoot(File, FileRoot);
     if (Line != 0)
       O["line"] = static_cast<int64_t>(Line);
   }
+
+  // Absent means zero, which is the case a reader assumes and the one a stack
+  // with source at its innermost frame produces. Present, it is what a follow-up
+  // run has to select before any of this frame's names resolve.
+  if (FrameIndex != 0)
+    O["frame"] = static_cast<int64_t>(FrameIndex);
+
+  // Which thread this is, once there is more than one for it to be. Everything
+  // under this key describes one thread, and with several running that is a
+  // choice the report made rather than a fact about the program.
+  if (ThreadCount > 1 && Tid != LLDB_INVALID_THREAD_ID)
+    O["tid"] = static_cast<int64_t>(Tid);
+
   if (!Frames.empty()) {
     json::Array Rendered;
     for (const RankedFrame &Frame : Frames)
-      Rendered.push_back(Frame.Render());
+      Rendered.push_back(Frame.Render(FileRoot));
     O["frames"] = std::move(Rendered);
     O["frames_total"] = static_cast<int64_t>(FramesTotal);
     if (FramesOmitted != 0)
@@ -1474,6 +1597,7 @@ FrameIdentity IdentifyFrame(StackFrame *Frame, Target &Tgt) {
 RawFrame DescribeFrame(StackFrame &Frame) {
   RawFrame Described;
   SymbolContext SC = Frame.GetSymbolContext(lldb::eSymbolContextEverything);
+  Described.Index = Frame.GetFrameIndex();
   // Collapsed here, where a name enters the engine, so that the terminal event,
   // a hit's frame, an event backtrace and the profile all report the same
   // spelling. Two instantiations of one function template fold together as a
@@ -2742,19 +2866,35 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
     Raw.push_back(DescribeFrame(*Frame));
   }
 
-  Terminal.Frames = RankFrames(Raw);
+  uint32_t Dropped = 0;
+  Terminal.Frames = RankFrames(Raw, &Dropped);
+  Terminal.FramesOmitted = Dropped;
   if (Terminal.Frames.size() > MaxTerminalFrames) {
-    Terminal.FramesOmitted =
-        static_cast<uint32_t>(Terminal.Frames.size() - MaxTerminalFrames);
+    // Counted in raw frames rather than in entries, so that the total the report
+    // gives is the sum of what it shows and what it left out. An entry standing
+    // for a run of eight recursive frames is eight of the total, and subtracting
+    // one for it would leave a reader unable to make the numbers meet.
+    for (size_t I = MaxTerminalFrames, E = Terminal.Frames.size(); I < E; ++I)
+      Terminal.FramesOmitted += Terminal.Frames[I].Repeats;
     Terminal.Frames.resize(MaxTerminalFrames);
   }
   if (!Terminal.Frames.empty()) {
     Terminal.Function = Terminal.Frames.front().Function;
     Terminal.File = Terminal.Frames.front().File;
     Terminal.Line = Terminal.Frames.front().Line;
+    Terminal.FrameIndex = Terminal.Frames.front().Index;
   }
 
-  lldb::StackFrameSP Frame = T->GetStackFrameAtIndex(0);
+  // Read out of the frame the report names, not out of frame zero. Ranking drops
+  // the frames that resolved no source, so the two agree only when the innermost
+  // raw frame had source -- and a fault inside a library does not: a null
+  // dereference reached through `strlen` stops in `_platform_strlen`, which has
+  // no variables and no source, while the frame the report names has both.
+  //
+  // Read from the wrong frame the fields do not disagree visibly, they vanish:
+  // the response still names a function, a file and a line, and drops the locals
+  // and the listing that would let a reader check them.
+  lldb::StackFrameSP Frame = T->GetStackFrameAtIndex(Terminal.FrameIndex);
   if (!Frame)
     return;
 

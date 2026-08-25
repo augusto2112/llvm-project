@@ -391,6 +391,12 @@ struct RawFrame {
   std::string File;
 
   uint32_t Line = 0;
+
+  /// Where the unwinder had this frame, so that anything read out of the frame
+  /// afterwards is read out of the one the report names. Ranking reorders, folds
+  /// and drops frames, so a position in the reported list says nothing about a
+  /// position on the stack.
+  uint32_t Index = 0;
 };
 
 /// One frame as the terminal event reports it.
@@ -399,6 +405,11 @@ struct RankedFrame {
   std::string File;
   uint32_t Line = 0;
 
+  /// The unwinder's index for the frame this entry's location came from, which is
+  /// what `frame select` takes and what the locals beside the report were read
+  /// from.
+  uint32_t Index = 0;
+
   /// Consecutive frames of the same function folded into this entry, 1 when
   /// nothing was folded.
   uint32_t Repeats = 1;
@@ -406,7 +417,9 @@ struct RankedFrame {
   /// Whether the frame's file lies outside the source tree.
   bool IsSystem = false;
 
-  llvm::json::Value Render() const;
+  /// \p FileRoot is a directory prefix already reported once beside the list,
+  /// which \ref File is emitted relative to. Empty to emit it whole.
+  llvm::json::Value Render(llvm::StringRef FileRoot = llvm::StringRef()) const;
 };
 
 /// Whether \p File belongs to a toolchain or system location rather than to the
@@ -445,7 +458,14 @@ std::string CollapseTemplateArguments(llvm::StringRef Function);
 /// second reduction, so when no frame has source the unresolved frames are
 /// kept: where the program is remains the answer even when the source does not
 /// exist.
-std::vector<RankedFrame> RankFrames(llvm::ArrayRef<RawFrame> Frames);
+///
+/// \p RawDropped, when given, receives the number of raw frames the second
+/// reduction discarded, so that a caller can report a total against which the
+/// list it prints is a reduction. A shorter list is not a quieter one, and a
+/// count that only some of the reductions contribute to reads as if the others
+/// never happened.
+std::vector<RankedFrame> RankFrames(llvm::ArrayRef<RawFrame> Frames,
+                                   uint32_t *RawDropped = nullptr);
 
 /// Where a program spent its time, accumulated from stacks sampled while it ran.
 ///
@@ -706,13 +726,31 @@ struct TerminalEvent {
   std::string File;
   uint32_t Line = 0;
 
+  /// The unwinder's index for that frame, which is what \ref Locals and \ref
+  /// Source were read from and what a follow-up run has to select to read
+  /// anything else there.
+  ///
+  /// Reported because it is rarely zero and a reader has no way to work it out:
+  /// ranking drops the frames that resolved no source, so a fault inside a
+  /// library -- a null dereference reached through `strlen` -- names a frame
+  /// several hops out from where the unwinder stopped.
+  uint32_t FrameIndex = 0;
+
+  /// The thread the frames, locals and source belong to, and how many the
+  /// process had. A crash names the thread that faulted and a halt names the
+  /// thread that was doing the work, neither of which need be the first.
+  lldb::tid_t Tid = LLDB_INVALID_THREAD_ID;
+  uint32_t ThreadCount = 0;
+
   std::vector<RankedFrame> Frames;
 
   /// Frames the unwinder produced, against which the ranked list is a
   /// reduction.
   uint32_t FramesTotal = 0;
 
-  /// Frames dropped from \ref Frames after ranking.
+  /// Raw frames not represented in \ref Frames, whether a bound or a ranking
+  /// reduction left them out, so that \ref FramesTotal is the sum of this and
+  /// the repeat counts of what is reported.
   uint32_t FramesOmitted = 0;
 
   llvm::json::Object Locals;
