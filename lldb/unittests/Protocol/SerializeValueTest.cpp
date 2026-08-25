@@ -353,6 +353,40 @@ TEST(SerializeValueTest, AnOversizeValueComesBackAsItsOwnValueAlone) {
             std::string::npos);
 }
 
+TEST(SerializeValueTest, AnOversizeValueRefundsTheBudgetItsWalkSpent) {
+  // The walk that produced the rejected rendering is not what the caller gets
+  // back, so charging for it makes one value's discarded reading the reason the
+  // next value cannot be read. Measured on one frame of a compiler: a local
+  // reached 73 of the frame's 96 shared nodes, was rejected for size, and left 25
+  // other locals as bare elision markers.
+  auto Root = MakeLeaf("I", "0x1040");
+  for (int I = 0; I < 12; ++I)
+    Root->Children.push_back(
+        MakeLeaf("field" + std::to_string(I), std::string(20, 'x')));
+
+  unsigned Budget = 40;
+  SerializeValueOptions Opts;
+  Opts.MaxRenderedChars = 120;
+  Opts.SharedBudget = &Budget;
+  FakeNodeRef Ref(Root);
+  const std::string S = ToString(SerializeValue(Ref, Opts));
+  ASSERT_NE(S.find("_elided"), std::string::npos) << S;
+
+  // One node: what the shallow re-walk actually read.
+  EXPECT_EQ(Budget, 39u);
+
+  // A value that fits is charged in full, so the refund is about the discard and
+  // not about the cap being set at all.
+  Budget = 40;
+  auto Small = MakeLeaf("n", "42");
+  Small->Children.push_back(MakeLeaf("a", "1"));
+  Small->Children.push_back(MakeLeaf("b", "2"));
+  FakeNodeRef SmallRef(Small);
+  EXPECT_NE(ToString(SerializeValue(SmallRef, Opts)).find("\"a\""),
+            std::string::npos);
+  EXPECT_EQ(Budget, 37u);
+}
+
 TEST(CondenseDiagnosticTest, ExpressionDiagnosticKeepsOnlyTheErrorLine) {
   // The evaluator opens with what language it chose, which is true of every
   // expression, and closes with clang's caret art, which is laid out for a

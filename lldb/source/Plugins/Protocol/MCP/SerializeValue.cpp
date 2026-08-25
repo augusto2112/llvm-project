@@ -288,6 +288,8 @@ std::string lldb_private::mcp::CondenseDiagnostic(StringRef Message,
 json::Value
 lldb_private::mcp::SerializeValue(ValueNode &Root,
                                   const SerializeValueOptions &Opts) {
+  const unsigned Before =
+      Opts.SharedBudget ? *Opts.SharedBudget : Opts.MaxNodes;
   Serializer S(Opts);
   json::Value Out = S.Run(Root, 0);
   if (Opts.SharedBudget)
@@ -311,6 +313,18 @@ lldb_private::mcp::SerializeValue(ValueNode &Root,
   Shallow.SharedBudget = nullptr;
   Serializer Reduced(Shallow);
   json::Value Small = Reduced.Run(Root, 0);
+
+  // A walk whose result is thrown away must not be charged for. The nodes it
+  // read bought a rendering nobody sees, and where the budget is shared the
+  // values after this one pay for it: measured on one frame of a compiler, a
+  // single local reached 73 of the 96 nodes its frame's locals had between them,
+  // was rejected for size, and left 25 of the others as elision markers -- so
+  // the response spent three quarters of what it had on the one value it then
+  // decided not to show. What survives is the shallow re-walk, which reads the
+  // root and nothing else.
+  if (Opts.SharedBudget)
+    *Opts.SharedBudget = Before != 0 ? Before - 1 : 0;
+
   if (json::Object *Obj = Small.getAsObject())
     Obj->try_emplace("_elided", formatv("{0} characters of members; capture a "
                                         "path naming the one wanted",
