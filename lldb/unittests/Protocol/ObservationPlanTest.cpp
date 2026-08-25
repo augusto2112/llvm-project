@@ -18,6 +18,7 @@
 
 using namespace lldb_private::mcp;
 using ::testing::HasSubstr;
+using ::testing::Not;
 
 namespace {
 
@@ -243,7 +244,15 @@ TEST(ObservationPlanTest, UnrecognizedFieldsAreListedInOneMessage) {
 
 TEST(ObservationPlanTest, ProgramIsRequired) {
   EXPECT_THAT(Rejection(R"({"observe":[]})"), HasSubstr("\"program\""));
-  EXPECT_THAT(Rejection(R"({"program":""})"), HasSubstr("required"));
+  EXPECT_THAT(Rejection(R"({"observe":[]})"), HasSubstr("required"));
+}
+
+TEST(ObservationPlanTest, AnEmptyProgramIsNotAMissingOne) {
+  // An empty string is *present*, and answering it as absent denied what the
+  // caller had just written: told a field it can see in its own request is
+  // "required", it goes looking for a second field of that name.
+  EXPECT_THAT(Rejection(R"({"program":""})"), HasSubstr("empty string"));
+  EXPECT_THAT(Rejection(R"({"program":""})"), Not(HasSubstr("required")));
 }
 
 TEST(ObservationPlanTest, AtIsRequired) {
@@ -315,7 +324,7 @@ TEST(ObservationPlanTest, WronglyTypedFieldsRejected) {
   EXPECT_THAT(Rejection(R"({"program":"p","args":"-v"})"),
               HasSubstr("must be an array of strings"));
   EXPECT_THAT(Rejection(R"({"program":"p","args":[1]})"),
-              HasSubstr("every entry in \"args\" must be a string"));
+              HasSubstr("every entry must be a string"));
   EXPECT_THAT(Rejection(R"({"program":"p","env":{"N":1}})"),
               HasSubstr("must be a string"));
   EXPECT_THAT(Rejection(R"({"program":"p","capture_inferior_output":"yes"})"),
@@ -326,6 +335,43 @@ TEST(ObservationPlanTest, WronglyTypedFieldsRejected) {
               HasSubstr("must be an array of observations"));
   EXPECT_THAT(Rejection(R"({"program":"p","observe":["f"]})"),
               HasSubstr("must be an object"));
+}
+
+TEST(ObservationPlanTest, AWronglyTypedFieldIsQuotedBackAsWritten) {
+  // The field alone does not identify the mistake. A number written as a string
+  // makes "must be a whole number" read as a contradiction until the quotes are
+  // visible, which is why the value is rendered as JSON rather than described --
+  // and `"timeout_seconds": "30"` is a mistake a caller really made.
+  EXPECT_THAT(Rejection(R"({"program":"p","timeout_seconds":"30"})"),
+              HasSubstr("not \"30\""));
+  EXPECT_THAT(Rejection(R"({"program":42})"), HasSubstr("not 42"));
+  EXPECT_THAT(Rejection(R"({"program":"p","capture_inferior_output":"yes"})"),
+              HasSubstr("not \"yes\""));
+  EXPECT_THAT(Rejection(R"({"program":"p","args":"-v"})"),
+              HasSubstr("not \"-v\""));
+  EXPECT_THAT(Rejection(R"({"program":"p","env":[]})"), HasSubstr("not []"));
+  EXPECT_THAT(Rejection(R"({"program":"p","observe":["f"]})"),
+              HasSubstr("this one is \"f\""));
+}
+
+TEST(ObservationPlanTest, AWrongEntryInAnArrayIsSubscripted) {
+  // Which of six entries is at fault is otherwise left to the caller to guess.
+  EXPECT_THAT(Rejection(R"({"program":"p","args":["a","b",3]})"),
+              HasSubstr("\"args\"[2] is 3"));
+  EXPECT_THAT(
+      Rejection(
+          R"({"program":"p","observe":[{"at":"f","capture":["a","","b"]}]})"),
+      HasSubstr("\"capture\"[1] is empty"));
+}
+
+TEST(ObservationPlanTest, AQuotedValueDoesNotPutAWholeDocumentInTheMessage) {
+  // The value came from the caller, and a plan that put a document where a scalar
+  // belonged would otherwise put that document in the error.
+  const std::string Message = Rejection(
+      R"({"program":"p","timeout_seconds":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)"
+      R"(aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})");
+  EXPECT_THAT(Message, HasSubstr("..."));
+  EXPECT_LT(Message.size(), 200u) << Message;
 }
 
 TEST(ObservationPlanTest, OutOfRangeIntegersRejected) {
@@ -341,7 +387,7 @@ TEST(ObservationPlanTest, OutOfRangeIntegersRejected) {
 TEST(ObservationPlanTest, EmptyCaptureExpressionRejected) {
   EXPECT_THAT(
       Rejection(R"({"program":"p","observe":[{"at":"f","capture":["  "]}]})"),
-      HasSubstr("empty expression"));
+      HasSubstr("\"capture\"[0] is empty"));
 }
 
 TEST(ObservationPlanTest, NonObjectPlanRejected) {

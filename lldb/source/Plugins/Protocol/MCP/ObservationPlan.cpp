@@ -83,6 +83,29 @@ std::string QuotedList(ArrayRef<StringRef> Names) {
   return Out;
 }
 
+/// One value as the caller wrote it, for a message that has to say which value was
+/// wrong rather than only which field.
+///
+/// Naming the field alone leaves the caller to find the value, and the mistakes
+/// this answers are ones where the value is the whole of it: `"timeout_seconds":
+/// "30"` is a number written as a string, and "must be a whole number" reads as a
+/// contradiction until the quotes are visible. JSON's own rendering is what shows
+/// them.
+///
+/// Truncated, because the value came from the caller and an error is not the place
+/// to echo an arbitrary amount of it back. What identifies the mistake is the front
+/// of it; a plan that put a whole document where a scalar belonged would otherwise
+/// put that document in the message.
+std::string AsWritten(const json::Value &V) {
+  constexpr size_t MaxChars = 60;
+  std::string Out;
+  raw_string_ostream OS(Out);
+  OS << V;
+  if (Out.size() > MaxChars)
+    return Out.substr(0, MaxChars) + "...";
+  return Out;
+}
+
 Error UnrecognizedFields(const json::Object &Obj, ArrayRef<StringRef> Known,
                          StringRef Where) {
   SmallVector<StringRef, 4> Unknown;
@@ -116,7 +139,9 @@ GetString(const json::Object &Obj, StringRef Field, StringRef Where) {
   std::optional<StringRef> S = V->getAsString();
   if (!S)
     return createStringError(
-        formatv("{0}: \"{1}\" must be a string.", Where, Field).str());
+        formatv("{0}: \"{1}\" must be a string, not {2}.", Where, Field,
+                AsWritten(*V))
+            .str());
   return S->str();
 }
 
@@ -143,7 +168,9 @@ Expected<std::optional<bool>> GetBool(const json::Object &Obj, StringRef Field,
   std::optional<bool> B = V->getAsBoolean();
   if (!B)
     return createStringError(
-        formatv("{0}: \"{1}\" must be true or false.", Where, Field).str());
+        formatv("{0}: \"{1}\" must be true or false, not {2}.", Where, Field,
+                AsWritten(*V))
+            .str());
   return B;
 }
 
@@ -155,7 +182,9 @@ Expected<std::optional<uint32_t>> GetUInt(const json::Object &Obj,
   std::optional<int64_t> N = V->getAsInteger();
   if (!N)
     return createStringError(
-        formatv("{0}: \"{1}\" must be a whole number.", Where, Field).str());
+        formatv("{0}: \"{1}\" must be a whole number, not {2}.", Where, Field,
+                AsWritten(*V))
+            .str());
   if (*N < 0 || *N > std::numeric_limits<uint32_t>::max())
     return createStringError(
         formatv("{0}: \"{1}\" is {2}, which is out of range; it must be "
@@ -174,14 +203,18 @@ GetStringArray(const json::Object &Obj, StringRef Field, StringRef Where) {
   const json::Array *A = V->getAsArray();
   if (!A)
     return createStringError(
-        formatv("{0}: \"{1}\" must be an array of strings.", Where, Field)
+        formatv("{0}: \"{1}\" must be an array of strings, not {2}.", Where,
+                Field, AsWritten(*V))
             .str());
   Out.reserve(A->size());
-  for (const json::Value &Element : *A) {
-    std::optional<StringRef> S = Element.getAsString();
+  for (size_t I = 0; I < A->size(); ++I) {
+    std::optional<StringRef> S = (*A)[I].getAsString();
     if (!S)
+      // Subscripted, because the caller has to find the one entry among the
+      // several it wrote: a six-element `capture` otherwise leaves it guessing.
       return createStringError(
-          formatv("{0}: every entry in \"{1}\" must be a string.", Where, Field)
+          formatv("{0}: \"{1}\"[{2}] is {3}; every entry must be a string.",
+                  Where, Field, I, AsWritten((*A)[I]))
               .str());
     Out.push_back(S->str());
   }
@@ -198,8 +231,8 @@ Expected<StringMap<std::string>> GetEnv(const json::Object &Obj,
   if (!O)
     return createStringError(
         formatv("{0}: \"env\" must be an object mapping variable names to "
-                "string values.",
-                Where)
+                "string values, not {1}.",
+                Where, AsWritten(*V))
             .str());
   for (const auto &KV : *O) {
     std::optional<StringRef> S = KV.second.getAsString();
@@ -254,8 +287,8 @@ Expected<Observation> ParseObservation(const json::Value &V, size_t Index) {
   if (!Obj)
     return createStringError(
         formatv("observation #{0}: every entry in \"observe\" must be an "
-                "object.",
-                Index + 1)
+                "object, and this one is {1}.",
+                Index + 1, AsWritten(V))
             .str());
 
   // The label is read first so that every later message can name the
@@ -320,13 +353,15 @@ Expected<Observation> ParseObservation(const json::Value &V, size_t Index) {
       GetStringArray(*Obj, "capture", Where);
   if (!Capture)
     return Capture.takeError();
-  for (StringRef Expr : *Capture)
-    if (Expr.trim().empty())
+  // Subscripted for the same reason a wrongly typed entry is: with six captures
+  // written, which one is empty is otherwise left to the caller to find.
+  for (size_t I = 0; I < Capture->size(); ++I)
+    if (StringRef((*Capture)[I]).trim().empty())
       return createStringError(
-          formatv("{0}: \"capture\" contains an empty expression. Drop the "
-                  "entry, or drop \"capture\" entirely for a tracepoint that "
-                  "records only hit counts.",
-                  Where)
+          formatv("{0}: \"capture\"[{1}] is empty. Drop the entry, or drop "
+                  "\"capture\" entirely for a tracepoint that records only hit "
+                  "counts.",
+                  Where, I)
               .str());
   Obs.Capture = std::move(*Capture);
 
@@ -761,9 +796,18 @@ lldb_private::mcp::ParseObservationPlan(const json::Value &Plan) {
       GetString(*Obj, "program", Where);
   if (!Program)
     return Program.takeError();
-  if (!*Program || (*Program)->empty())
+  if (!*Program)
     return createStringError(
         "plan: \"program\" is required and is the path to the program to run.");
+  // Separately from absent, because an empty string is *present* and the message
+  // for the missing field denied it: a caller told that a field it had just
+  // written is required goes looking for a second field of that name. Not routed
+  // through `GetNonEmptyString`, whose message offers the default that leaving the
+  // field out would get, because leaving this one out is the error above.
+  if ((*Program)->empty())
+    return createStringError(
+        "plan: \"program\" is an empty string, which names no file. It is the "
+        "path to the program to run.");
   Result.Program = std::move(**Program);
 
   Expected<std::vector<std::string>> Args = GetStringArray(*Obj, "args", Where);
@@ -823,8 +867,11 @@ lldb_private::mcp::ParseObservationPlan(const json::Value &Plan) {
     const json::Array *Array = Observe->getAsArray();
     if (!Array)
       return createStringError(
-          "plan: \"observe\" must be an array of observations. Leave it out to "
-          "run the program with no tracepoints and report only how it ended.");
+          formatv("plan: \"observe\" must be an array of observations, not {0}. "
+                  "Leave it out to run the program with no tracepoints and "
+                  "report only how it ended.",
+                  AsWritten(*Observe))
+              .str());
     Result.Observations.reserve(Array->size());
     for (size_t I = 0; I < Array->size(); ++I) {
       Expected<Observation> Obs = ParseObservation((*Array)[I], I);
@@ -841,10 +888,13 @@ lldb_private::mcp::ParseObservationPlan(const json::Value &Plan) {
     const json::Array *Array = Compare->getAsArray();
     if (!Array)
       return createStringError(
-          "plan: \"compare\" must be an array of runs, each a label and the "
-          "fields of the plan that differ in it: [{\"label\": \"fixed\"}, "
-          "{\"label\": \"before\", \"program\": \"/tmp/opt.before\"}]. Leave it "
-          "out to make the single run the plan describes.");
+          formatv("plan: \"compare\" must be an array of runs, not {0}. Each is "
+                  "a label and the fields of the plan that differ in it: "
+                  "[{{\"label\": \"fixed\"}, {{\"label\": \"before\", "
+                  "\"program\": \"/tmp/opt.before\"}]. Leave it out to make the "
+                  "single run the plan describes.",
+                  AsWritten(*Compare))
+              .str());
     if (Array->size() == 1)
       return createStringError(
           "plan: \"compare\" holds one run, so there is nothing to compare it "
