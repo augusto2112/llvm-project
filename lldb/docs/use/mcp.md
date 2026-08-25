@@ -479,6 +479,17 @@ event is what separates it again. An `on: return` observation reports
 exception or a longjmp does to one: those calls produce no event, and observing
 the function on entry is what counts all of them.
 
+Each capture's own row states how many hits it came back with a value at. A
+capture that resolved as a path and never failed collapses to `"path x4012"`,
+`$return` to `"abi x120"`, and anything with more to say gets an object whose
+`evaluations` and `errors` give the same figure. The count is there because the
+alternative was to infer it: the row named the tier and nothing else, so "read at
+every hit" was the absence of an `errors` field — which is what a silently failing
+capture also looks like. With hand-guessed paths into a compiler's internals that
+is the likely failure, and one run hedged against it by capturing four fields
+redundantly so they could corroborate each other. `not_evaluated` is still its own
+word: a tracepoint that never fired is not a capture that could not be read.
+
 Events themselves live in the artifact, one JSON object per line, and the
 response reports its path and field names. The last few events are included
 inline only when the program ended badly, which is when they are wanted.

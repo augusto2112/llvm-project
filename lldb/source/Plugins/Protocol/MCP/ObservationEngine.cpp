@@ -1063,18 +1063,45 @@ json::Value StackProfile::Render() const {
 //===----------------------------------------------------------------------===//
 
 json::Value CaptureReport::Render() const {
+  // How many hits this capture came back with a value at, said on the row rather
+  // than left to be worked out.
+  //
+  // Every short form here used to be a bare word naming how the capture
+  // resolved, and a word says nothing about whether it then read. The reader is
+  // meant to infer it from what is *absent*: no `errors`, so no failures, so as
+  // many reads as the enclosing observation had hits. From a live run, on
+  // hand-guessed paths into a compiler's internals -- "with paths like
+  // `CondVT.V.SimpleTy`, a silent failure is the likely failure mode, and I would
+  // have read its absence as 'the field was uninteresting'." That run hedged by
+  // capturing four fields redundantly so they could corroborate each other,
+  // which is four times the cost of the answer.
+  //
+  // Spelled as the aggregate spells a value that never varied, `"false x4012"`:
+  // this response already has an idiom for a thing and how many times, and six
+  // characters is what the whole gap costs to close.
+  const uint64_t Read = Evaluations >= Errors ? Evaluations - Errors : 0;
+  const std::string Times = formatv(" x{0}", Read).str();
+
   // `$return` is read out of the ABI's result location rather than resolved
-  // from a name, so it has no tier and costs no evaluation. Reporting it as an
-  // expression that was never evaluated would mark the one capture that cannot
-  // fail as the one that did.
-  if (FromABI)
-    return "abi";
+  // from a name, so it has no tier. It is also left out of `capture_failures`,
+  // there being no name to correct, so the count is the only thing that
+  // distinguishes a return value read at every hit from one never readable at
+  // all -- previously both were the word "abi".
+  if (FromABI) {
+    if (Evaluations == 0)
+      return "not_evaluated";
+    if (Errors == 0)
+      return "abi" + Times;
+    return json::Object{{"tier", "abi"},
+                        {"evaluations", static_cast<int64_t>(Evaluations)},
+                        {"errors", static_cast<int64_t>(Errors)}};
+  }
 
   // A capture that resolved as a path and never failed has nothing to say
-  // beyond how it resolved, and most captures are that.
+  // beyond how it resolved and how often, and most captures are that.
   if (!Disabled && Errors == 0 && FixedExpr.empty() &&
       Tier == ValueResolutionTier::VariablePath)
-    return ToString(Tier);
+    return ToString(Tier).str() + Times;
 
   // Never evaluated is not the same as could not be read: the observation may
   // never have been hit, or its condition never held. The default tier renders
@@ -2269,14 +2296,34 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
   json::Object Values;
   std::string Rendered;
 
-  if (ReadState && Obs.OnReturn && Site.ReturnType.IsValid() && Frame) {
+  if (ReadState && Obs.OnReturn) {
+    // Counted like any other capture, on the capture the caller named. `$return`
+    // is the one expression that cannot be misspelled, so nothing in the report
+    // has ever said anything about it -- it is left out of `capture_failures`
+    // deliberately, since there is no name to correct -- and that left "read at
+    // every hit" and "never readable at all" rendering as the same bare word.
+    // A function returning void is the second case and looks perfectly healthy.
+    //
+    // Counted at every recorded hit rather than only where a value could be
+    // read, so that a count of zero means the observation never fired and
+    // nothing else.
+    ObservationSite::CaptureState *ReturnState = nullptr;
+    for (ObservationSite::CaptureState &Capture : Site.Captures)
+      if (Capture.Expr == ReturnValueCapture) {
+        ReturnState = &Capture;
+        break;
+      }
+    if (ReturnState)
+      ++ReturnState->Evaluations;
+
+    bool Read = false;
     // At the return address the observed frame is already gone, so the value
     // the function produced is read from the ABI's result location rather than
     // from the frame. Captures naming the function's own locals cannot be read
     // here at all, which is what a return observation trades for the result.
-    lldb::ThreadSP T = Frame->GetThread();
+    lldb::ThreadSP T = Frame ? Frame->GetThread() : lldb::ThreadSP();
     Process *P = T ? T->GetProcess().get() : nullptr;
-    if (P) {
+    if (P && Site.ReturnType.IsValid()) {
       if (const lldb::ABISP &ABI = P->GetABI()) {
         if (lldb::ValueObjectSP Result = ABI->GetReturnValueObject(
                 *T, Site.ReturnType, /*persistent=*/false)) {
@@ -2288,7 +2335,8 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
           SOpts.SawExpansion = &m_saw_expansion;
           json::Value V = SerializeValue(Node, SOpts);
           AggregatedValue Filed = AggregateKey(V);
-          if (!IsUnavailable(V))
+          Read = !IsUnavailable(V);
+          if (Read)
             m_aggregator.Record(Obs.Label, ReturnValueCapture, Filed.Key,
                                 Filed.Document, Seq, Hit);
           // The tuple keeps it either way: it is what an emission mode and a
@@ -2300,6 +2348,8 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
         }
       }
     }
+    if (ReturnState && !Read)
+      ++ReturnState->Errors;
   }
 
   // Read once per hit rather than per capture, and only where a capture has

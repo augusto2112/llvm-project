@@ -67,12 +67,24 @@ def documented_example(description):
 def capture_tier(capture):
     """The tier out of a rendered capture report.
 
-    A capture that resolved as a path and never failed collapses to the tier
-    alone, since that is all it has to say.
+    A capture that resolved as a path and never failed collapses to the tier plus
+    the count of hits it read at, `"path x12"`, since that is all it has to say.
     """
     if isinstance(capture, str):
-        return capture
+        return capture.split(" x")[0]
     return capture["tier"]
+
+
+def capture_reads(capture):
+    """How many hits a capture came back with a value at.
+
+    Stated on the row so that "read at every hit" is a positive claim rather than
+    the absence of an `errors` field, which is what a silently failing capture
+    looks like too.
+    """
+    if isinstance(capture, str):
+        return int(capture.split(" x")[1]) if " x" in capture else 0
+    return capture["evaluations"] - capture.get("errors", 0)
 
 
 class MCPConnection:
@@ -293,6 +305,10 @@ class ObserveTestCase(TestBase):
             # tier alone, so this asserts both that it worked and that reaching
             # through the pointer did not cost an expression evaluation.
             self.assertEqual(capture_tier(capture), "path", str(capture))
+            # And the row says how many hits it read at, rather than leaving that
+            # to be inferred from the observation's `hits` and the absence of an
+            # `errors` field.
+            self.assertEqual(capture_reads(capture), 3, str(capture))
 
         kinds = document["aggregate"]["classify_token"]["tok->kind"]["values"]
         self.assertEqual(

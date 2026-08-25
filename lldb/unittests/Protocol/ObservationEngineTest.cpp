@@ -809,12 +809,16 @@ TEST(ObservationEngineTest, ReportKeepsAnUnresolvedLocationVisible) {
   EXPECT_NE(S.find("Did you mean"), std::string::npos);
 }
 
-TEST(ObservationEngineTest, PathCaptureCollapsesToItsTier) {
+TEST(ObservationEngineTest, PathCaptureCollapsesToItsTierAndItsReadCount) {
+  // The tier says how it resolved; the count says it then read, and at how many
+  // hits. Without the count the row states nothing positive at all and a reader
+  // has to infer "read at every hit" from the absence of an `errors` field --
+  // which is exactly the reading a silent failure defeats.
   CaptureReport Capture;
   Capture.Expr = "i";
   Capture.Tier = ValueResolutionTier::VariablePath;
   Capture.Evaluations = 4012;
-  EXPECT_EQ(Render(Capture.Render()), "\"path\"");
+  EXPECT_EQ(Render(Capture.Render()), "\"path x4012\"");
 }
 
 // A capture the run never reached says nothing about whether it could be read.
@@ -840,10 +844,28 @@ TEST(ObservationEngineTest, NeverEvaluatedCaptureIsNotCalledUnavailable) {
 TEST(ObservationEngineTest, ReturnValueCaptureReportsThatItCameFromTheABI) {
   CaptureReport Capture;
   Capture.Expr = "$return";
-  Capture.Evaluations = 0;
   Capture.FromABI = true;
 
-  EXPECT_EQ(Render(Capture.Render()), "\"abi\"");
+  // A return value read at every hit of the return site, said as a count. It is
+  // the only thing that can say so: `$return` is left out of `capture_failures`,
+  // there being no name to correct, so before this the row was the word "abi"
+  // whether the value had been readable at every hit or at none.
+  Capture.Evaluations = 120;
+  EXPECT_EQ(Render(Capture.Render()), "\"abi x120\"");
+
+  // Never readable -- a function returning void is the everyday case, and it
+  // looked perfectly healthy.
+  Capture.Errors = 120;
+  const std::string Failed = Render(Capture.Render());
+  EXPECT_NE(Failed.find("\"errors\":120"), std::string::npos) << Failed;
+  EXPECT_NE(Failed.find("\"tier\":\"abi\""), std::string::npos) << Failed;
+
+  // And an observation that never fired is not a return value that failed. The
+  // count is taken at every recorded hit rather than only where a value could be
+  // read, which is what makes zero mean this and nothing else.
+  Capture.Evaluations = 0;
+  Capture.Errors = 0;
+  EXPECT_EQ(Render(Capture.Render()), "\"not_evaluated\"");
 }
 
 TEST(ObservationEngineTest, DisabledCaptureCarriesItsNumbers) {
@@ -1614,7 +1636,8 @@ TEST(ObservationEngineTest, APassingPlanRendersNoFailureArrayAtAll) {
   std::string S = Render(Result.Render());
   EXPECT_EQ(S.find("capture_failures"), std::string::npos) << S;
   // And the nested per-capture rendering is untouched.
-  EXPECT_NE(S.find("\"captures\":{\"I.Ty\":\"path\"}"), std::string::npos) << S;
+  EXPECT_NE(S.find("\"captures\":{\"I.Ty\":\"path x12\"}"), std::string::npos)
+      << S;
 }
 
 TEST(ObservationEngineTest, AnOutOfScopeNameKeepsItsAttemptsAcrossLocations) {
