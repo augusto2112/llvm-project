@@ -245,23 +245,38 @@ void Multiplexer::HandleRoutedCall(StringRef backend_tool,
   if (std::optional<StringRef> debugger = args.getString("debugger"))
     debugger_arg = debugger->str();
 
+  // Two conditions used to share one message. They have opposite fixes -- one
+  // caller has to start a session, the other has to stop naming a dead one --
+  // and the pid that says which is which was already in hand and thrown away.
   Client *backend = nullptr;
   if (debugger_arg.empty()) {
     // Default to the local session, letting the backend pick its debugger.
     Backend *local = LocalBackend();
-    backend = local ? local->client.get() : nullptr;
     args.erase("debugger");
+    if (!local)
+      return reply(createStringError("no debug session available"));
+    backend = local->client.get();
   } else {
     std::optional<RoutedURI> routed = ParseGlobalURI(debugger_arg);
     if (!routed)
-      return reply(createStringError(
-          formatv("malformed debugger uri \"{0}\"", debugger_arg)));
+      // The shape is given because a bare id is the mistake the field invites:
+      // an id is what the tool this server forwards to accepts, and what a
+      // caller writes if it has read that one's documentation instead.
+      return reply(createStringError(formatv(
+          "malformed debugger uri \"{0}\": a session is named "
+          "lldb-mcp://instance/<pid>/debugger/<id>, as resources/list reports "
+          "it. Omit \"debugger\" and a session is opened as needed.",
+          debugger_arg)));
     backend = RouteToPid(routed->pid);
+    if (!backend)
+      return reply(createStringError(
+          formatv("no instance {0}: no LLDB with that process id is registered "
+                  "here, so the session this uri names has exited or was never "
+                  "on this server. resources/list reports the ones that are. "
+                  "Omit \"debugger\" and a session is opened as needed.",
+                  routed->pid)));
     args["debugger"] = routed->local;
   }
-
-  if (!backend)
-    return reply(createStringError("no debug session available"));
 
   CallToolParams backend_params;
   backend_params.name = backend_tool;
