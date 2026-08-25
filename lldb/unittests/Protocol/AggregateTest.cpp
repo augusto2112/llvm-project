@@ -1034,6 +1034,59 @@ TEST(AggregateTest, AnUndifferentiatedListIsShortenedToOneExample) {
   EXPECT_EQ(Values->begin()->second.getAsInteger(), std::optional<int64_t>(3));
 }
 
+TEST(AggregateTest, AListOneHitFromUniformIsAlsoShortened) {
+  // Exact equality makes the rendering depend on where the run was cut. Measured
+  // on one program: the complete run printed `{"0":1031}` and the same program
+  // stopped at its ceiling printed 313, 313, 312, 312, 312, 312, 312, 312 in full,
+  // 340 characters whose whole content is that one value had one more hit than
+  // another. A spread of one in three hundred is not a fact about the program.
+  Aggregator Aggregate;
+  const size_t Distinct = Aggregator::MaxHistogramValues * 4;
+  uint64_t Seq = 0;
+  for (unsigned Round = 0; Round < 312; ++Round)
+    for (size_t I = 0; I < Distinct; ++I, ++Seq)
+      Aggregate.Record("loop", "id", ValueName(I), /*IsDocument=*/false, Seq,
+                       Seq);
+  // Two more hits of two of the values, which is what cutting the run mid-pass
+  // does and what used to print the list in full.
+  for (size_t I = 0; I < 2; ++I, ++Seq)
+    Aggregate.Record("loop", "id", ValueName(I), /*IsDocument=*/false, Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "id");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Object *Values = Fields->getObject("values");
+  ASSERT_NE(Values, nullptr);
+  EXPECT_EQ(Values->size(), 1u) << ToString(*Values);
+  EXPECT_EQ(Fields->getInteger("values_elided"),
+            std::optional<int64_t>(Distinct - 1));
+}
+
+TEST(AggregateTest, AListWhereOneValueDominatesIsStillEnumerated) {
+  // The other side of the boundary, which is the whole point of the list: a top
+  // count more than an eighth clear of the least of what is kept is a ranking, and
+  // shortening it would drop the answer.
+  Aggregator Aggregate;
+  const size_t Distinct = Aggregator::MaxHistogramValues * 4;
+  uint64_t Seq = 0;
+  for (unsigned Round = 0; Round < 10; ++Round)
+    for (size_t I = 0; I < Distinct; ++I, ++Seq)
+      Aggregate.Record("loop", "id", ValueName(I), /*IsDocument=*/false, Seq,
+                       Seq);
+  // v000 ends on 12 against everything else's 10, which is a fifth clear.
+  for (unsigned Round = 0; Round < 2; ++Round, ++Seq)
+    Aggregate.Record("loop", "id", ValueName(0), /*IsDocument=*/false, Seq, Seq);
+
+  const llvm::json::Value Summary = Aggregate.Render();
+  const llvm::json::Object *Fields = FindFields(Summary, "loop", "id");
+  ASSERT_NE(Fields, nullptr);
+  const llvm::json::Object *Values = Fields->getObject("values");
+  ASSERT_NE(Values, nullptr);
+  EXPECT_EQ(Values->size(), Aggregator::MaxHistogramValues)
+      << ToString(*Values);
+  EXPECT_EQ(Values->getInteger("v000"), std::optional<int64_t>(12));
+}
+
 TEST(AggregateTest, AFewEquallyCommonValuesAreStillEnumerated) {
   // The shortening above applies only where most of the population is dropped
   // anyway. Nine equally common values are worth naming, and a summary that

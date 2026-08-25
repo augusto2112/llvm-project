@@ -350,8 +350,12 @@ histogram cannot be mistaken for the real cardinality, and outliers are ranked
 rarest-first before the bound applies, so what a bound drops is the least rare
 of them. Values and changes are ranked by count, since the question a bounded list
 of counted things answers is which of them dominate; where none does — every entry
-kept carrying the same count, with most of the population dropped regardless — one
-entry stands for the rest and the count beside it says how many.
+kept within an eighth of the same count, with most of the population dropped
+regardless — one entry stands for the rest and the count beside it says how many.
+An eighth rather than exact equality, because exactness makes the rendering depend
+on where the run happened to be cut: the same program printed `{"0":1031}` when it
+ran to the end and eight entries of 313, 313, 312, 312, 312, 312, 312, 312 when a
+ceiling stopped it mid-pass.
 
 A value that could not be read comes back as `unavailable` with the kind, and a
 `reason`: the one line of the debugger's own diagnostic that says what went wrong,

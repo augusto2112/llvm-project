@@ -64,21 +64,31 @@ namespace {
 /// when \p Total of them exist.
 ///
 /// A bounded list of counted things answers "which of these dominate". Where
-/// nothing dominates -- every entry kept carries the same count -- the list has
-/// no answer to give, and each entry past the first repeats what the first said.
-/// That only justifies shortening it further when most of the population is
-/// being dropped anyway: a histogram of nine equally common opcodes is worth
-/// enumerating, and one of two thousand equally common node ids is a sample
-/// whose only content is the count beside it.
+/// nothing dominates -- every entry kept carrying the same count, near enough --
+/// the list has no answer to give, and each entry past the first repeats what the
+/// first said. That only justifies shortening it further when most of the
+/// population is being dropped anyway: a histogram of nine equally common opcodes
+/// is worth enumerating, and one of two thousand equally common node ids is a
+/// sample whose only content is the count beside it.
+///
+/// "Near enough" rather than exactly equal, because exactness makes the rendering
+/// depend on where the run happened to be cut. Measured on one program: the
+/// complete run printed `{"0":1031}` and a run of the same program stopped at its
+/// ceiling printed eight entries of 313, 313, 312, 312, 312, 312, 312, 312 -- 340
+/// characters whose content is that one value had one more hit than another. The
+/// spread allowed is a reciprocal of the bound on the list, so eight entries may
+/// differ by an eighth: below that, which of them is first is a fact about the
+/// moment the program was stopped.
 template <typename T, typename CountOf>
 size_t WorthShowing(llvm::ArrayRef<T> Ranked, size_t Total, CountOf Count) {
   if (Ranked.size() < 2 || Total - Ranked.size() < Ranked.size())
     return Ranked.size();
-  const uint64_t First = Count(Ranked.front());
-  for (const T &Entry : Ranked.drop_front())
-    if (Count(Entry) != First)
-      return Ranked.size();
-  return 1;
+  // Descending, so the first and last of what is kept are the extremes of it.
+  const uint64_t Max = Count(Ranked.front());
+  const uint64_t Min = Count(Ranked.back());
+  if (Max - Min <= Max / Aggregator::MaxHistogramValues)
+    return 1;
+  return Ranked.size();
 }
 
 } // namespace
