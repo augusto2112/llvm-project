@@ -1254,6 +1254,42 @@ TEST(StackProfileTest, WhereNoPlaceDominatesOneStandsForTheList) {
             R"(["foldShuffleToIdentity"])");
 }
 
+TEST(StackProfileTest, ARankingOfOnesAndTwosIsNotARankingHoweverLargeItsShare) {
+  // A share alone has no floor, and the runs it has to hold for are small: 7
+  // samples over 25 s of pinned CPU, then 12, 16, 17, 19, 31, with top entries of
+  // one or two samples apiece. Two samples of sixteen is an eighth exactly, which
+  // the share test passes -- so the collapse fired at seventeen samples and not at
+  // sixteen, and in between printed a ranking of two, two, one, one, one, one.
+  StackProfile Profile;
+  for (int I = 0; I < 8; ++I)
+    Profile.Record(1, Stack({{"leaf" + std::to_string(I % 6), "Casting.h"},
+                             {"spin", "p.cpp"}}));
+
+  const llvm::json::Value Rendered = Profile.Render();
+  const llvm::json::Object *Flat = Rendered.getAsObject();
+  ASSERT_NE(Flat, nullptr);
+  ASSERT_EQ(Profile.Samples(), 8u);
+  EXPECT_EQ(Flat->getArray("hot")->size(), 1u);
+  EXPECT_EQ(Flat->getInteger("hot_elided"), std::optional<int64_t>(5));
+}
+
+TEST(StackProfileTest, FourSamplesInOnePlaceIsEnoughToRankBy) {
+  // The boundary belongs to the ranking: at four samples a count is evidence about
+  // a place, which is the bar a whole run has to clear before its samples say
+  // anything at all.
+  StackProfile Profile;
+  for (int I = 0; I < 4; ++I)
+    Profile.Record(1, Stack({{"hot", "p.cpp"}, {"spin", "p.cpp"}}));
+  for (int I = 0; I < 2; ++I)
+    Profile.Record(1, Stack({{"warm", "p.cpp"}, {"spin", "p.cpp"}}));
+
+  const llvm::json::Value Rendered = Profile.Render();
+  const llvm::json::Object *Ranked = Rendered.getAsObject();
+  ASSERT_NE(Ranked, nullptr);
+  EXPECT_EQ(Ranked->getArray("hot")->size(), 2u);
+  EXPECT_EQ(Ranked->getInteger("hot_elided"), std::nullopt);
+}
+
 TEST(ObservationEngineTest, ACaptureOnAnObservationThatNeverFiredIsAWord) {
   // A tracepoint that was never hit has captures with nothing to report, and their
   // numbers are all zero. Measured on a plan whose three observations included two

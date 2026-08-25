@@ -582,6 +582,22 @@ public:
   /// function responsible.
   static constexpr uint64_t MinHotShareDivisor = 8;
 
+  /// Samples the busiest place has to hold, whatever share of the run that is,
+  /// before naming the places individually says anything.
+  ///
+  /// A share test alone has no floor. Two samples of sixteen is an eighth exactly,
+  /// which passes -- the collapse fires at seventeen samples and not at sixteen --
+  /// and a ranking of eight entries holding two, two, one, one, one, one, one, one
+  /// is not a ranking. The real totals in the corpus are 7 samples over 25 s of
+  /// pinned CPU, then 12, 16, 17, 19 and 31, with top entries of one or two samples
+  /// and between 6 and 19 places elided behind them. One reader of such a profile
+  /// put it exactly: seven samples with a flat one-apiece distribution conveys no
+  /// ranking at all.
+  ///
+  /// Four, matching \ref MinProfileSamples: below that a count is not evidence
+  /// about a place any more than one sample is evidence about a run.
+  static constexpr uint64_t MinHotSamples = 4;
+
   /// Frames of the covering path reported. The innermost are kept: a deep path in
   /// a compiler is mostly the pass manager that every stack ends in, and what
   /// distinguishes this run from any other is at the other end.

@@ -963,7 +963,11 @@ json::Value StackProfile::Render() const {
   // Where no place holds a share of the run, which place was innermost is a fact
   // about the last instruction of an accessor rather than about the program. One
   // entry keeps a file and a line to look at; `under` carries the answer.
-  if (Ranked.front()->Samples * MinHotShareDivisor < m_samples)
+  //
+  // Two tests, because a share alone has no floor: two samples of sixteen is an
+  // eighth exactly and passes, and the run it came from had nothing to rank.
+  if (Ranked.front()->Samples * MinHotShareDivisor < m_samples ||
+      Ranked.front()->Samples < MinHotSamples)
     Kept = 1;
   for (size_t I = 0; I < Kept; ++I) {
     const Site &S = *Ranked[I];
