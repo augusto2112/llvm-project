@@ -280,17 +280,22 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
         Compare.Add(Label + ".error", Run.Label, *Report->ResolutionError);
       for (const CaptureReport &Capture : Report->Captures)
         if (std::optional<std::string> How = DescribeResolution(Capture))
-          Compare.Add(Label + "." + Capture.Expr, Run.Label, std::move(*How));
+          Compare.Add(Label + "." + Capture.Expr + ".capture", Run.Label,
+                      std::move(*How));
     }
 
-    // Rendered per run rather than compared, since two runs' aggregates of one
-    // capture differ in shape as often as in content and the summary is what a
-    // reader wants either way.
+    // What the capture was observed to hold, under the dotted name a reader would
+    // guess for it. This is the row that carries the answer -- `320 x1` against
+    // `282 x1` -- and it was spelled `<label> summary of <expr>`: a phrase that
+    // cannot be named as a path, sorts away from the siblings it belongs beside,
+    // and costs eleven characters per capture to say what the position in the
+    // object already says. The metadata had the dotted name; they are the other
+    // way round now.
     if (const json::Object *Agg = R.Aggregate.getAsObject())
       for (const auto &[Label, Captures] : *Agg)
         if (const json::Object *ByCapture = Captures.getAsObject())
           for (const auto &[Capture, Summary] : *ByCapture)
-            Compare.Add(Label.str() + " summary of " + Capture.str(), Run.Label,
+            Compare.Add(Label.str() + "." + Capture.str(), Run.Label,
                         Truncate(Render(Summary)));
   }
 

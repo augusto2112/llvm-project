@@ -45,7 +45,9 @@ struct ComparedRun {
 ///
 ///   * how each run ended, and where
 ///   * per observation: locations resolved, hits, events emitted, resolution error
-///   * per observation and capture: the rendered summary
+///   * per observation and capture, as `<label>.<expr>`: what the capture was
+///     observed to hold, and under `<label>.<expr>.capture` how it resolved where
+///     that was not the way nearly every capture resolves
 ///   * per observation: the first hit whose captures disagreed, and what each run
 ///     saw there
 ///

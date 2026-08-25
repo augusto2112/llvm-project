@@ -236,6 +236,31 @@ TEST(ComparisonTest, ACaptureThatFailedInBothRunsIsNotADivergence) {
   EXPECT_NE(Agreed.find("loop.n"), std::string::npos) << Agreed;
 }
 
+TEST(ComparisonTest, TheDottedNameHoldsTheValueAndTheMetadataSitsUnderIt) {
+  // The row carrying the answer -- 320 against 282 -- was named `<label> summary
+  // of <expr>`, a phrase that cannot be addressed as a path and sorts away from
+  // the siblings it belongs beside, while the dotted name a reader would guess
+  // held metadata about the capture.
+  ObservationResult A = MakeRun(Outcome::Exited, 1, {Tuple({"320"})});
+  ObservationResult B = MakeRun(Outcome::Exited, 1, {Tuple({"282"})});
+  A.Aggregate = llvm::json::Object{{"loop", llvm::json::Object{{"n", "320 x1"}}}};
+  B.Aggregate = llvm::json::Object{{"loop", llvm::json::Object{{"n", "282 x1"}}}};
+  for (ObservationResult *R : {&A, &B})
+    R->Observations.front().Captures.front().Tier =
+        ValueResolutionTier::Expression;
+
+  const llvm::json::Value Out = CompareRuns(Pair(std::move(A), std::move(B)));
+  const llvm::json::Object *Diverged = Object(Out, "diverged");
+  ASSERT_NE(Diverged, nullptr) << Render(Out);
+  EXPECT_NE(Diverged->get("loop.n"), nullptr) << Render(Out);
+
+  // And how the capture resolved, which both runs agreed on, is named beneath the
+  // value rather than in place of it.
+  const std::string Agreed = Render(*Out.getAsObject()->getArray("agreed"));
+  EXPECT_NE(Agreed.find("loop.n.capture"), std::string::npos) << Agreed;
+  EXPECT_EQ(Agreed.find("summary of"), std::string::npos) << Agreed;
+}
+
 TEST(ComparisonTest, TheFirstHitTheyDisagreeOnIsReportedWithWhatEachSaw) {
   // For a miscompile this is the answer: everything before it is the same
   // computation, and everything after is a consequence of this.
