@@ -20,6 +20,7 @@ add_lldb_library(lldbTarget
   CoreFileMemoryRanges.cpp
   ExecutionContext.cpp
   FunctionBodySource.cpp
+  FunctionPatch.cpp
   InstrumentationRuntime.cpp
   InstrumentationRuntimeStopInfo.cpp
   JITLoader.cpp

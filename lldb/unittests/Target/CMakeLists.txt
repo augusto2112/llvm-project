@@ -22,6 +22,7 @@ add_lldb_unittest(TargetTests
   TargetAPIMutexTest.cpp
   FindFileTest.cpp
   FunctionBodySourceTest.cpp
+  FunctionPatchTest.cpp
 
   LINK_COMPONENTS
       Support
