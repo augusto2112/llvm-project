@@ -922,7 +922,31 @@ void FunctionPatchManager::SilenceSite(lldb::break_id_t BreakID) {
 }
 
 void FunctionPatchManager::SetGate(uint32_t SiteID, bool Open) {
-  // not yet implemented
+  auto Slot = m_site_slots.find(SiteID);
+  if (Slot == m_site_slots.end())
+    return;
+  Process *Proc = m_target.GetProcessSP().get();
+  if (!Proc)
+    return;
+
+  // One byte, so a site reads either the old state or the new one and never
+  // half of each: the injected code loads the gate on a path the debugger
+  // cannot hold still, since the thread that opens a gate is not the only
+  // thread that may be running the patched function.
+  const uint8_t Byte = Open ? 1 : 0;
+  Status WriteError;
+  if (Proc->WriteMemory(Slot->second + offsetof(PatchSiteSlot, Gate), &Byte,
+                        sizeof(Byte), WriteError) == sizeof(Byte))
+    return;
+
+  // Logged rather than returned. A gate that could not be written leaves the
+  // site doing what it was doing before, which for a gate being opened is
+  // nothing and for one being closed is too much; either way the caller's own
+  // per-hit test still decides what is recorded, so this costs accuracy in the
+  // hit count rather than correctness in what is reported.
+  LLDB_LOG(GetLog(LLDBLog::Breakpoints),
+           "site {0}'s gate could not be {1}: {2}", SiteID,
+           Open ? "opened" : "closed", WriteError.AsCString());
 }
 
 void FunctionPatchManager::ForgetProcess() {
