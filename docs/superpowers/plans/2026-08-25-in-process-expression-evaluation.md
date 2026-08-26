@@ -2770,6 +2770,34 @@ class FastConditionsTestCase(TestBase):
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_an_ordinary_breakpoint_on_the_patched_line_still_fires(self):
+        """A plain breakpoint on the same line as a fast condition still works.
+
+        The patched copy's debug info points back at the original source, so
+        lldb re-resolves file:line breakpoints into it -- which puts an ordinary
+        breakpoint at very nearly the address the compiled-in trap is attributed
+        to. A site either causes a trap or attributes one, so the two cannot
+        share an address, and whichever loses must fail visibly rather than look
+        set while never firing.
+        """
+        target = self.setup()
+        conditional = target.BreakpointCreateBySourceRegex(
+            "total += i;", lldb.SBFileSpec("main.c")
+        )
+        conditional.SetCondition("seed == 50000 && i == 1")
+        plain = target.BreakpointCreateBySourceRegex(
+            "total += i;", lldb.SBFileSpec("main.c")
+        )
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        # The unconditional breakpoint is hit on the very first call, long
+        # before the condition could hold.
+        self.assertEqual(plain.GetHitCount(), 1)
+        self.assertEqual(conditional.GetHitCount(), 0)
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_falls_back_without_the_setting(self):
         """With the setting off, nothing is patched and the condition still works.
 
