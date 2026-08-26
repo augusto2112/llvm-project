@@ -252,6 +252,193 @@ class FastConditionsTestCase(TestBase):
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_disabled_breakpoint_does_not_stop(self):
+        """Disabling a breakpoint whose condition is compiled in stops the stops.
+
+        The trap in the copy goes on firing wherever the condition holds, because
+        the condition is all the copy tests. Everything else the breakpoint says
+        about its hits is decided where the hit is reported, exactly as it is for
+        a hit reported at the location's own stop -- so a disabled breakpoint
+        neither stops nor counts.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        # True on the last hundred calls, so that a hit which wrongly stopped
+        # costs a stop that can be counted rather than a wait that cannot.
+        bp.SetCondition("seed >= %d && i == 1" % (CALLS - 100))
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(bp.GetHitCount(), 1)
+
+        bp.SetEnabled(False)
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateExited)
+        self.assertEqual(process.GetExitStatus(), 0)
+        self.assertEqual(
+            bp.GetHitCount(), 1, "the ninety-nine hits that followed were not its"
+        )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_an_ignore_count_is_honoured(self):
+        """An ignore count counts hits the compiled-in condition trapped for."""
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        # True once per call, so the hits are one per value of seed from zero.
+        bp.SetCondition("i == 1")
+        bp.SetIgnoreCount(3)
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        self.assertEqual(
+            frame.FindVariable("seed").GetValueAsSigned(),
+            3,
+            "the first three hits were ignored",
+        )
+        self.assertEqual(bp.GetHitCount(), 4, "and counted")
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_one_shot_breakpoint_stops_once(self):
+        """A one-shot breakpoint is deleted by the hit it stops for.
+
+        And with it goes the injection: the trap that survived it would take a
+        stop of its own on every later hit, silently, which is the cost compiling
+        the condition in was for.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        # True on the last hundred calls, so a trap left in the program costs a
+        # measurable number of stops rather than an unmeasurable wait.
+        bp.SetCondition("seed >= %d && i == 1" % (CALLS - 100))
+        bp.SetOneShot(True)
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(
+            process.GetSelectedThread().GetFrameAtIndex(0)
+            .FindVariable("seed")
+            .GetValueAsSigned(),
+            CALLS - 100,
+        )
+        self.assertEqual(target.GetNumBreakpoints(), 0, "the breakpoint is gone")
+
+        stops = process.GetStopID(True)
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateExited)
+        self.assertEqual(process.GetExitStatus(), 0)
+        # One stop is allowed for: the trap is what discovers that the breakpoint
+        # it reports to has gone, and taking itself out of the program is what it
+        # does about that.
+        self.assertLess(
+            process.GetStopID(True) - stops, 10, "no trap was left behind firing"
+        )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_deleting_a_breakpoint_takes_its_trap_out_of_the_program(self):
+        """A deleted breakpoint stops costing stops.
+
+        The copy stays in the program -- putting a redirected entry back is not
+        something that can be done to a running program safely -- but the
+        injection reporting to a breakpoint that is gone comes out of it.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        bp.SetCondition("seed >= %d && i == 1" % (CALLS - 100))
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(bp.GetHitCount(), 1)
+
+        stops = process.GetStopID(True)
+        target.BreakpointDelete(bp.GetID())
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateExited)
+        self.assertEqual(process.GetExitStatus(), 0)
+        self.assertLess(
+            process.GetStopID(True) - stops,
+            10,
+            "the remaining ninety-nine hits cost no stops",
+        )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_an_edited_condition_takes_effect(self):
+        """Editing a condition that is compiled in recompiles the copy.
+
+        A copy tests the text it was compiled with, so an edit that did not reach
+        it would leave the program stopping where the replaced text said to --
+        and the location's own trap, which is where a condition is ordinarily
+        evaluated, sits in a body the redirect no longer reaches.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        bp.SetCondition("seed == 10 && i == 1")
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 10)
+
+        bp.SetCondition("seed == 20 && i == 1")
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 20)
+        self.assertEqual(bp.GetHitCount(), 2)
+        # Still compiled in, rather than having fallen back to a stop per hit.
+        self.assertLess(
+            process.GetStopID(True), STOPS_ALLOWANCE, "the run paid for no hits"
+        )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_cleared_condition_stops_on_every_hit(self):
+        """Clearing a condition that is compiled in makes every hit stop.
+
+        Which is what an unconditional breakpoint is. It cannot be done by taking
+        the injection out and leaving it at that: the location's own trap is in
+        the body the redirect stopped reaching, so what goes into the copy in
+        place of the condition is an injection that traps on every hit.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        bp.SetCondition("seed == 10 && i == 1")
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        self.assertEqual(frame.FindVariable("i").GetValueAsSigned(), 1)
+
+        bp.SetCondition(None)
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        # The next call rather than the next pass of the same one. Clearing the
+        # condition compiles a fresh copy and points the entry at it, and the call
+        # in progress goes on running the copy it replaced -- which tests the
+        # condition that was cleared and whose traps have been silenced.
+        self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 11)
+        self.assertEqual(frame.FindVariable("i").GetValueAsSigned(), 0)
+        self.assertEqual(bp.GetHitCount(), 2)
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_falls_back_without_the_setting(self):
         """With the setting off, nothing is patched and the condition still works.
 

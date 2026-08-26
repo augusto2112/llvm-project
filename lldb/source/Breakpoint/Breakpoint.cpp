@@ -496,10 +496,39 @@ void Breakpoint::CompileConditionsIntoProcess() {
 
 void Breakpoint::ForgetConditionsCompiledIntoProcess() {
   m_condition_compiled_into_process = false;
-  m_condition_not_compiled_reason.clear();
   const size_t num_locations = m_locations.GetSize();
   for (size_t i = 0; i < num_locations; ++i)
     m_locations.GetByIndex(i)->ForgetConditionCompiledIntoProcess();
+}
+
+std::string Breakpoint::GetWhyConditionIsNotCompiledIntoProcess() const {
+  std::vector<std::pair<lldb::break_id_t, llvm::StringRef>> refused;
+  const size_t num_locations = m_locations.GetSize();
+  for (size_t i = 0; i < num_locations; ++i) {
+    const lldb::BreakpointLocationSP loc_sp = m_locations.GetByIndex(i);
+    llvm::StringRef reason = loc_sp->GetWhyConditionIsNotCompiledIntoProcess();
+    if (!reason.empty())
+      refused.emplace_back(loc_sp->GetID(), reason);
+  }
+  if (refused.empty())
+    return {};
+
+  // Said once when every location that refused says the same thing, which is the
+  // ordinary shape of a breakpoint that resolved several times in one program.
+  if (llvm::all_of(refused, [&](const auto &refusal) {
+        return refusal.second == refused.front().second;
+      }))
+    return refused.front().second.str();
+
+  // Named otherwise, since reasons that differ are about different locations and
+  // a reader has no other way to tell which reason belongs to which.
+  std::string joined;
+  for (const auto &[loc_id, reason] : refused) {
+    if (!joined.empty())
+      joined += "; ";
+    joined += llvm::formatv("{0}.{1}: {2}", GetID(), loc_id, reason).str();
+  }
+  return joined;
 }
 
 const StopCondition &Breakpoint::GetCondition() const {
@@ -1011,14 +1040,14 @@ void Breakpoint::GetDescriptionForType(Stream *s, lldb::DescriptionLevel level,
   // Offered at every level that describes the condition, since somebody looking
   // into why one is slow is as likely to have asked for the verbose dump.
   auto describe_condition_not_compiled = [&]() {
-    if (GetWhyConditionIsNotCompiledIntoProcess().empty())
+    const std::string why = GetWhyConditionIsNotCompiledIntoProcess();
+    if (why.empty())
       return;
     // A condition on the breakpoint has printed its own line just above; one
     // set on a location has not.
     if (!m_options.GetCondition())
       s->EOL();
-    s->Format("Condition not compiled into the process: {0}\n",
-              GetWhyConditionIsNotCompiledIntoProcess());
+    s->Format("Condition not compiled into the process: {0}\n", why);
   };
 
   switch (level) {

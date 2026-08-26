@@ -424,6 +424,49 @@ A plan-level `"fast": false` forces the old path, for anyone chasing a
 heisenbug who needs to remove the variable. In-process evaluation is otherwise
 on by default for lldb-mcp.
 
+## A compiled-in condition and the breakpoint's own lifecycle
+
+Compiling a condition in moves **where the condition is evaluated** and changes
+nothing else. Everything else a breakpoint says about its hits is therefore
+decided where the hit is reported, not by the copy: the copy tests the condition
+and raises a trap, and the location the trap reports to puts that hit through
+its enabled bit, its thread spec, its hit count, its ignore count, its
+auto-continue bit, its callback — in the phase the callback asked for, since a
+synchronous callback offered a hit under an asynchronous context declines it —
+and its one-shot bit, in that order. Which is the order an ordinary hit meets
+them in, minus the condition, which has already held.
+
+Two things follow that the copy cannot express, so they are reconciled at every
+stop instead:
+
+- **An edited or cleared condition recompiles the copy.** A copy tests the text
+  it was compiled with, and the location's own trap sits in a body the redirect
+  no longer reaches, so an edit that did not reach the copy would leave the
+  program stopping where the replaced text said to and nothing would say so.
+  Clearing a condition compiles in an injection that traps on every hit, which
+  is what an unconditional breakpoint is; taking the injection out and leaving
+  it at that would leave the location with no way to stop at all. The unit of
+  reconciliation is the condition's text: a text that has been attempted is not
+  attempted again, so a refusal is paid for once rather than at every stop.
+- **A deleted breakpoint's injection comes out of the program.** Discovered at
+  the trap rather than at the delete, because a trap is a moment when the
+  program is held still and the injection is known to belong to no one. It costs
+  one stop, once. Held-alive-but-deleted is the ordinary case here, since an SB
+  object outlives the delete, so the test is whether the target still knows the
+  breakpoint rather than whether the object is still there.
+
+An edit and a delete both take effect at the **next entry to the function**: the
+call in progress goes on running the copy that was replaced, whose traps have
+been silenced. This is the same property as *in-flight calls are not patched*,
+read from the other end.
+
+A disabled breakpoint neither stops nor counts, but its injection stays in the
+program and each hit whose condition holds still costs a private stop that ends
+in nothing. Removing it on disable and reinstalling it on enable would cost two
+recompiles per toggle; leaving it costs stops in proportion to how often the
+condition holds while disabled. The gate byte already in the control block would
+make this free, and is the obvious next move if the cost ever shows up.
+
 ## Known behavioural differences
 
 Stated rather than papered over, because a prototype that hides these is worse

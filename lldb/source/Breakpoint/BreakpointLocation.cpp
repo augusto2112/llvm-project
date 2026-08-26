@@ -46,6 +46,11 @@ namespace {
 struct InProcessConditionOwner {
   lldb::BreakpointWP breakpoint_wp;
   lldb::break_id_t loc_id = LLDB_INVALID_BREAK_ID;
+
+  /// The injection whose trap this is, so that a trap which finds its breakpoint
+  /// gone can take that injection back out. Set once the install has succeeded,
+  /// since that is when there is a site to name.
+  std::optional<uint32_t> site_id;
 };
 
 /// Whether \p addr is in code the debugger compiled rather than in the program.
@@ -250,16 +255,36 @@ const StopCondition &BreakpointLocation::GetCondition() const {
 }
 
 void BreakpointLocation::CompileConditionIntoProcess() {
-  if (m_in_process_condition_attempted)
+  // The text the copy has to be testing for this location to behave as it is set
+  // up to behave. Empty when there is no condition, which after one has been
+  // compiled in is a change like any other: the copy has to stop testing what it
+  // was given.
+  const llvm::StringRef wanted = GetCondition().GetText();
+
+  // Nothing asked for and nothing compiled in, which is every location of every
+  // breakpoint that has no condition: two empty checks per stop and no more.
+  if (wanted.empty() && !m_in_process_site_id)
     return;
 
-  const StopCondition &condition = GetCondition();
-  if (!condition)
+  // Asked once per text, whichever way the asking went. A refusal is a property
+  // of this location and this program rather than of the moment, and retrying at
+  // every stop would pay to recompile the function over and over only to be
+  // refused each time.
+  if (m_in_process_condition_attempted &&
+      *m_in_process_condition_attempted == wanted)
     return;
 
-  ExecutionContext exe_ctx(GetTarget().shared_from_this(), false);
-  if (!GetTarget().GetFastConditions(&exe_ctx))
-    return;
+  // The setting says whether a condition may be compiled in at all. It does not
+  // say anything about a copy that is already testing one: turning it off does
+  // not put a redirected entry back, so a location that has an injection has to
+  // be kept in step with the condition it holds either way. Otherwise an edit
+  // made after the setting was turned off would leave the copy testing the text
+  // it replaced, and nothing would say so.
+  if (!m_in_process_site_id) {
+    ExecutionContext exe_ctx(GetTarget().shared_from_this(), false);
+    if (!GetTarget().GetFastConditions(&exe_ctx))
+      return;
+  }
 
   // A location in code the debugger compiled is a location a patch produced:
   // the copy's line table points back at the original source, so the breakpoint
@@ -267,34 +292,67 @@ void BreakpointLocation::CompileConditionIntoProcess() {
   // recompiling from a copy would patch a patch, so this is not a refusal to
   // report.
   if (IsInDebuggerCompiledCode(GetAddress())) {
-    m_in_process_condition_attempted = true;
+    m_in_process_condition_attempted = wanted.str();
     return;
   }
 
   // Not yet rather than no: a condition is set long before the program is at a
   // stop that a patch would survive, so this is asked again at every stop until
-  // one is.
+  // one is. An edit waits the same way, and until it is served the copy goes on
+  // testing the text it was built with -- so a hit the replaced text selected can
+  // still arrive at the stop that serves the edit.
   if (!GetTarget().CanCompileCodeIntoProcess())
     return;
 
-  m_in_process_condition_attempted = true;
-  llvm::Error error = InstallInProcessCondition(condition.GetText());
-  if (!error)
+  m_in_process_condition_attempted = wanted.str();
+  // Its own copy from here on, since what follows recompiles the function and
+  // resolves breakpoints against the result, and a reference into this location's
+  // own state is not worth having to reason about across all of that.
+  const std::string wanted_text = wanted.str();
+
+  // A copy tests the text it was compiled with, so the injection carrying the
+  // old text comes out before one carrying the new text goes in. Nothing here can
+  // amend a copy in place: each half is a recompile of the function.
+  if (m_in_process_site_id) {
+    llvm::Error removed =
+        GetTarget().GetFunctionPatchManager().Remove(*m_in_process_site_id);
+    m_in_process_site_id.reset();
+    if (removed) {
+      // Reported rather than worked around. A removal that failed has already
+      // silenced the old injection's traps, so this location has no way left to
+      // stop, and installing beside an injection that still tests the replaced
+      // text would not give it one.
+      m_condition_not_compiled_reason = llvm::toString(std::move(removed));
+      LLDB_LOG(GetLog(LLDBLog::Breakpoints),
+               "the compiled-in condition this location replaced could not be "
+               "taken back out of the program: {0}",
+               m_condition_not_compiled_reason);
+      return;
+    }
+  }
+
+  llvm::Error error = InstallInProcessCondition(wanted_text);
+  if (!error) {
+    // Cleared, so that a location asked again with text it could compile in does
+    // not go on saying that it could not.
+    m_condition_not_compiled_reason.clear();
     return;
+  }
 
   // Kept rather than only logged. Every way this can fail leaves the condition
   // to be evaluated at a stop, so a refusal costs speed rather than correctness
   // -- but the speed is the whole point, so whoever asked has to be able to
   // read back why they did not get it.
-  m_owner.m_condition_not_compiled_reason = llvm::toString(std::move(error));
+  m_condition_not_compiled_reason = llvm::toString(std::move(error));
   LLDB_LOG(GetLog(LLDBLog::Breakpoints),
            "condition not compiled into the process: {0}",
-           m_owner.m_condition_not_compiled_reason);
+           m_condition_not_compiled_reason);
 }
 
 void BreakpointLocation::ForgetConditionCompiledIntoProcess() {
   m_in_process_site_id.reset();
-  m_in_process_condition_attempted = false;
+  m_in_process_condition_attempted.reset();
+  m_condition_not_compiled_reason.clear();
 }
 
 llvm::Error
@@ -302,6 +360,16 @@ BreakpointLocation::InstallInProcessCondition(llvm::StringRef condition_text) {
   if (IsFacade())
     return llvm::createStringError(
         "a facade location stands for no code that could be recompiled");
+
+  // A scripted breakpoint answers a hit by naming which of its locations the hit
+  // belongs to, and only its resolver can decide that. A trap in the copy has
+  // nowhere to ask, so the hit would be credited to the location that was
+  // patched rather than to the one the resolver would have chosen.
+  if (BreakpointResolverSP resolver_sp = GetBreakpoint().GetResolver())
+    if (resolver_sp->getResolverID() == BreakpointResolver::PythonResolver)
+      return llvm::createStringError(
+          "a scripted breakpoint decides for itself which of its locations a "
+          "hit belongs to, which a trap in a recompiled copy cannot ask it");
 
   SymbolContext sc;
   GetAddress().CalculateSymbolContext(&sc, eSymbolContextFunction |
@@ -317,15 +385,28 @@ BreakpointLocation::InstallInProcessCondition(llvm::StringRef condition_text) {
   request.FunctionEntry =
       sc.function->GetAddress().GetLoadAddress(&GetTarget());
   request.Line = sc.line_entry.line;
-  request.Condition = condition_text.str();
+  // No condition at all rather than an empty one, which is what a location whose
+  // condition has been cleared needs: it must stop on every hit, and its own trap
+  // sits in a body the redirect no longer reaches.
+  if (!condition_text.empty())
+    request.Condition = condition_text.str();
   request.WantStop = true;
   request.OnTrap = ForwardInProcessTrap;
+  // Named, so that this breakpoint's own locations in the body about to stop
+  // being reached are not counted as breakpoints the patch would orphan. Their
+  // hits are what the injection exists to deliver.
+  request.HitsCarriedBy = m_owner.GetID();
 
   auto owner = std::make_unique<InProcessConditionOwner>();
   owner->breakpoint_wp = GetBreakpoint().shared_from_this();
   owner->loc_id = GetID();
-  request.Baton =
+  auto baton =
       std::make_shared<TypedBaton<InProcessConditionOwner>>(std::move(owner));
+  // Held past the move, so that the site id can be written into the baton once
+  // there is one: the trap that carries it is what discovers the breakpoint has
+  // been deleted, and taking the injection out then needs its name.
+  InProcessConditionOwner &trap_owner = *baton->getItem();
+  request.Baton = std::move(baton);
 
   // Marked before the patch is installed, not after: announcing the copy is
   // part of installing it, and that is the moment this breakpoint acquires a
@@ -360,6 +441,7 @@ BreakpointLocation::InstallInProcessCondition(llvm::StringRef condition_text) {
   // a disabled location reports no hits, and the hits the compiled-in condition
   // trapped for are forwarded to it.
   m_in_process_site_id = *site_id;
+  trap_owner.site_id = *site_id;
   return llvm::Error::success();
 }
 
@@ -369,17 +451,81 @@ bool BreakpointLocation::ForwardInProcessTrap(void *baton,
                                               lldb::user_id_t break_loc_id) {
   auto *owner = static_cast<InProcessConditionOwner *>(baton);
   BreakpointSP bp_sp = owner->breakpoint_wp.lock();
-  if (!bp_sp)
+  BreakpointLocationSP loc_sp =
+      bp_sp ? bp_sp->FindLocationByID(owner->loc_id) : nullptr;
+  TargetSP target_sp = context->exe_ctx_ref.GetTargetSP();
+
+  // Still the target's, rather than merely still alive. A deleted breakpoint can
+  // be held alive by anything that took a reference to it -- an SB object
+  // outliving the delete is the ordinary case -- and its hits are nobody's from
+  // the moment the target stops knowing about it.
+  const bool still_set = bp_sp && target_sp &&
+                         target_sp->GetBreakpointByID(bp_sp->GetID()) == bp_sp;
+
+  if (!loc_sp || !still_set) {
+    // Taken out of the program rather than left trapping for nobody. Every hit
+    // from here on would otherwise cost a stop that ends exactly here, which is
+    // the cost that compiling the condition in was for. Discovered at a trap
+    // rather than when the breakpoint went away: this is the first moment the
+    // program is held still with the injection known to belong to no one.
+    if (owner->site_id && target_sp) {
+      llvm::Error error =
+          target_sp->GetFunctionPatchManager().Remove(*owner->site_id);
+      owner->site_id.reset();
+      if (error)
+        LLDB_LOG_ERROR(GetLog(LLDBLog::Breakpoints), std::move(error),
+                       "the compiled-in condition of a breakpoint that is gone "
+                       "could not be taken out of the program: {0}");
+    }
     return false;
-  BreakpointLocationSP loc_sp = bp_sp->FindLocationByID(owner->loc_id);
-  if (!loc_sp)
+  }
+
+  return loc_sp->ReportForwardedHit(context);
+}
+
+bool BreakpointLocation::ReportForwardedHit(StoppointCallbackContext *context) {
+  // Everything an ordinary hit is put through, bar the condition: it has already
+  // held -- that is why the trap executed -- where an ordinary hit still has its
+  // condition ahead of it. Compiling a condition in moves where the condition is
+  // evaluated and changes nothing else, so a hit arriving this way has to meet
+  // every other test the breakpoint carries.
+  if (!IsEnabled())
     return false;
 
-  // The condition has already held -- that is why the trap executed -- so the
-  // hit is unconditional here, where an ordinary hit still has its condition
-  // ahead of it.
-  loc_sp->BumpHitCount();
-  return loc_sp->InvokeCallback(context);
+  lldb::ThreadSP thread_sp = context->exe_ctx_ref.GetThreadSP();
+  if (thread_sp && !ValidForThisThread(*thread_sp))
+    return false;
+
+  BumpHitCount();
+
+  if (!IgnoreCountShouldStop())
+    return false;
+
+  bool should_stop = true;
+  if (IsAutoContinue()) {
+    // Reported even though it does not stop, which is how somebody reading the
+    // run learns that it auto-continued.
+    if (thread_sp && !GetBreakpoint().IsInternal())
+      thread_sp->SetShouldReportStop(eVoteYes);
+    should_stop = false;
+  }
+
+  // Offered in the phase the callback asked for rather than in the one this trap
+  // arrived in. A callback is offered a hit once, and a synchronous one offered
+  // it under an asynchronous context declines it -- which would swallow the stop
+  // rather than delay it.
+  StoppointCallbackContext forwarded(*context);
+  forwarded.is_synchronous = IsCallbackSynchronous();
+  if (!InvokeCallback(&forwarded))
+    return false;
+
+  // Removed here rather than at the stop, because the stop this hit produces is
+  // attributed to the internal breakpoint carrying the trap; nothing downstream
+  // knows a one-shot breakpoint was the reason for it.
+  if (GetBreakpoint().IsOneShot())
+    GetTarget().RemoveBreakpointByID(GetBreakpoint().GetID());
+
+  return should_stop;
 }
 
 bool BreakpointLocation::ConditionSaysStop(ExecutionContext &exe_ctx,

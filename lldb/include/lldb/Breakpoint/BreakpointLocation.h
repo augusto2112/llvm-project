@@ -168,7 +168,17 @@ public:
   /// fail leaves the condition to be evaluated at a stop, so calling this never
   /// changes whether a condition works -- only what it costs. Called at every
   /// stop until it has an answer, and cheap once it has one.
+  ///
+  /// Also what keeps an answer current: a condition that is edited or cleared
+  /// after it was compiled in is compiled in again, since the copy tests the
+  /// text it was built with and nothing else would make the edit take effect.
   void CompileConditionIntoProcess();
+
+  /// Why this location's condition is not compiled into the process, when it was
+  /// asked for and refused; empty when nothing asked or nothing refused.
+  llvm::StringRef GetWhyConditionIsNotCompiledIntoProcess() const {
+    return m_condition_not_compiled_reason;
+  }
 
   /// Return the breakpoint condition.
   const StopCondition &GetCondition() const;
@@ -367,12 +377,23 @@ private:
   void UndoBumpHitCount();
 
   /// Recompiles the enclosing function with \p condition_text compiled in, and
-  /// registers a site for the trap the copy now contains.
+  /// registers a site for the trap the copy now contains. An empty \p
+  /// condition_text compiles in an injection that traps on every hit, which is
+  /// what a location whose condition has been cleared needs: its own trap sits
+  /// in a body the redirect no longer reaches.
   llvm::Error InstallInProcessCondition(llvm::StringRef condition_text);
 
   /// Drop what this location remembers about having compiled its condition into
   /// a process, so that a later process is patched afresh.
   void ForgetConditionCompiledIntoProcess();
+
+  /// Decides what a hit the compiled-in condition trapped for means, as this
+  /// location's own stop would have decided it.
+  ///
+  /// Compiling a condition in moves where the condition is evaluated and changes
+  /// nothing else, so a hit arriving this way is put through everything an
+  /// ordinary hit is put through -- bar the condition, which has already held.
+  bool ReportForwardedHit(StoppointCallbackContext *context);
 
   /// Credits this location with a hit the compiled-in condition trapped for.
   ///
@@ -454,14 +475,22 @@ private:
   ///< For testing whether the condition source code changed.
   size_t m_condition_hash = 0;
   ///< The site attributing the trap of this location's compiled-in condition,
-  /// if the condition was compiled into the process.
+  ///< if the condition was compiled into the process.
   std::optional<uint32_t> m_in_process_site_id;
-  ///< Whether compiling this location's condition into the process has been
-  /// tried. Tried once and not again, whichever way it went: a refusal is a
-  /// property of the location and the program rather than of the moment, and
-  /// retrying at every stop would pay to recompile the function over and over
-  /// only to be refused each time.
-  bool m_in_process_condition_attempted = false;
+  ///< The condition text an attempt to compile this location's condition into
+  /// the process was last made for, whichever way that attempt went. Kept per
+  /// text rather than as a single "tried" bit: retrying at every stop would pay
+  /// to recompile the function over and over only to be refused each time,
+  /// while never retrying would leave the copy testing a condition the user has
+  /// since edited or cleared. Empty text means the condition was cleared, which
+  /// is a change like any other.
+  std::optional<std::string> m_in_process_condition_attempted;
+  ///< Why this location's condition is not compiled into the process, when it
+  /// was asked for and refused. Prose, because it is read rather than dispatched
+  /// on, and every layer that can refuse has its own vocabulary. Kept per
+  /// location rather than per breakpoint because refusing is something a
+  /// location does: one can refuse while another has its condition compiled in.
+  std::string m_condition_not_compiled_reason;
   ///< Breakpoint location ID.
   lldb::break_id_t m_loc_id;
   ///< Number of times this breakpoint location has been hit.

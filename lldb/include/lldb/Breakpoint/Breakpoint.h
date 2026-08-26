@@ -463,9 +463,13 @@ public:
   /// difference between a run of seconds and one of tens of minutes. So a
   /// caller that asked for a compiled-in condition and did not get one has to
   /// be able to find out why.
-  llvm::StringRef GetWhyConditionIsNotCompiledIntoProcess() const {
-    return m_condition_not_compiled_reason;
-  }
+  ///
+  /// Gathered from the locations, because refusing is something a location does:
+  /// two of them can refuse for different reasons, and one can refuse while
+  /// another has its condition compiled in. Reasons that agree are said once,
+  /// since a breakpoint whose locations were all refused for the same reason has
+  /// only one thing to report.
+  std::string GetWhyConditionIsNotCompiledIntoProcess() const;
 
   /// Drop what this breakpoint remembers about having had its condition
   /// compiled into a process, so that a later process is patched afresh.
@@ -754,11 +758,6 @@ private:
   /// process. Cleared only when that process goes away, since the code it
   /// describes goes with it.
   bool m_condition_compiled_into_process = false;
-
-  /// The last reason a location gave for not compiling this breakpoint's
-  /// condition into the process. Prose, because it is read rather than
-  /// dispatched on, and every layer that can refuse has its own vocabulary.
-  std::string m_condition_not_compiled_reason;
 
   /// Number of times this breakpoint has been hit. This is kept separately
   /// from the locations hit counts, since locations can go away when their
