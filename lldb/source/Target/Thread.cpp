@@ -663,9 +663,12 @@ bool Thread::SetupToStepOverBreakpointIfNeeded(RunDirection direction) {
       // If we stopped at a breakpoint instruction/BreakpointSite location
       // without hitting it, and we're still at that same address on
       // resuming, then we want to hit the BreakpointSite when we resume.
-      // A trap the program's own code contains has no opcode to take down and
-      // put back, so there is nothing for a step-over plan to do; the stop
-      // moved pc past it instead.
+      // A trap the program's own code contains has no opcode to lift and put
+      // back, which is the whole of what a step-over plan does, so such a plan
+      // could only single-step onto the same trap again and never complete. Not
+      // reachable while the stop that reports such a trap advances pc past it,
+      // which is where that is done and is measured to happen; this is here so
+      // that a pc left on one costs a re-trap rather than a plan that hangs.
       const bool is_program_trap =
           bp_site_sp && bp_site_sp->GetType() == BreakpointSite::eProgramTrap;
       if (bp_site_sp && !is_program_trap &&

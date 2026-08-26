@@ -1506,9 +1506,10 @@ FunctionPatchManager::RegisterTrapSite(lldb::addr_t Trap,
     return Refuse(PatchFailure::NoProcess);
 
   // On the trap rather than past it. A `brk` raises a mach exception naming the
-  // trap's own address, and that address is what the stop is attributed by; pc
-  // has already moved past the trap by the time the stop arrives, so a site
-  // where pc points would never be the one looked for.
+  // trap's own address, and that address is what the stop is attributed by. pc
+  // is on the trap too when the stop arrives, which is why the stop has to
+  // advance it: a trap in the program's own code has no opcode to lift and put
+  // back, so nothing else would.
   Address SiteAddress;
   if (!m_target.ResolveLoadAddress(Trap, SiteAddress))
     return Refuse(PatchFailure::CompileFailed,

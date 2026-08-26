@@ -76,13 +76,33 @@ Measured against a real arm64 process with `build/bin/lldb` at
 
 The trap's PC convention was measured, and it decides the whole trap design:
 
-| Trap | PC on stop |
-| --- | --- |
-| `brk #0` (`0xD4200000`, LLDB's own opcode) | **at** the trap |
-| `brk #0xf000` (`0xD43E0000`, `__builtin_debugtrap()`) | **past** the trap (+4) |
+| Trap | Mach exception | PC on stop |
+| --- | --- | --- |
+| `brk #0` (`0xD4200000`, LLDB's own opcode) | `[6, 1, <trap addr>]` | **at** the trap |
+| `brk #0xf000` (`0xD43E0000`, `__builtin_debugtrap()`) | `[6, 1, <trap addr>]` | **at** the trap |
 
-`__builtin_debugtrap()` is therefore the right trap: the kernel has already
-stepped over it, so resuming needs no PC arithmetic and no step-over plan.
+**Corrected 2026-08-26**, and the original error is worth recording because it
+cost a day. This table first said `brk #0xf000` leaves PC *past* the trap, and
+concluded that resuming therefore needs no PC arithmetic. Both were wrong. The
+reading was taken through the SB API after the stop had already been processed,
+and by then `StopInfoMachException::PerformAction` had itself advanced PC —
+`log enable lldb process` shows it doing so, "stepping over breakpoint in
+inferior to new pc". The kernel leaves PC on the trap.
+
+What follows from the corrected reading:
+
+- The site must sit **on** the trap, because that is the address the exception
+  names, and the address is what a site is found by.
+- Something must advance PC, or the trap re-executes on the next resume forever.
+  lldb already does this for a trap with no site of its own, in
+  `StopInfoMachException::PerformAction`. A trap that *has* a site produces a
+  `StopInfoBreakpoint` instead, so that path does not run and the equivalent has
+  to exist there — which is `SkipOverProgramTrapIfNeeded`. Measured: with it
+  short-circuited, two of the API tests fail and a third hangs, exactly as
+  re-executing the same trap forever would predict.
+- A software breakpoint needs none of this because stepping over one is done by
+  lifting its opcode and putting it back, which leaves PC free to sit on it. A
+  trap compiled into the program has no opcode to lift.
 
 ## Architecture
 
