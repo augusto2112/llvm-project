@@ -1776,9 +1776,15 @@ Process::CreateBreakpointSite(const BreakpointLocationSP &constituent,
   // constituent, otherwise create a new breakpoint site and add it.
   if (BreakpointSiteSP bp_site_sp =
           m_breakpoint_site_list.FindByAddress(load_addr)) {
-    bp_site_sp->AddConstituent(constituent);
-    constituent->SetBreakpointSite(bp_site_sp);
-    return bp_site_sp->GetID();
+    // A site either causes a trap or attributes one that already exists; an
+    // eProgramTrap site is the latter, so joining this breakpoint to it would
+    // leave the breakpoint looking set while nothing ever traps for it.
+    if (bp_site_sp->GetType() != BreakpointSite::eProgramTrap) {
+      bp_site_sp->AddConstituent(constituent);
+      constituent->SetBreakpointSite(bp_site_sp);
+      return bp_site_sp->GetID();
+    }
+    return LLDB_INVALID_BREAK_ID;
   }
 
   BreakpointSiteSP bp_site_sp(
@@ -1815,9 +1821,16 @@ Process::CreateProgramTrapSite(const BreakpointLocationSP &constituent,
 
   if (BreakpointSiteSP bp_site_sp =
           m_breakpoint_site_list.FindByAddress(addr)) {
-    bp_site_sp->AddConstituent(constituent);
-    constituent->SetBreakpointSite(bp_site_sp);
-    return bp_site_sp->GetID();
+    // A site either causes a trap or attributes one that already exists; any
+    // other type at this address writes an opcode, so joining it here would
+    // make this address trap on every pass instead of only when the
+    // program's own trap executes.
+    if (bp_site_sp->GetType() == BreakpointSite::eProgramTrap) {
+      bp_site_sp->AddConstituent(constituent);
+      constituent->SetBreakpointSite(bp_site_sp);
+      return bp_site_sp->GetID();
+    }
+    return LLDB_INVALID_BREAK_ID;
   }
 
   BreakpointSiteSP bp_site_sp(
