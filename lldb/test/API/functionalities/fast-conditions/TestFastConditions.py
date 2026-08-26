@@ -23,6 +23,9 @@ STOPS_ALLOWANCE = 100
 # The line the condition is attached to, which is the loop body of accumulate().
 CONDITION_LINE = r"total \+= i;"
 
+# A second line of the same function, for a second condition on it.
+SECOND_CONDITION_LINE = "return total;"
+
 
 class FastConditionsTestCase(TestBase):
     NO_DEBUG_INFO_TESTCASE = True
@@ -121,6 +124,72 @@ class FastConditionsTestCase(TestBase):
         # before the condition could hold.
         self.assertEqual(plain.GetHitCount(), 1)
         self.assertEqual(conditional.GetHitCount(), 0)
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_two_conditions_in_one_function(self):
+        """A second condition on a patched function keeps the first one working.
+
+        Both end up compiled into the same copy, because the copy is rebuilt
+        from the original source rather than patched again.
+        """
+        target = self.setup()
+        first = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        first.SetCondition("seed == 10 && i == 1")
+        second = target.BreakpointCreateBySourceRegex(
+            SECOND_CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        second.SetCondition("seed == 20")
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+
+        # The first condition holds at seed 10, before the second at seed 20.
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 10)
+        self.assertIn(
+            "total += i;", self.get_source_line(frame.GetLineEntry().GetLine())
+        )
+
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 20)
+        self.assertIn(
+            "return total;", self.get_source_line(frame.GetLineEntry().GetLine())
+        )
+
+        # Neither fell back: a second condition that could not be compiled in
+        # would leave the first working and report why, so hit counts alone
+        # would not tell the two apart.
+        self.assertEqual(first.GetHitCount(), 1)
+        self.assertEqual(second.GetHitCount(), 1)
+        self.assertLess(
+            process.GetStopID(True), STOPS_ALLOWANCE, "the run paid for no hits"
+        )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_removing_one_condition_leaves_the_other(self):
+        """Dropping one injection recompiles what remains."""
+        target = self.setup()
+        first = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        first.SetCondition("seed == 10 && i == 1")
+        second = target.BreakpointCreateBySourceRegex(
+            SECOND_CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        second.SetCondition("seed == 20")
+        target.BreakpointDelete(first.GetID())
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 20)
+        self.assertEqual(second.GetHitCount(), 1)
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
