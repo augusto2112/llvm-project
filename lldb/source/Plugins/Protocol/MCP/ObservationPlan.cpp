@@ -11,6 +11,7 @@
 #include "lldb/Breakpoint/BreakpointLocation.h"
 #include "lldb/Host/FileSystem.h"
 #include "lldb/Core/Module.h"
+#include "lldb/Target/FunctionPatch.h"
 #include "lldb/Core/ModuleList.h"
 #include "lldb/Core/Mangled.h"
 #include "lldb/Symbol/LineEntry.h"
@@ -948,16 +949,6 @@ lldb_private::mcp::ObservationPlan::WithVariant(const RunVariant &Variant) const
 
 namespace {
 
-/// How far apart two mtimes have to be before their order says anything.
-///
-/// A build reads the source and then writes the binary, so a freshly built pair
-/// is always the right way round -- but only by however long the compile took,
-/// and a build system that touches its inputs, an unpacked archive, or a
-/// filesystem with coarse timestamps can leave the two within a second of each
-/// other either way. A warning that fires on that noise is a warning a caller
-/// learns to ignore, which costs more than the case it was meant to catch.
-constexpr std::chrono::seconds MinSourceSkew{2};
-
 /// Whether the source a `file:line` resolved through has been written since the
 /// binary holding its line table was, and by how much.
 ///
@@ -993,9 +984,7 @@ std::optional<std::string> lldb_private::mcp::DescribeSourceSkew(
   // debug info records the path the compiler saw, which on a binary built
   // elsewhere names a directory this machine does not have. Nothing is reported
   // then, because a comparison that cannot be made is not a finding.
-  if (Source == sys::TimePoint<>() || Binary == sys::TimePoint<>())
-    return std::nullopt;
-  if (Source - Binary < MinSourceSkew)
+  if (!SourceSkewExceedsNoise(Source, Binary))
     return std::nullopt;
 
   // Stated as the fact it is -- these two mtimes, in this order -- and not as a
