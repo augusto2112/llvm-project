@@ -127,6 +127,65 @@ class FastConditionsTestCase(TestBase):
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_source_regex_breakpoint_in_the_function_refuses_the_condition(self):
+        """A source-regex breakpoint in the function makes the condition refuse.
+
+        Of the two ways to keep such a breakpoint working, this asserts the
+        refusal: nothing is patched, the breakpoint goes on firing, and the
+        condition says why it is being evaluated at a stop after all.
+
+        The patched copy's line table names the original source, so a breakpoint
+        that resolves by file and line finds the copy and survives the redirect.
+        A source-regex breakpoint does not: its resolver searches the text of the
+        compile unit's primary file, which for the copy is the generated source
+        the regex was never written against. Its location stays in a body that no
+        longer runs, and a breakpoint that reads as resolved and never fires
+        again is the one outcome a patch may not produce.
+        """
+        target = self.setup()
+        # A different line of the same function, since what the redirect makes
+        # unreachable is the whole body rather than the line being patched.
+        plain = target.BreakpointCreateBySourceRegex(
+            SECOND_CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        self.assertEqual(plain.GetNumLocations(), 1, "plain location resolved")
+        fast = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        # The seed only ever reaches CALLS - 1, so this never holds: with the
+        # condition compiled in, nothing would stop the run at all.
+        fast.SetCondition("seed > %d" % (10 * CALLS))
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+
+        # Refused at the first stop, which is the first moment a patch could
+        # have been installed, and named: taking the breakpoint that stands in
+        # the way off the function is the only way past this refusal.
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.expect(
+            "breakpoint list %d" % fast.GetID(),
+            substrs=[
+                "Condition not compiled into the process: a breakpoint in the "
+                "function would stop firing once its entry is redirected to a "
+                "copy: breakpoint %d.1" % plain.GetID()
+            ],
+        )
+
+        # Call after call, which is what says the original body is still the
+        # code being run. A patched function would have run to exit instead.
+        for expected_seed in range(3):
+            self.assertState(process.GetState(), lldb.eStateStopped)
+            frame = process.GetSelectedThread().GetFrameAtIndex(0)
+            self.assertEqual(
+                frame.FindVariable("seed").GetValueAsSigned(), expected_seed
+            )
+            self.assertEqual(plain.GetHitCount(), expected_seed + 1)
+            process.Continue()
+
+        self.assertEqual(fast.GetHitCount(), 0, "the condition never held")
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_two_conditions_in_one_function(self):
         """A second condition on a patched function keeps the first one working.
 
