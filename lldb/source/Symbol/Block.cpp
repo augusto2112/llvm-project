@@ -267,8 +267,7 @@ bool Block::GetRangeContainingLoadAddress(lldb::addr_t load_addr,
                                           Target &target, AddressRange &range) {
   Address load_address;
   load_address.SetLoadAddress(load_addr, &target);
-  AddressRange containing_range;
-  return GetRangeContainingAddress(load_address, containing_range);
+  return GetRangeContainingAddress(load_address, range);
 }
 
 uint32_t Block::GetRangeIndexContainingAddress(const Address &addr) {
