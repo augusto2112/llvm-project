@@ -144,6 +144,6 @@ TEST(ObserveToolTest, SchemaNestsThePlanUnderItsOwnKey) {
     EXPECT_NE(ObservationProperties->get(Field), nullptr) << Field;
   for (StringRef Field :
        {"program", "args", "env", "cwd", "stdin", "capture_inferior_output",
-        "timeout_seconds", "no_progress_seconds", "observe"})
+        "fast", "timeout_seconds", "no_progress_seconds", "observe"})
     EXPECT_NE(PlanProperties->get(Field), nullptr) << Field;
 }

@@ -141,6 +141,14 @@ json::Value lldb_protocol::mcp::ObservationPlanSchema() {
                                   "program's standard input.")},
            {"capture_inferior_output",
             json::Object{{"type", "boolean"}, {"default", true}}},
+           {"fast",
+            json::Object{{"type", "boolean"},
+                         {"default", true},
+                         {"description",
+                          "Compile a tracepoint's condition into the program. "
+                          "Off recompiles nothing, at a stop per hit; turn it "
+                          "off when the program's own timing is what is under "
+                          "investigation."}}},
            {"timeout_seconds",
             schemaNumber(30, "Ceiling on the program, from the launch. "
                              "Reaching it is a result, \"timed_out\", not an "

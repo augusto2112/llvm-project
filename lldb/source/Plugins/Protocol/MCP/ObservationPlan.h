@@ -117,6 +117,16 @@ struct ObservationPlan {
   /// got, so this is on unless it is turned off.
   bool CaptureInferiorOutput = true;
 
+  /// Whether a tracepoint's own work may be compiled into the program rather
+  /// than done at a stop. On by default, because a condition evaluated at a
+  /// stop is what makes a hot tracepoint unaffordable.
+  ///
+  /// Worth turning off when the program's own timing is the thing under
+  /// investigation: a patched function is recompiled without optimization, so
+  /// it is slower than the one it replaces and, where the original relied on
+  /// what the optimizer did, can behave differently.
+  bool Fast = true;
+
   /// Wall-clock ceiling on the whole run. A run that never terminates is a
   /// result rather than a failure, so there is always a limit.
   uint32_t TimeoutSeconds = 30;

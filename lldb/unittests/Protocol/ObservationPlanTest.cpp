@@ -52,6 +52,10 @@ TEST(ObservationPlanTest, DefaultsAreAppliedWhenFieldsAreAbsent) {
   EXPECT_FALSE(Plan->Cwd.has_value());
   EXPECT_FALSE(Plan->Stdin.has_value());
   EXPECT_TRUE(Plan->CaptureInferiorOutput);
+  // A tracepoint's own work is compiled into the program unless asked not to
+  // be, since a condition evaluated at a stop is what bounds how hot a
+  // tracepoint can be.
+  EXPECT_TRUE(Plan->Fast);
   EXPECT_EQ(Plan->TimeoutSeconds, 30u);
   EXPECT_FALSE(Plan->NoProgressSeconds.has_value());
 
@@ -80,6 +84,7 @@ TEST(ObservationPlanTest, EveryFieldIsAccepted) {
     "cwd": "/tmp",
     "stdin": "/tmp/in.txt",
     "capture_inferior_output": false,
+    "fast": false,
     "timeout_seconds": 5,
     "no_progress_seconds": 2,
     "observe": [
@@ -108,6 +113,7 @@ TEST(ObservationPlanTest, EveryFieldIsAccepted) {
   EXPECT_EQ(Plan->Cwd, "/tmp");
   EXPECT_EQ(Plan->Stdin, "/tmp/in.txt");
   EXPECT_FALSE(Plan->CaptureInferiorOutput);
+  EXPECT_FALSE(Plan->Fast);
   EXPECT_EQ(Plan->TimeoutSeconds, 5u);
   EXPECT_EQ(Plan->NoProgressSeconds, 2u);
 

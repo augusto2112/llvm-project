@@ -59,6 +59,7 @@ constexpr StringRef PlanFields[] = {
     "cwd",
     "stdin",
     "capture_inferior_output",
+    "fast",
     "observe",
     "timeout_seconds",
     "no_progress_seconds",
@@ -842,6 +843,11 @@ lldb_private::mcp::ParseObservationPlan(const json::Value &Plan) {
     return CaptureOutput.takeError();
   Result.CaptureInferiorOutput =
       CaptureOutput->value_or(Result.CaptureInferiorOutput);
+
+  Expected<std::optional<bool>> Fast = GetBool(*Obj, "fast", Where);
+  if (!Fast)
+    return Fast.takeError();
+  Result.Fast = Fast->value_or(Result.Fast);
 
   Expected<std::optional<uint32_t>> Timeout =
       GetUInt(*Obj, "timeout_seconds", Where);
