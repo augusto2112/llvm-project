@@ -51,14 +51,18 @@ PatchDrain lldb_private::DrainPatchRing(const PatchRingHeader &Header,
   const uint64_t First = Header.Seq - Readable;
 
   Drain.Records.reserve(Readable);
+  uint64_t SkippedCount = 0;
   for (uint64_t Seq = First; Seq < Header.Seq; ++Seq) {
     const uint64_t Slot = Seq % Header.Capacity;
     // A ring shorter than the capacity claims means the read was truncated.
     // Stopping is right; reading past the buffer is not.
-    if (Slot >= Available)
+    if (Slot >= Available) {
+      ++SkippedCount;
       continue;
+    }
     Drain.Records.push_back(DecodePatchRecord(
         RingBytes.slice(Slot * kPatchRecordSize, kPatchRecordSize)));
   }
+  Drain.Lost += SkippedCount;
   return Drain;
 }

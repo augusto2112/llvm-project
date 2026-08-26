@@ -77,6 +77,7 @@ TEST(PatchControlBlockTest, DrainsOnlyWhatIsNew) {
   EXPECT_EQ(20u, Drain.Records[0].Value);
   EXPECT_EQ(30u, Drain.Records[1].Value);
   EXPECT_EQ(0u, Drain.Lost);
+  EXPECT_EQ(3u, Drain.NewDrained);
 }
 
 // Once more records have been written than the ring holds, the oldest are gone.
@@ -111,6 +112,7 @@ TEST(PatchControlBlockTest, ReadsAcrossTheWrapPoint) {
   EXPECT_EQ(4u, Drain.Records[1].Value);
   EXPECT_EQ(5u, Drain.Records[2].Value);
   EXPECT_EQ(0u, Drain.Lost);
+  EXPECT_EQ(6u, Drain.NewDrained);
 }
 
 // A header claiming fewer records drained than written cannot be trusted to
@@ -135,7 +137,12 @@ TEST(PatchControlBlockTest, ToleratesARingShorterThanCapacity) {
   PatchRingHeader Header{4, 0, 8, 6};
   auto Ring = MakeRing(2, {{1, 0, 10}, {1, 0, 20}});
   PatchDrain Drain = DrainPatchRing(Header, Ring);
-  EXPECT_LE(Drain.Records.size(), 2u);
+  // With Seq=4, Drained=0, Capacity=8, and only 2 records' worth of buffer:
+  // Readable = min(4, 8) = 4. First = 0.
+  // Loop reads sequences 0..3: slots 0,1 are in the buffer (reads succeed),
+  // slots 2,3 are beyond it (skipped). So 2 records, 2 lost.
+  EXPECT_EQ(2u, Drain.Records.size());
+  EXPECT_EQ(2u, Drain.Lost);
 }
 
 TEST(PatchControlBlockTest, DefaultCapacityIsAPowerOfTwo) {

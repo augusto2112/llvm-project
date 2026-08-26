@@ -62,9 +62,10 @@ struct PatchDrain {
   /// New records, oldest first.
   std::vector<PatchRecord> Records;
 
-  /// Records the ring overwrote before they were read. Reported rather than
-  /// absorbed: a short list that looks complete is worse than one that says
-  /// what is missing.
+  /// Records that did not reach the caller: those the ring overwrote before
+  /// they were read, and those that fell outside a truncated ring buffer.
+  /// Reported rather than absorbed: a short list that looks complete is worse
+  /// than one that says what is missing.
   uint64_t Lost = 0;
 
   /// What the debugger should store back as \ref PatchRingHeader::Drained.
