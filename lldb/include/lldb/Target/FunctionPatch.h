@@ -124,6 +124,16 @@ struct PatchRequest {
   /// contract.
   BreakpointHitCallback OnTrap = nullptr;
 
+  /// The breakpoint whose hits \ref OnTrap will report, when there is one.
+  ///
+  /// A redirected entry means the original body never runs again, so a
+  /// breakpoint located in it is ordinarily a reason to refuse the patch: its
+  /// trap would stop firing and nothing would say so. Not this one. Its hits
+  /// are what the injection exists to deliver, and it is the caller's own --
+  /// naming it here is what keeps a caller from being refused on account of the
+  /// very breakpoint it is installing the patch for.
+  lldb::break_id_t HitsCarriedBy = LLDB_INVALID_BREAK_ID;
+
   /// What \ref OnTrap is handed. A baton rather than a bare pointer because the
   /// callback outlives the call that installed it by as long as the patch runs,
   /// so whatever it needs has to be owned by something with that lifetime.

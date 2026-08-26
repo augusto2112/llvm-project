@@ -413,7 +413,8 @@ llvm::Error CheckPatchRangeIsFree(Process &Proc, lldb::addr_t Entry) {
 /// slower and says so. Installing anyway would leave a breakpoint that reads as
 /// resolved and never fires again, which nothing says at all.
 llvm::Error CheckNoBreakpointNeedsTheOriginalBody(Target &Tgt,
-                                                  lldb::addr_t Entry) {
+                                                  lldb::addr_t Entry,
+                                                  lldb::break_id_t Carried) {
   std::string Orphaned;
   size_t Count = 0;
 
@@ -423,6 +424,12 @@ llvm::Error CheckNoBreakpointNeedsTheOriginalBody(Target &Tgt,
   for (bool Internal : {false, true}) {
     for (const lldb::BreakpointSP &Bp :
          Tgt.GetBreakpointList(Internal).Breakpoints()) {
+      // The breakpoint the injection is being installed for. Its locations
+      // stop trapping and its hits arrive from the trap instead, which is the
+      // whole of what the injection is for.
+      if (Bp->GetID() == Carried)
+        continue;
+
       lldb::BreakpointResolverSP Resolver = Bp->GetResolver();
       if (Resolver && Resolver->getResolverID() ==
                           BreakpointResolver::ResolverTy::FileLineResolver)
@@ -809,8 +816,8 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
   // copy instead, the body has already stopped being run, and a refusal now
   // would neither have caused that nor undo it.
   if (Fn->CopyAddress == LLDB_INVALID_ADDRESS)
-    if (llvm::Error Err =
-            CheckNoBreakpointNeedsTheOriginalBody(m_target, Entry))
+    if (llvm::Error Err = CheckNoBreakpointNeedsTheOriginalBody(
+            m_target, Entry, Request.HitsCarriedBy))
       return std::move(Err);
 
   if (llvm::Error Err = EnsureRingBlock())

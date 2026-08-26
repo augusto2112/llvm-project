@@ -665,8 +665,7 @@ llvm::Error BreakpointLocation::ResolveBreakpointSite() {
   // copy as well. Arming that location would stop on every pass and evaluate
   // the condition at the stop, which is the cost compiling it in removed. The
   // trap the copy already contains is what reports this breakpoint's hits.
-  if (m_owner.HasConditionCompiledIntoProcess() &&
-      IsInDebuggerCompiledCode(m_address))
+  if (m_owner.HitsComeFromCompiledCode() && IsInDebuggerCompiledCode(m_address))
     return llvm::createStringError(
         "not arming a location in the copy that carries this breakpoint's "
         "compiled-in condition");

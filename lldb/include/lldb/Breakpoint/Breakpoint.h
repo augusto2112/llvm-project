@@ -438,11 +438,21 @@ public:
   /// BreakpointLocation::CompileConditionIntoProcess.
   void CompileConditionsIntoProcess();
 
-  /// Whether any of this breakpoint's locations has had its condition compiled
-  /// into the process, so that its hits arrive from code the debugger compiled
-  /// rather than from the program's own.
-  bool HasConditionCompiledIntoProcess() const {
+  /// Whether this breakpoint's hits arrive from code the debugger compiled
+  /// rather than from the program's own, because the work done at them -- a
+  /// condition, or a whole tracepoint -- was compiled into a copy of the
+  /// function they are in.
+  bool HitsComeFromCompiledCode() const {
     return m_condition_compiled_into_process;
+  }
+
+  /// Records that they do.
+  ///
+  /// Said before the patch is installed rather than after: announcing the copy
+  /// is part of installing it, and that is the moment this breakpoint acquires
+  /// a location inside the copy which must not be armed.
+  void SetHitsComeFromCompiledCode(bool value = true) {
+    m_condition_compiled_into_process = value;
   }
 
   /// Why this breakpoint's condition is not compiled into the process, when it
