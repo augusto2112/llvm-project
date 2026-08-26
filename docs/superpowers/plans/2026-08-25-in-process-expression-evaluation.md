@@ -1399,7 +1399,9 @@ TEST(PatchSourceBuilderTest, EmitsADrainTrapWhenThereAreCaptures) {
   Inj.Captures = {"acc"};
   Inj.WantStop = false;
   std::string Source = BuildPatchSource(Request({Inj}));
-  EXPECT_NE(std::string::npos, Source.find("high_water"));
+  // The comparison, not the field name: the header declares `high_water`
+  // whether or not anything reads it.
+  EXPECT_NE(std::string::npos, Source.find("- __LLDB_HDR->drained >="));
 }
 
 // Nothing is recorded, so nothing can fill the ring, so asking whether it is
@@ -1408,7 +1410,24 @@ TEST(PatchSourceBuilderTest, OmitsTheDrainTrapWithNoCaptures) {
   auto Inj = Bare(5);
   Inj.Condition = "acc > 1";
   std::string Source = BuildPatchSource(Request({Inj}));
-  EXPECT_EQ(std::string::npos, Source.find("high_water"));
+  EXPECT_EQ(std::string::npos, Source.find("- __LLDB_HDR->drained >="));
+}
+
+// The header's shape is a contract with the struct the debugger reads the block
+// with, so it cannot depend on what any one patch happens to need. Omitting a
+// field it does not read would move `ring` and cost nothing, since a
+// declaration is not storage.
+TEST(PatchSourceBuilderTest, DeclaresTheWholeHeaderWhateverThePatchUses) {
+  auto Inj = Bare(5);
+  Inj.Condition = "acc > 1";
+  std::string WithoutCaptures = BuildPatchSource(Request({Inj}));
+  Inj.Captures = {"acc"};
+  std::string WithCaptures = BuildPatchSource(Request({Inj}));
+
+  const char *Decl = "struct __lldb_hdr_t { unsigned long seq, drained, "
+                     "capacity, high_water; struct __lldb_rec_t ring[]; };";
+  EXPECT_NE(std::string::npos, WithoutCaptures.find(Decl));
+  EXPECT_NE(std::string::npos, WithCaptures.find(Decl));
 }
 
 TEST(PatchSourceBuilderTest, PlacesTwoInjectionsAtTheirOwnLines) {
@@ -1800,7 +1819,7 @@ ninja -C /Users/work/Developer/llvm/build TargetTests && \
   /Users/work/Developer/llvm/build/tools/lldb/unittests/Target/TargetTests --gtest_filter='PatchSourceBuilderTest.*'
 ```
 
-Expected: `[  PASSED  ] 25 tests.`
+Expected: `[  PASSED  ] 26 tests.`
 
 Two failures to expect and fix rather than work around:
 - `MasksTheRingIndexWithALiteralCapacity` fails if `formatv` renders the mask in hex. It must be decimal — `4095`, not `0xfff`.
