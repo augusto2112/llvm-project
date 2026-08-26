@@ -10,13 +10,16 @@
 #define LLDB_TARGET_FUNCTIONPATCH_H
 
 #include "lldb/Breakpoint/BreakpointOptions.h"
+#include "lldb/Symbol/CompilerType.h"
 #include "lldb/Target/FunctionBodySource.h"
 #include "lldb/Target/PatchControlBlock.h"
 #include "lldb/Target/PatchSourceBuilder.h"
 #include "lldb/lldb-forward.h"
 #include "lldb/lldb-types.h"
+#include "llvm/ADT/ArrayRef.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
+#include "llvm/ADT/StringRef.h"
 #include "llvm/Support/Chrono.h"
 #include "llvm/Support/Error.h"
 #include <cstddef>
@@ -28,6 +31,7 @@
 
 namespace lldb_private {
 
+class Function;
 class Target;
 
 /// Why a function could not be patched. Every value falls back to evaluating
@@ -119,6 +123,13 @@ public:
   /// Drops one injection and recompiles what remains.
   llvm::Error Remove(uint32_t SiteID);
 
+  /// Why a capture of \p SiteID was dropped, one string per dropped capture.
+  ///
+  /// A capture whose type the copy's debug info says is not a scalar is dropped
+  /// on its own rather than refusing the injection, so the reason for it has to
+  /// be reachable on its own too.
+  llvm::ArrayRef<std::string> GetDroppedCaptures(uint32_t SiteID) const;
+
   /// Forgets every patch, for a process that is gone: the copies, the redirects
   /// into them, and the inferior addresses they were compiled around.
   ///
@@ -136,6 +147,19 @@ public:
 private:
   struct PatchedFunction;
 
+  /// One capture's type, and what it is a capture of.
+  struct RecordedCapture {
+    /// Read from the `__lldb_cap_*` local in the compiled copy's debug info,
+    /// which is the only place the type is known: `__typeof__` is what decides
+    /// it, so only the compiler can say what it was.
+    CompilerType Type;
+
+    /// The expression as the caller wrote it, which is the name a recorded
+    /// value is reported under. A value labelled by its position in a capture
+    /// list says nothing about what was captured.
+    std::string Expression;
+  };
+
   /// Allocates the shared ring block, once, on the first install.
   llvm::Error EnsureRingBlock();
 
@@ -145,6 +169,14 @@ private:
   /// Compiles \p Fn's current injection set and points its trampoline at the
   /// result.
   llvm::Error Recompile(PatchedFunction &Fn);
+
+  /// Records the type the compiled copy's debug info gives every capture of \p
+  /// Fn's injections, and drops from \p Fn the captures that type refuses.
+  ///
+  /// Returns whether anything was dropped, which means the copy just compiled
+  /// records something it should not and has to be compiled again.
+  bool RecordCaptureTypes(PatchedFunction &Fn, Function &Copy,
+                          llvm::StringRef Tag);
 
   /// Registers the site that attributes the trap the compiled copy contains at
   /// \p Trap, and gives it an internal breakpoint of its own to carry \p
@@ -167,6 +199,11 @@ private:
   /// injection has no new site to name it after, so the tag is its own
   /// sequence rather than borrowed from one that does not always advance.
   uint32_t m_next_compile_tag = 0;
+
+  /// Each site's captures, in the order the injected code numbers them.
+  llvm::DenseMap<uint32_t, std::vector<RecordedCapture>> m_captures;
+
+  llvm::DenseMap<uint32_t, std::vector<std::string>> m_dropped_captures;
 
   llvm::DenseMap<lldb::addr_t, std::unique_ptr<PatchedFunction>> m_functions;
   llvm::DenseMap<uint32_t, lldb::addr_t> m_site_to_function;

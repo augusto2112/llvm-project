@@ -22,9 +22,13 @@
 #include "lldb/Expression/LLVMUserExpression.h"
 #include "lldb/Expression/UserExpression.h"
 #include "lldb/Host/FileSystem.h"
+#include "lldb/Symbol/Block.h"
 #include "lldb/Symbol/CompilerDeclContext.h"
 #include "lldb/Symbol/Function.h"
 #include "lldb/Symbol/SymbolContext.h"
+#include "lldb/Symbol/Type.h"
+#include "lldb/Symbol/Variable.h"
+#include "lldb/Symbol/VariableList.h"
 #include "lldb/Target/EntryTrampoline.h"
 #include "lldb/Target/ExecutionContext.h"
 #include "lldb/Target/Process.h"
@@ -38,12 +42,14 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Endian.h"
+#include "llvm/Support/FormatVariadic.h"
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -470,6 +476,10 @@ struct CompiledCopy {
 
   /// Bytes of code the copy occupies, which bounds the search for its traps.
   lldb::addr_t Size = 0;
+
+  /// What describes the copy's own locals, which is where each capture's type
+  /// is read from. Owned by \ref Module, so it lives exactly as long.
+  Function *Definition = nullptr;
 };
 
 /// Takes \p Name back out of the declarations the target remembers.
@@ -584,6 +594,7 @@ llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
   if (Copy.Address == LLDB_INVALID_ADDRESS || Copy.Size == 0)
     return Refuse(PatchFailure::CompileFailed,
                   "the compiled copy's code has no address in the process");
+  Copy.Definition = CopyFunction;
   return Copy;
 }
 
@@ -650,6 +661,57 @@ size_t TrapsEmittedFor(const PatchInjection &Inj) {
 bool ResumeWithoutReporting(void *, StoppointCallbackContext *, lldb::user_id_t,
                             lldb::user_id_t) {
   return false;
+}
+
+/// The type the copy's debug info gives the local named \p Name, or an invalid
+/// type when the copy declares no such local.
+///
+/// Searched through the function's child blocks as well as its own, because an
+/// injection inside a loop or an `if` puts its locals in the block that
+/// statement opened rather than at the function's top level.
+CompilerType LocalType(Function &Copy, llvm::StringRef Name) {
+  const ConstString Wanted(Name);
+  VariableList Locals;
+  Copy.GetBlock(/*can_create=*/true)
+      .AppendBlockVariables(
+          /*can_create=*/true, /*get_child_block_variables=*/true,
+          /*stop_if_child_block_is_inlined_function=*/false,
+          [Wanted](Variable *Var) { return Var && Var->GetName() == Wanted; },
+          &Locals);
+  if (Locals.GetSize() == 0)
+    return CompilerType();
+
+  lldb::VariableSP Local = Locals.GetVariableAtIndex(0);
+  Type *Declared = Local ? Local->GetType() : nullptr;
+  return Declared ? Declared->GetForwardCompilerType() : CompilerType();
+}
+
+/// Why a value of \p Type cannot travel through the record's eight-byte field,
+/// or an empty string when it can.
+///
+/// The gate the whole capture path depends on. The field is fixed, so a type
+/// wider than it never arrived intact, and a type that is not a scalar has
+/// no single value the field could have held.
+std::string WhyNotRecordable(const CompilerType &Type) {
+  if (!Type.IsValid())
+    return "the compiled copy's debug info describes no type for it";
+  if (!Type.IsScalarType())
+    return ("\"" + Type.GetDisplayTypeName().GetStringRef() +
+            "\" is not a scalar")
+        .str();
+
+  llvm::Expected<uint64_t> ByteSize = Type.GetByteSize(/*exe_scope=*/nullptr);
+  if (!ByteSize) {
+    llvm::consumeError(ByteSize.takeError());
+    return ("the size of \"" + Type.GetDisplayTypeName().GetStringRef() +
+            "\" is not known")
+        .str();
+  }
+  if (*ByteSize == 0 || *ByteSize > sizeof(uint64_t))
+    return llvm::formatv("\"{0}\" occupies {1} bytes",
+                         Type.GetDisplayTypeName().GetStringRef(), *ByteSize)
+        .str();
+  return "";
 }
 
 } // namespace
@@ -762,6 +824,8 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
     // be remembered as live in a function still running its previous copy.
     Fn->Injections.pop_back();
     Fn->Callbacks.erase(SiteID);
+    m_captures.erase(SiteID);
+    m_dropped_captures.erase(SiteID);
     return std::move(Err);
   }
 
@@ -799,6 +863,9 @@ llvm::Error FunctionPatchManager::Remove(uint32_t SiteID) {
   Fn.Callbacks.erase(SiteID);
   m_site_to_function.erase(SiteIt);
 
+  m_captures.erase(SiteID);
+  m_dropped_captures.erase(SiteID);
+
   // Recompiled even when nothing is left to inject, rather than putting the
   // original entry back. Restoring it means writing all sixteen bytes of a
   // trampoline threads are branching through, where re-pointing the literal at
@@ -826,6 +893,16 @@ void FunctionPatchManager::ForgetProcess() {
   m_slot_pool = LLDB_INVALID_ADDRESS;
   m_slots_used_in_page = 0;
   m_next_site_id = 1;
+  m_captures.clear();
+  m_dropped_captures.clear();
+}
+
+llvm::ArrayRef<std::string>
+FunctionPatchManager::GetDroppedCaptures(uint32_t SiteID) const {
+  auto It = m_dropped_captures.find(SiteID);
+  if (It == m_dropped_captures.end())
+    return {};
+  return It->second;
 }
 
 bool FunctionPatchManager::IsPatched(lldb::addr_t Entry) const {
@@ -943,23 +1020,37 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   // Built from the original body every time rather than from the last copy,
   // which is what makes a second injection compose with the first instead of
   // patching a patch.
-  PatchSourceRequest Request;
-  Request.Body = Fn.Body;
-  Request.SourcePath = Fn.SourcePath;
-  Request.RingAddress = m_ring_address;
-  Request.RingCapacity = kDefaultRingCapacity;
-  Request.Injections = Fn.Injections;
+  //
+  // Compiled more than once when a capture turns out to be unrecordable, since
+  // `__typeof__` is what decides a capture's type and only the compiler knows
+  // what that came to. Each pass drops at least one capture, so the number of
+  // passes is bounded by the number of captures.
+  std::optional<CompiledCopy> Copy;
+  while (!Copy) {
+    PatchSourceRequest Request;
+    Request.Body = Fn.Body;
+    Request.SourcePath = Fn.SourcePath;
+    Request.RingAddress = m_ring_address;
+    Request.RingCapacity = kDefaultRingCapacity;
+    Request.Injections = Fn.Injections;
 
-  // Every compile is a fresh top-level expression whose declarations persist
-  // in the target, so a tag of its own is what keeps this one from redefining
-  // the last one's -- whether that was for this function or another, and
-  // whether recompiling only dropped an injection rather than adding one.
-  Request.Tag = std::to_string(m_next_compile_tag++);
+    // Every compile is a fresh top-level expression whose declarations persist
+    // in the target, so a tag of its own is what keeps this one from redefining
+    // the last one's -- whether that was for this function or another, and
+    // whether recompiling only dropped an injection rather than adding one.
+    Request.Tag = std::to_string(m_next_compile_tag++);
 
-  llvm::Expected<CompiledCopy> Copy =
-      CompileCopy(m_target, BuildPatchSource(Request), Fn.Name);
-  if (!Copy)
-    return Copy.takeError();
+    llvm::Expected<CompiledCopy> Compiled =
+        CompileCopy(m_target, BuildPatchSource(Request), Fn.Name);
+    if (!Compiled)
+      return Compiled.takeError();
+
+    // A copy that records something it should not is discarded here rather than
+    // installed: nothing points at it yet, so letting go of it leaves the
+    // program running exactly the code it was already running.
+    if (!RecordCaptureTypes(Fn, *Compiled->Definition, Request.Tag))
+      Copy = std::move(*Compiled);
+  }
 
   llvm::Expected<std::vector<lldb::addr_t>> Traps =
       FindDebugTraps(*Proc, Copy->Address, Copy->Size);
@@ -1077,6 +1168,43 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   Fn.CurrentExpression = std::move(Copy->Expression);
   Fn.CopyAddress = Copy->Address;
   return llvm::Error::success();
+}
+
+bool FunctionPatchManager::RecordCaptureTypes(PatchedFunction &Fn,
+                                              Function &Copy,
+                                              llvm::StringRef Tag) {
+  bool Dropped = false;
+  for (PatchInjection &Inj : Fn.Injections) {
+    std::vector<RecordedCapture> Recorded;
+    std::vector<std::string> Kept;
+    for (uint32_t I = 0; I < Inj.Captures.size(); ++I) {
+      const CompilerType Type =
+          LocalType(Copy, CaptureLocalName(Tag, Inj.SiteID, I));
+      const std::string Why = WhyNotRecordable(Type);
+      if (!Why.empty()) {
+        // Dropped on its own rather than refusing the injection, because one
+        // aggregate in a capture list must not cost the caller every scalar
+        // beside it. Kept for as long as the site, since a capture that never
+        // arrives has to be explainable whenever the caller asks -- and not
+        // cleared by the recompile it causes, which is the pass that no longer
+        // has the capture to refuse.
+        m_dropped_captures[Inj.SiteID].push_back(
+            llvm::formatv("\"{0}\": {1}: {2}", Inj.Captures[I],
+                          ToString(PatchFailure::CaptureNotScalar), Why)
+                .str());
+        Dropped = true;
+        continue;
+      }
+      Recorded.push_back(RecordedCapture{Type, Inj.Captures[I]});
+      Kept.push_back(Inj.Captures[I]);
+    }
+    // Replaced whole rather than updated in place. A capture's number is its
+    // position in the list that survives, so dropping one renumbers those after
+    // it and anything left over from before would answer for the wrong capture.
+    m_captures[Inj.SiteID] = std::move(Recorded);
+    Inj.Captures = std::move(Kept);
+  }
+  return Dropped;
 }
 
 llvm::Expected<lldb::break_id_t>
