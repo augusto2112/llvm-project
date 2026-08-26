@@ -26,6 +26,9 @@ CONDITION_LINE = r"total \+= i;"
 # A second line of the same function, for a second condition on it.
 SECOND_CONDITION_LINE = "return total;"
 
+# A line of the file-local function, whose declaration also spans two lines.
+FILE_LOCAL_LINE = r"local_total \+= i;"
+
 
 class FastConditionsTestCase(TestBase):
     NO_DEBUG_INFO_TESTCASE = True
@@ -655,6 +658,45 @@ class FastConditionsTestCase(TestBase):
                 matching=False,
             )
             process.Kill()
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_file_local_function_declared_across_lines(self):
+        """A `static` function whose return type is on its own line is patched.
+
+        Two things that say nothing about what a body does and are ordinary in C.
+        `static` gives the function internal linkage, and the declaration the
+        expression parser derives from the program's debug info gives it external
+        linkage, so a copy that kept the keyword would be a definition the
+        compiler refuses. And the declaration line debug info records is the line
+        the name is on, which for a signature broken across lines is past the
+        return type -- text taken from there declares nothing at all.
+
+        Both used to leave the condition to be evaluated at a stop, which is to
+        say they cost a stop per hit on most of the C worth patching.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            FILE_LOCAL_LINE, lldb.SBFileSpec("main.c")
+        )
+        self.assertGreater(bp.GetNumLocations(), 0, "the location resolved")
+        bp.SetCondition("seed == 60000 && i == 2")
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        frame = process.GetSelectedThread().GetFrameAtIndex(0)
+        self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 60000)
+        self.assertEqual(frame.FindVariable("local_total").GetValueAsSigned(), 120001)
+        self.expect(
+            "breakpoint list %d" % bp.GetID(),
+            substrs=["Condition not compiled into the process"],
+            matching=False,
+        )
+        # Which is the whole of what the keywords cost: the hundred thousand
+        # calls before this one paid for no stops.
+        self.assertLess(
+            process.GetStopID(True), STOPS_ALLOWANCE, "the run paid for no hits"
+        )
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))

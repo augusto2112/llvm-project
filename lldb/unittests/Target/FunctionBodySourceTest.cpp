@@ -189,13 +189,61 @@ TEST(FunctionBodySourceTest, AllowsStaticAsPartOfAnotherWord) {
 // `static` on the declaration gives the function internal linkage, which says
 // nothing about whether a copy would behave differently. Refusing it would
 // refuse most of the C worth patching.
-TEST(FunctionBodySourceTest, AllowsAStaticFunction) {
+//
+// It is blanked rather than kept: the expression parser derives a declaration of
+// the function from the program's own debug info, where it has external linkage,
+// and a definition that follows it with internal linkage is one the compiler
+// refuses. Blanked in place, so every byte after it keeps its offset and line.
+TEST(FunctionBodySourceTest, BlanksStaticOnTheDeclaration) {
   llvm::StringRef Buffer = "static int f(int x) {\n"
                            "  return x + 1;\n"
                            "}\n";
   auto Body = Extract(Buffer, 1);
   ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
-  EXPECT_EQ("static int f(int x) {\n  return x + 1;\n}", Body->Text);
+  EXPECT_EQ("       int f(int x) {\n  return x + 1;\n}", Body->Text);
+}
+
+TEST(FunctionBodySourceTest, BlanksStaticInlineOnTheDeclaration) {
+  llvm::StringRef Buffer = "static inline int f(void) {\n"
+                           "  return 1;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 1);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ("              int f(void) {\n  return 1;\n}", Body->Text);
+}
+
+// On a line of its own, which is where a signature broken across lines puts it,
+// so the blanking has to reach text taken from above the name's line.
+TEST(FunctionBodySourceTest, BlanksStaticAboveTheNamesLine) {
+  llvm::StringRef Buffer = "static int\n"
+                           "f(int x) {\n"
+                           "  return x;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 2);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ(1u, Body->FirstLine);
+  EXPECT_EQ("       int\nf(int x) {\n  return x;\n}", Body->Text);
+}
+
+// `static` as a parameter's array bound is C99's "at least this many", which is
+// part of the parameter's type rather than the definition's linkage.
+TEST(FunctionBodySourceTest, KeepsStaticInsideTheParameterList) {
+  llvm::StringRef Buffer = "int f(int a[static 4]) {\n"
+                           "  return a[0];\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 1);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ("int f(int a[static 4]) {\n  return a[0];\n}", Body->Text);
+}
+
+// And a name that merely contains one of the keywords is not one.
+TEST(FunctionBodySourceTest, KeepsAWordEndingInAKeyword) {
+  llvm::StringRef Buffer = "int mystatic(int x) {\n"
+                           "  return x;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 1);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ("int mystatic(int x) {\n  return x;\n}", Body->Text);
 }
 
 // A static local inside a static function is still refused: the storage is what
@@ -264,4 +312,115 @@ TEST(FunctionBodySourceTest, HandlesAMultiLineDeclaration) {
   ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
   EXPECT_EQ(1u, Body->FirstLine);
   EXPECT_TRUE(llvm::StringRef(Body->Text).ends_with("return a + b;\n}"));
+}
+
+// `DW_AT_decl_line` names the line the function's name is on, which for a
+// signature broken across lines is not where the declaration starts. Text taken
+// from the name onwards declares nothing -- it has no return type -- so the
+// lines above it are part of what has to be recompiled.
+TEST(FunctionBodySourceTest, TakesAReturnTypeFromTheLineAbove) {
+  llvm::StringRef Buffer = "int before;\n"
+                           "\n"
+                           "static int\n"
+                           "f(int a,\n"
+                           "  int b)\n"
+                           "{\n"
+                           "  return a + b;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 4);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ(3u, Body->FirstLine);
+  EXPECT_TRUE(llvm::StringRef(Body->Text).starts_with("       int\nf(int a,"));
+  EXPECT_TRUE(llvm::StringRef(Body->Text).ends_with("return a + b;\n}"));
+  // The index still starts at the text's own first line, which is what places
+  // an injection: line `FirstLine + N` begins at `LineStarts[N]`.
+  ASSERT_EQ(6u, Body->LineStarts.size());
+  EXPECT_EQ("  return a + b;\n}", Body->Text.substr(Body->LineStarts[4]));
+}
+
+// Several such lines, since an attribute and a return type can each have one of
+// their own.
+TEST(FunctionBodySourceTest, TakesEveryLineThatOnlyLeadsIntoTheName) {
+  llvm::StringRef Buffer = "\n"
+                           "__attribute__((noinline))\n"
+                           "static const char *\n"
+                           "f(void)\n"
+                           "{\n"
+                           "  return \"x\";\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 4);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ(2u, Body->FirstLine);
+  EXPECT_TRUE(
+      llvm::StringRef(Body->Text).starts_with("__attribute__((noinline))\n"));
+}
+
+// The line above ends a declaration of something else, so it is that
+// declaration's rather than this one's.
+TEST(FunctionBodySourceTest, StopsAtAStatementAbove) {
+  llvm::StringRef Buffer = "int before;\n"
+                           "int f(int a) {\n"
+                           "  return a;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 2);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ(2u, Body->FirstLine);
+  EXPECT_EQ("int f(int a) {\n  return a;\n}", Body->Text);
+}
+
+// And so does the closing brace of whatever came before.
+TEST(FunctionBodySourceTest, StopsAtAClosingBraceAbove) {
+  llvm::StringRef Buffer = "int g(void) {\n"
+                           "  return 0;\n"
+                           "}\n"
+                           "int\n"
+                           "f(int a) {\n"
+                           "  return a;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 5);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ(4u, Body->FirstLine);
+  EXPECT_TRUE(llvm::StringRef(Body->Text).starts_with("int\nf(int a) {"));
+}
+
+// A directive above is the preprocessor's, and taking it into a body that is
+// compiled on its own would declare it a second time.
+TEST(FunctionBodySourceTest, StopsAtAPreprocessorDirectiveAbove) {
+  llvm::StringRef Buffer = "#define N 1\n"
+                           "int f(void) {\n"
+                           "  return N;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 2);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ(2u, Body->FirstLine);
+  EXPECT_EQ("int f(void) {\n  return N;\n}", Body->Text);
+}
+
+// A comment above is not taken either. It would be harmless to recompile, but a
+// comment can be opened on one line and closed on another, and a start chosen
+// part way through one would leave text that closes a comment nothing opened.
+TEST(FunctionBodySourceTest, StopsAtACommentAbove) {
+  llvm::StringRef Buffer = "/* what f does:\n"
+                           " * it returns a; that is all\n"
+                           " */\n"
+                           "int\n"
+                           "f(int a) {\n"
+                           "  return a;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 5);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ(4u, Body->FirstLine);
+  EXPECT_EQ("int\nf(int a) {\n  return a;\n}", Body->Text);
+}
+
+// The first line of the buffer, with nothing above it to stop at.
+TEST(FunctionBodySourceTest, TakesTheReturnTypeOnTheFirstLineOfTheBuffer) {
+  llvm::StringRef Buffer = "int\n"
+                           "f(void) {\n"
+                           "  return 0;\n"
+                           "}\n";
+  auto Body = Extract(Buffer, 2);
+  ASSERT_THAT_EXPECTED(Body, llvm::Succeeded());
+  EXPECT_EQ(1u, Body->FirstLine);
+  EXPECT_EQ("int\nf(void) {\n  return 0;\n}", Body->Text);
 }

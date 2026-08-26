@@ -47,35 +47,103 @@ size_t OffsetOfLine(llvm::StringRef Buffer, uint32_t Line) {
   return Offset <= Buffer.size() ? Offset : llvm::StringRef::npos;
 }
 
-/// Whether the keyword `static` begins at \p I in \p Text.
+/// Whether \p Line can only be part of the declaration that follows it.
+///
+/// A line that ends a declaration, opens or closes a scope, holds a
+/// preprocessor directive, or holds any part of a comment could stand on its
+/// own, so it is something else's. What is left -- `static int`,
+/// `__attribute__((noinline))`, a return type on a line of its own -- has no
+/// meaning except as the start of what comes next.
+bool LineOnlyLeadsIntoWhatFollows(llvm::StringRef Line) {
+  return !Line.trim().empty() && Line.find_first_of(";{}#/") == llvm::StringRef::npos;
+}
+
+/// Where the declaration whose name is on the line starting at \p LineStart
+/// begins.
+///
+/// A function's `DW_AT_decl_line` names the line its own name is on, which for
+/// a signature broken across lines is not where the declaration starts: the
+/// return type and the storage class are on the lines above, and text taken
+/// from the name onwards is not a declaration of anything. So the lines
+/// immediately above are taken as well, for as long as each of them can only be
+/// leading into this one.
+size_t StartOfDeclaration(llvm::StringRef Buffer, size_t LineStart) {
+  size_t Start = LineStart;
+  while (Start > 0) {
+    // Every offset this walks to is a line start, so the byte before it is the
+    // newline ending the line above.
+    const size_t NewlineAbove = Start - 1;
+    size_t Candidate = 0;
+    if (NewlineAbove > 0) {
+      const size_t Earlier = Buffer.rfind('\n', NewlineAbove - 1);
+      if (Earlier != llvm::StringRef::npos)
+        Candidate = Earlier + 1;
+    }
+    if (!LineOnlyLeadsIntoWhatFollows(Buffer.slice(Candidate, NewlineAbove)))
+      break;
+    Start = Candidate;
+  }
+  return Start;
+}
+
+/// Whether the keyword \p Keyword begins at \p I in \p Text, as a whole word.
 ///
 /// A textual check, which is what keeps this callable before anything is
-/// compiled. It over-reports in one direction only: a `static` a macro would
-/// have removed still refuses the patch, and refusing is the safe answer.
-bool StaticKeywordAt(llvm::StringRef Text, size_t I) {
-  if (!Text.substr(I).starts_with("static"))
+/// compiled. It over-reports in one direction only: a keyword a macro would have
+/// removed is still seen here, and for both of this file's uses seeing one too
+/// many is the safe answer.
+bool KeywordAt(llvm::StringRef Text, size_t I, llvm::StringRef Keyword) {
+  if (!Text.substr(I).starts_with(Keyword))
     return false;
   const bool StartsWord =
       I == 0 || !(llvm::isAlnum(Text[I - 1]) || Text[I - 1] == '_');
-  const size_t After = I + 6;
+  const size_t After = I + Keyword.size();
   const bool EndsWord =
       After >= Text.size() || !(llvm::isAlnum(Text[After]) || Text[After] == '_');
   return StartsWord && EndsWord;
 }
 
+/// The keywords on a declaration that say only how the definition is linked and
+/// emitted.
+///
+/// A copy the debugger compiles is emitted on its own and reached through a
+/// redirect written over the original's entry rather than by name, so none of
+/// these describes anything the copy needs -- and each of them, kept, makes the
+/// copy disagree with the declaration the expression parser derives from the
+/// program's own debug info, which is a definition the compiler refuses.
+constexpr llvm::StringLiteral kLinkageKeywords[] = {
+    llvm::StringLiteral("static"), llvm::StringLiteral("inline"),
+    llvm::StringLiteral("__inline"), llvm::StringLiteral("__inline__")};
+
 } // namespace
 
 llvm::Expected<FunctionBodyText>
 lldb_private::ExtractFunctionBody(llvm::StringRef Buffer, uint32_t DeclLine) {
-  const size_t Start = OffsetOfLine(Buffer, DeclLine);
-  if (Start == llvm::StringRef::npos)
+  const size_t NameLine = OffsetOfLine(Buffer, DeclLine);
+  if (NameLine == llvm::StringRef::npos)
     return Fail(BodyExtractFailure::NotFound);
+
+  // The declaration may start above the line its name is on, and the copy is
+  // compiled from the declaration onwards, so the text has to start where the
+  // declaration does rather than where debug info found the name.
+  const size_t Start = StartOfDeclaration(Buffer, NameLine);
+  const uint32_t FirstLine =
+      DeclLine - static_cast<uint32_t>(llvm::StringRef(Buffer)
+                                           .slice(Start, NameLine)
+                                           .count('\n'));
 
   enum { Code, InString, InChar, InLineComment, InBlockComment } State = Code;
   int Depth = 0;
+  int ParenDepth = 0;
   bool SawBrace = false;
   bool SawStaticLocal = false;
   size_t End = llvm::StringRef::npos;
+
+  // Where the declaration says how it is linked. Blanked rather than cut out, so
+  // that every byte after them keeps the offset and the line it had in the
+  // original -- which is what lets an injection be placed by line and a `#line`
+  // directive name the original source.
+  std::vector<std::pair<size_t, size_t>> LinkageKeywords;
 
   for (size_t I = Start, E = Buffer.size(); I != E; ++I) {
     char C = Buffer[I];
@@ -105,12 +173,26 @@ lldb_private::ExtractFunctionBody(llvm::StringRef Buffer, uint32_t DeclLine) {
       } else if (C == ';' && !SawBrace) {
         // A declaration rather than a definition.
         return Fail(BodyExtractFailure::NotFound);
-      } else if (Depth > 0 && C == 's' && StaticKeywordAt(Buffer, I)) {
+      } else if (C == '(' && !SawBrace) {
+        ++ParenDepth;
+      } else if (C == ')' && !SawBrace) {
+        --ParenDepth;
+      } else if (Depth > 0 && C == 's' && KeywordAt(Buffer, I, "static")) {
         // Only inside the body. On the declaration `static` gives the function
         // internal linkage, which says nothing about whether a copy of it would
         // behave differently -- and refusing every file-local function would
         // refuse most of the C worth patching.
         SawStaticLocal = true;
+      } else if (!SawBrace && ParenDepth == 0) {
+        // Outside the parameter list, where `static` is an array bound's rather
+        // than the definition's.
+        for (llvm::StringRef Keyword : kLinkageKeywords) {
+          if (!KeywordAt(Buffer, I, Keyword))
+            continue;
+          LinkageKeywords.emplace_back(I - Start, Keyword.size());
+          I += Keyword.size() - 1;
+          break;
+        }
       }
       break;
     case InString:
@@ -147,7 +229,11 @@ lldb_private::ExtractFunctionBody(llvm::StringRef Buffer, uint32_t DeclLine) {
 
   FunctionBodyText Body;
   Body.Text = Buffer.substr(Start, End - Start).str();
-  Body.FirstLine = DeclLine;
+  Body.FirstLine = FirstLine;
+
+  for (const auto &[Offset, Length] : LinkageKeywords)
+    if (Offset + Length <= Body.Text.size())
+      Body.Text.replace(Offset, Length, Length, ' ');
 
   Body.LineStarts.push_back(0);
   for (size_t I = 0, E = Body.Text.size(); I != E; ++I)
