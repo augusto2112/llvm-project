@@ -43,13 +43,19 @@ TEST(FunctionPatchTest, IgnoresAnUnreadableTimestamp) {
 // Every reason is nameable, because a report that says a patch was refused
 // without saying why leaves the caller unable to act on it.
 TEST(FunctionPatchTest, NamesEveryFailure) {
-  const PatchFailure All[] = {
-      PatchFailure::NotArm64,           PatchFailure::NoProcess,
-      PatchFailure::NoSourceFile,       PatchFailure::SourceNewerThanBinary,
-      PatchFailure::BodyNotFound,       PatchFailure::StaticLocal,
-      PatchFailure::EntryTooSmall,      PatchFailure::ThreadInPatchRange,
-      PatchFailure::BreakpointInPatchRange, PatchFailure::CompileFailed,
-      PatchFailure::CaptureNotScalar,   PatchFailure::Unsupported};
+  const PatchFailure All[] = {PatchFailure::NotArm64,
+                              PatchFailure::NoProcess,
+                              PatchFailure::InferiorAccessFailed,
+                              PatchFailure::NoSourceFile,
+                              PatchFailure::SourceNewerThanBinary,
+                              PatchFailure::BodyNotFound,
+                              PatchFailure::StaticLocal,
+                              PatchFailure::EntryTooSmall,
+                              PatchFailure::ThreadInPatchRange,
+                              PatchFailure::BreakpointInPatchRange,
+                              PatchFailure::CompileFailed,
+                              PatchFailure::CaptureNotScalar,
+                              PatchFailure::Unsupported};
   for (PatchFailure Reason : All) {
     EXPECT_FALSE(ToString(Reason).empty());
     EXPECT_NE("unknown", ToString(Reason));

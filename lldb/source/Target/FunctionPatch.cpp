@@ -100,6 +100,8 @@ llvm::StringRef lldb_private::ToString(PatchFailure Reason) {
     return "in-process evaluation is implemented for arm64 only";
   case PatchFailure::NoProcess:
     return "there is no running process to patch";
+  case PatchFailure::InferiorAccessFailed:
+    return "an operation on the inferior's memory failed";
   case PatchFailure::NoSourceFile:
     return "the function's source file could not be read";
   case PatchFailure::SourceNewerThanBinary:
@@ -147,23 +149,14 @@ llvm::Error Refuse(PatchFailure Reason) {
 
 /// As above, with \p Detail naming which of the reason's several ways of
 /// happening this was.
-///
-/// A reason names something a caller can act on, and failing to reach the
-/// inferior at all is not one of them. Those are reported as there being no
-/// process to patch -- a process that cannot be read or written is not one this
-/// can patch -- and the detail carries what actually failed.
 llvm::Error Refuse(PatchFailure Reason, const llvm::Twine &Detail) {
   return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                  llvm::Twine(ToString(Reason)) + ": " + Detail);
 }
 
 /// Which refusal an extraction failure amounts to.
-///
-/// The extractor reports its reason as prose, so the reason is recovered by
-/// comparing against that same prose rather than against a spelling of our own:
-/// there is one spelling, so the two cannot drift.
-PatchFailure ClassifyBodyFailure(llvm::StringRef Message) {
-  if (Message == ToString(BodyExtractFailure::StaticLocal))
+PatchFailure ClassifyBodyFailure(BodyExtractFailure Reason) {
+  if (Reason == BodyExtractFailure::StaticLocal)
     return PatchFailure::StaticLocal;
   return PatchFailure::BodyNotFound;
 }
@@ -244,8 +237,13 @@ llvm::Expected<FunctionFacts> ReadFunctionFacts(Target &Tgt,
   llvm::Expected<FunctionBodyText> Body =
       ExtractFunctionBody(ReadWholeFile(*Source), DeclLine);
   if (!Body) {
-    const std::string Message = llvm::toString(Body.takeError());
-    return Refuse(ClassifyBodyFailure(Message), Message);
+    BodyExtractFailure ExtractReason = BodyExtractFailure::NotFound;
+    if (llvm::Error Leftover = llvm::handleErrors(
+            Body.takeError(), [&](const BodyExtractError &Err) {
+              ExtractReason = Err.reason();
+            }))
+      return std::move(Leftover);
+    return Refuse(ClassifyBodyFailure(ExtractReason), ToString(ExtractReason));
   }
   Facts.Body = std::move(*Body);
 
@@ -342,7 +340,7 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
     if (Proc->ReadMemory(Entry, Fresh->OriginalBytes.data(),
                          Fresh->OriginalBytes.size(),
                          ReadError) != Fresh->OriginalBytes.size())
-      return Refuse(PatchFailure::NoProcess,
+      return Refuse(PatchFailure::InferiorAccessFailed,
                     llvm::Twine("the function's entry could not be read: ") +
                         ReadError.AsCString());
 
@@ -371,7 +369,7 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
     Status GateError;
     if (Proc->WriteMemory(*Slot + offsetof(PatchSiteSlot, Gate), &Open,
                           sizeof(Open), GateError) != sizeof(Open))
-      return Refuse(PatchFailure::NoProcess,
+      return Refuse(PatchFailure::InferiorAccessFailed,
                     llvm::Twine("the site's gate could not be written: ") +
                         GateError.AsCString());
   }
@@ -434,7 +432,7 @@ llvm::Error FunctionPatchManager::EnsureRingBlock() {
       kPatchRingHeaderSize + kDefaultRingCapacity * kPatchRecordSize,
       lldb::ePermissionsReadable | lldb::ePermissionsWritable, AllocError);
   if (Block == LLDB_INVALID_ADDRESS)
-    return Refuse(PatchFailure::NoProcess,
+    return Refuse(PatchFailure::InferiorAccessFailed,
                   llvm::Twine("the record block could not be allocated: ") +
                       AllocError.AsCString());
 
@@ -451,7 +449,7 @@ llvm::Error FunctionPatchManager::EnsureRingBlock() {
   Status WriteError;
   if (Proc->WriteMemory(Block, Header, sizeof(Header), WriteError) !=
       sizeof(Header))
-    return Refuse(PatchFailure::NoProcess,
+    return Refuse(PatchFailure::InferiorAccessFailed,
                   llvm::Twine("the record block's header could not be "
                               "written: ") +
                       WriteError.AsCString());
@@ -476,7 +474,7 @@ llvm::Expected<lldb::addr_t> FunctionPatchManager::AllocateSiteSlot() {
         kSlotPoolPageSize,
         lldb::ePermissionsReadable | lldb::ePermissionsWritable, AllocError);
     if (Page == LLDB_INVALID_ADDRESS)
-      return Refuse(PatchFailure::NoProcess,
+      return Refuse(PatchFailure::InferiorAccessFailed,
                     llvm::Twine("a page of site slots could not be "
                                 "allocated: ") +
                         AllocError.AsCString());
@@ -494,7 +492,7 @@ llvm::Expected<lldb::addr_t> FunctionPatchManager::AllocateSiteSlot() {
   Status WriteError;
   if (Proc->WriteMemory(Slot, Zeroed, sizeof(Zeroed), WriteError) !=
       sizeof(Zeroed))
-    return Refuse(PatchFailure::NoProcess,
+    return Refuse(PatchFailure::InferiorAccessFailed,
                   llvm::Twine("a site's slot could not be cleared: ") +
                       WriteError.AsCString());
 

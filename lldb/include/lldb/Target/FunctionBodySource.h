@@ -30,6 +30,22 @@ enum class BodyExtractFailure {
 
 llvm::StringRef ToString(BodyExtractFailure Reason);
 
+/// Carries which of the extraction's refusals applied, so a caller can map it
+/// onto its own vocabulary without matching on the message text.
+class BodyExtractError : public llvm::ErrorInfo<BodyExtractError> {
+public:
+  static char ID;
+  explicit BodyExtractError(BodyExtractFailure Reason) : m_reason(Reason) {}
+  BodyExtractFailure reason() const { return m_reason; }
+  void log(llvm::raw_ostream &OS) const override { OS << ToString(m_reason); }
+  std::error_code convertToErrorCode() const override {
+    return llvm::inconvertibleErrorCode();
+  }
+
+private:
+  BodyExtractFailure m_reason;
+};
+
 /// A function's source text, and enough of an index to write into it by line.
 struct FunctionBodyText {
   /// The declaration through its matching close brace, verbatim. Verbatim is

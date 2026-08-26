@@ -12,6 +12,8 @@
 
 using namespace lldb_private;
 
+char BodyExtractError::ID = 0;
+
 llvm::StringRef lldb_private::ToString(BodyExtractFailure Reason) {
   switch (Reason) {
   case BodyExtractFailure::NotFound:
@@ -27,8 +29,7 @@ llvm::StringRef lldb_private::ToString(BodyExtractFailure Reason) {
 namespace {
 
 llvm::Error Fail(BodyExtractFailure Reason) {
-  return llvm::createStringError(llvm::inconvertibleErrorCode(),
-                                 ToString(Reason));
+  return llvm::make_error<BodyExtractError>(Reason);
 }
 
 /// The offset in \p Buffer at which line \p Line begins, counting from one, or

@@ -33,6 +33,7 @@ class Target;
 enum class PatchFailure {
   NotArm64,
   NoProcess,
+  InferiorAccessFailed,
   NoSourceFile,
   SourceNewerThanBinary,
   BodyNotFound,
