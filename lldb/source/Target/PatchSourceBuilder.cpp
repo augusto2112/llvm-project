@@ -32,21 +32,14 @@ std::string Preamble(const PatchSourceRequest &Request) {
   OS << "struct __lldb_rec_t { unsigned int site, cap; unsigned long long "
         "val; };\n";
 
-  // Check if any injection has captures to determine if high_water is needed.
-  bool HasCaptures = false;
-  for (const PatchInjection &Inj : Request.Injections) {
-    if (!Inj.Captures.empty()) {
-      HasCaptures = true;
-      break;
-    }
-  }
-
-  if (HasCaptures)
-    OS << "struct __lldb_hdr_t { unsigned long seq, drained, capacity, "
-          "high_water; struct __lldb_rec_t ring[]; };\n";
-  else
-    OS << "struct __lldb_hdr_t { unsigned long seq, drained; struct "
-          "__lldb_rec_t ring[]; };\n";
+  // The header's shape is a contract with the struct the debugger reads the
+  // block with (PatchRingHeader in lldb/include/lldb/Target/PatchControlBlock.h,
+  // kPatchRingHeaderSize), so it cannot depend on what any one patch happens to
+  // need. Omitting a field would move `ring` and cost nothing, since a
+  // declaration is not storage, but it would break the contract. Always emit the
+  // full declaration.
+  OS << "struct __lldb_hdr_t { unsigned long seq, drained, capacity, "
+        "high_water; struct __lldb_rec_t ring[]; };\n";
 
   OS << "struct __lldb_site_t { unsigned long hits, cond_true; unsigned char "
         "gate; };\n";
