@@ -87,6 +87,17 @@ std::string Preamble(const PatchSourceRequest &Request) {
 }
 
 /// One injection, as a single physical line.
+///
+/// Every injection opens with a declaration and closes with a use of what it
+/// declared, both at the injection's own brace depth. That is not decoration: an
+/// injection goes in ahead of a line without knowing whether that line is the
+/// sole body of a brace-less `if`, `for`, `while`, `do` or `else`. If it were,
+/// and the injection were one self-contained statement, it would become that
+/// body and the statement it was injected ahead of would leave the control
+/// structure -- a program that compiles and does something else, which is the one
+/// outcome this may not produce. A declaration cannot be a brace-less body and
+/// still have its name visible to what follows it, so this shape is refused by
+/// the compiler instead, and the caller falls back to evaluating at a stop.
 std::string InjectionLine(llvm::StringRef Tag, const PatchInjection &Inj) {
   std::string Text;
   llvm::raw_string_ostream OS(Text);
@@ -101,14 +112,15 @@ std::string InjectionLine(llvm::StringRef Tag, const PatchInjection &Inj) {
   const std::string Hit =
       Tagged(Tag, llvm::formatv("__lldb_h_{0}", Inj.SiteID).str());
 
+  // Declared ahead of the gate rather than inside it, so that the declaration is
+  // the first thing the injection is made of whether or not there is a gate.
+  OS << llvm::formatv("unsigned long {0} = 0; ", Hit);
+
   if (Inj.Gated)
     OS << llvm::formatv("if ({0}->gate) {{ ", Slot);
 
   OS << llvm::formatv(
-      "unsigned long {0} = __atomic_add_fetch(&{1}->hits, 1, "
-      "__ATOMIC_RELAXED); ",
-      Hit, Slot);
-  OS << llvm::formatv("(void){0}; ", Hit);
+      "{0} = __atomic_add_fetch(&{1}->hits, 1, __ATOMIC_RELAXED); ", Hit, Slot);
 
   // A guard is emitted only when there is something to compare against, so a
   // site that records every hit does not pay for a branch that is always taken.
@@ -165,7 +177,12 @@ std::string InjectionLine(llvm::StringRef Tag, const PatchInjection &Inj) {
                         HdrMacro);
 
   if (Inj.Gated)
-    OS << "}";
+    OS << "} ";
+
+  // The use that has to be in scope wherever the declaration is, which is what
+  // makes an injection that landed as a brace-less body a compile error rather
+  // than a program that quietly does something else.
+  OS << llvm::formatv("(void){0};", Hit);
 
   return llvm::StringRef(Text).rtrim().str();
 }

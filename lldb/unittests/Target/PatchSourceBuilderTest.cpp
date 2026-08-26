@@ -13,9 +13,11 @@
 using namespace lldb_private;
 
 /// The body used throughout: `f` declared on line 4, one statement on line 5,
-/// a return on line 6, closing brace on line 7.
+/// a return on line 6, closing brace on line 7. The three lines above it each
+/// end a declaration of their own, so the extraction stops there rather than
+/// reading them as the start of `f`'s.
 static FunctionBodyText Body() {
-  llvm::StringRef Buffer = "a\nb\nc\n"
+  llvm::StringRef Buffer = "int a;\nint b;\nint c;\n"
                            "int f(int x) {\n"
                            "  int acc = x;\n"
                            "  return acc;\n"
@@ -169,6 +171,54 @@ TEST(PatchSourceBuilderTest, OmitsTheGateWhenNotGated) {
   Inj.Gated = false;
   std::string Source = BuildPatchSource(Request({Inj}));
   EXPECT_EQ(std::string::npos, Source.find("->gate"));
+}
+
+/// The injected line of the only injection in \p Source.
+static llvm::StringRef InjectedLine(const std::string &Source) {
+  for (llvm::StringRef Line : llvm::split(Source, '\n'))
+    if (Line.contains("__lldb_h_"))
+      return Line;
+  return {};
+}
+
+// An injection goes in ahead of a line without knowing whether that line is the
+// sole body of a brace-less `if`, `for`, `while`, `do` or `else`. If it were, and
+// the injection were one self-contained statement, it would become that body and
+// the statement it was injected ahead of would leave the control structure --
+// which compiles, and silently makes the program do something else.
+//
+// So every injection opens with a declaration and closes with a use of it at the
+// same brace depth. A declaration can be a brace-less body, but then the use is
+// outside its scope, and the compiler refuses the whole thing rather than
+// accepting a different program. Asserted for each shape an injection takes,
+// because the property has to hold for all of them and the gated shape is where
+// it did not.
+TEST(PatchSourceBuilderTest, EveryInjectionOpensWithADeclarationAndUsesIt) {
+  auto Bare5 = Bare(5);
+
+  auto Conditional = Bare(5);
+  Conditional.Condition = "acc > 1";
+
+  auto Gated = Bare(5);
+  Gated.Condition = "acc > 1";
+  Gated.Gated = true;
+
+  auto Recording = Bare(5);
+  Recording.Captures = {"acc"};
+  Recording.WantStop = false;
+
+  auto GatedRecording = Bare(5);
+  GatedRecording.Gated = true;
+  GatedRecording.Captures = {"acc"};
+  GatedRecording.SkipFirst = 2;
+  GatedRecording.WantStop = false;
+
+  for (const PatchInjection &Inj :
+       {Bare5, Conditional, Gated, Recording, GatedRecording}) {
+    llvm::StringRef Line = InjectedLine(BuildPatchSource(Request({Inj})));
+    EXPECT_TRUE(Line.starts_with("unsigned long __lldb_h_1 = 0;")) << Line;
+    EXPECT_TRUE(Line.ends_with("(void)__lldb_h_1;")) << Line;
+  }
 }
 
 // A cast would truncate a double. The copy is bit-exact for every scalar
