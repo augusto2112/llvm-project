@@ -36,9 +36,14 @@
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
 #include "lldb/Target/ThreadList.h"
+#include "lldb/Utility/Baton.h"
 #include "lldb/Utility/ConstString.h"
+#include "lldb/Utility/DataExtractor.h"
+#include "lldb/Utility/LLDBLog.h"
+#include "lldb/Utility/Log.h"
 #include "lldb/Utility/State.h"
 #include "lldb/Utility/SupportFile.h"
+#include "lldb/ValueObject/ValueObjectConstResult.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Endian.h"
@@ -75,6 +80,13 @@ constexpr lldb::addr_t kInstructionSize = 4;
 /// in the generated source compiles to. Read back out of the compiled copy
 /// because nothing else records where the compiler put it.
 constexpr uint32_t kDebugTrapOpcode = 0xD43E0000;
+
+/// Records the debugger holds for a caller that has not asked for them yet.
+///
+/// Bounded for the same reason the ring in the inferior is: a hot site whose
+/// values nobody collects would otherwise cost the debugger memory without end.
+/// Sixteen bytes a record, so this is sixteen megabytes at worst.
+constexpr size_t kMaxPendingRecords = 1 << 20;
 
 // The blocks written below are read by the generated source's own declarations
 // of them, so their shape is a contract rather than this file's choice of
@@ -714,6 +726,23 @@ std::string WhyNotRecordable(const CompilerType &Type) {
   return "";
 }
 
+/// What a drain trap does: read what the ring holds, and let the program carry
+/// on.
+///
+/// A drain is the debugger's own errand rather than a hit anyone asked to hear
+/// about, so nothing is reported. This fires with nothing to read more often
+/// than not -- threads keep running until the stop is delivered, and the trap
+/// sits outside the per-site guards -- so finding the ring empty is the
+/// ordinary outcome rather than a problem.
+bool DrainAndResume(void *Baton, StoppointCallbackContext *, lldb::user_id_t,
+                    lldb::user_id_t) {
+  if (auto *Manager = static_cast<FunctionPatchManager *>(Baton))
+    if (llvm::Error Err = Manager->CollectRecords())
+      LLDB_LOG_ERROR(GetLog(LLDBLog::Breakpoints), std::move(Err),
+                     "recorded values could not be read back: {0}");
+  return false;
+}
+
 } // namespace
 
 FunctionPatchManager::FunctionPatchManager(Target &Tgt) : m_target(Tgt) {}
@@ -832,6 +861,15 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
   if (Fresh)
     m_functions[Entry] = std::move(Fresh);
   m_site_to_function[SiteID] = Entry;
+  // Recorded once the site is live, because this is what makes its counters
+  // readable and there are none to read for a site that was refused.
+  m_site_slots[SiteID] = *Slot;
+
+  // A site that records is the only kind whose values could still be sitting in
+  // the ring when the program leaves, so it is the only kind that needs the
+  // stop on the way out.
+  if (!Request.Captures.empty())
+    EnsureExitDrainBreakpoint();
   return SiteID;
 }
 
@@ -863,6 +901,10 @@ llvm::Error FunctionPatchManager::Remove(uint32_t SiteID) {
   Fn.Callbacks.erase(SiteID);
   m_site_to_function.erase(SiteIt);
 
+  // The site's counters go with it. Its slot's address would still read, but a
+  // count reported for a site the caller has taken away is a count for nothing.
+  m_site_slots.erase(SiteID);
+  m_counters.erase(SiteID);
   m_captures.erase(SiteID);
   m_dropped_captures.erase(SiteID);
 
@@ -893,8 +935,18 @@ void FunctionPatchManager::ForgetProcess() {
   m_slot_pool = LLDB_INVALID_ADDRESS;
   m_slots_used_in_page = 0;
   m_next_site_id = 1;
+
+  // A record still held is a record that can no longer be turned into a value:
+  // its type lived in the copy's debug info, which has just been dropped along
+  // with the copy. Counted as lost rather than discarded, so the next caller is
+  // told how much never reached it instead of reading a short list as a whole
+  // one.
+  m_pending_lost += m_pending.size();
+  m_pending.clear();
   m_captures.clear();
   m_dropped_captures.clear();
+  m_site_slots.clear();
+  m_counters.clear();
 }
 
 llvm::ArrayRef<std::string>
@@ -903,6 +955,46 @@ FunctionPatchManager::GetDroppedCaptures(uint32_t SiteID) const {
   if (It == m_dropped_captures.end())
     return {};
   return It->second;
+}
+
+void FunctionPatchManager::EnsureExitDrainBreakpoint() {
+  // Asked once. A second attempt that failed the first time would fail the same
+  // way, and one that succeeded would set a second breakpoint on the same code.
+  if (m_exit_drain != LLDB_INVALID_BREAK_ID || !m_tail_drain_refusal.empty())
+    return;
+
+  // Both names, since which one ends the program is libc's business rather than
+  // anything the debugger can see from here, and stopping at both costs one
+  // extra read of an empty ring.
+  const std::vector<std::string> Names = {"exit", "_exit"};
+  lldb::BreakpointSP Bp = m_target.CreateBreakpoint(
+      /*containingModules=*/nullptr, /*containingSourceFiles=*/nullptr, Names,
+      lldb::eFunctionNameTypeFull, lldb::eLanguageTypeUnknown, /*m_offset=*/0,
+      eLazyBoolNo, /*internal=*/true, /*request_hardware=*/false);
+
+  if (Bp && Bp->GetNumLocations() > 0) {
+    Bp->SetBreakpointKind("patch-drain-exit");
+    // The manager itself is the baton, and an untyped one so that the
+    // callback's lifetime says nothing about the manager's: the target owns
+    // both, and the callback only runs while a process of that target is
+    // stopped.
+    Bp->SetCallback(DrainAndResume, std::make_shared<UntypedBaton>(this),
+                    /*is_synchronous=*/false);
+    m_exit_drain = Bp->GetID();
+    return;
+  }
+
+  if (Bp)
+    m_target.RemoveBreakpointByID(Bp->GetID());
+
+  // Kept rather than only logged, and not a refusal of the install: recording
+  // still works, and a run long enough to fill the ring still reports. What is
+  // lost is the tail of a short run, and a caller told nothing about it would
+  // read a run whose values never arrived as a run that recorded none.
+  m_tail_drain_refusal =
+      "neither \"exit\" nor \"_exit\" resolved, so a run too short to fill the "
+      "record ring takes no stop at which its recorded values could be read";
+  LLDB_LOG(GetLog(LLDBLog::Breakpoints), "{0}", m_tail_drain_refusal);
 }
 
 bool FunctionPatchManager::IsPatched(lldb::addr_t Entry) const {
@@ -1087,9 +1179,10 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   for (const PatchInjection *Inj : Ordered) {
     const PatchSiteCallback Callback = Fn.Callbacks.lookup(Inj->SiteID);
     // Within one injection the stop trap precedes the drain trap, which is the
-    // order the builder writes them in. Only the stop trap carries the site's
-    // callback: a drain is the debugger's own errand rather than a hit the
-    // caller asked to hear about.
+    // order the builder writes them in. The stop trap carries the site's own
+    // callback; the drain trap carries the debugger's, since reading the ring
+    // is the debugger's errand rather than a hit the caller asked to hear
+    // about.
     if (Inj->WantStop) {
       llvm::Expected<lldb::break_id_t> BreakID =
           RegisterTrapSite((*Traps)[Next++], Callback.OnTrap, Callback.Baton);
@@ -1101,7 +1194,8 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
     }
     if (!Inj->Captures.empty()) {
       llvm::Expected<lldb::break_id_t> BreakID =
-          RegisterTrapSite((*Traps)[Next++], nullptr, nullptr);
+          RegisterTrapSite((*Traps)[Next++], DrainAndResume,
+                           std::make_shared<UntypedBaton>(this));
       if (!BreakID) {
         DropRegistered();
         return BreakID.takeError();
@@ -1205,6 +1299,171 @@ bool FunctionPatchManager::RecordCaptureTypes(PatchedFunction &Fn,
     Inj.Captures = std::move(Kept);
   }
   return Dropped;
+}
+
+llvm::Error FunctionPatchManager::CollectRecords() {
+  // Nothing has ever been recorded, so there is nothing to read and no block to
+  // read it from.
+  if (m_ring_address == LLDB_INVALID_ADDRESS)
+    return llvm::Error::success();
+
+  Process *Proc = m_target.GetProcessSP().get();
+  // Held still rather than merely alive: most of the stops this reads at are
+  // stops the debugger takes and resumes itself -- a drain trap is one -- where
+  // the process reads as running while its threads are not.
+  if (!Proc || !m_target.IsProcessHeldStill())
+    return Refuse(PatchFailure::NoProcess);
+
+  uint8_t HeaderBytes[kPatchRingHeaderSize] = {};
+  Status ReadError;
+  if (Proc->ReadMemory(m_ring_address, HeaderBytes, sizeof(HeaderBytes),
+                       ReadError) != sizeof(HeaderBytes))
+    return Refuse(PatchFailure::InferiorAccessFailed,
+                  llvm::Twine("the record block's header could not be read: ") +
+                      ReadError.AsCString());
+
+  // Read a field at a time in the inferior's byte order rather than by copying
+  // into the struct, so that what is read is the layout stated here rather than
+  // however the debugger's host happens to lay the same fields out.
+  PatchRingHeader Header;
+  Header.Seq = llvm::support::endian::read64le(HeaderBytes +
+                                               offsetof(PatchRingHeader, Seq));
+  Header.Drained = llvm::support::endian::read64le(
+      HeaderBytes + offsetof(PatchRingHeader, Drained));
+  Header.Capacity = llvm::support::endian::read64le(
+      HeaderBytes + offsetof(PatchRingHeader, Capacity));
+  Header.HighWater = llvm::support::endian::read64le(
+      HeaderBytes + offsetof(PatchRingHeader, HighWater));
+
+  // Skipped when the header says the inferior has written nothing new, which is
+  // the ordinary case: a drain trap fires with nothing to read more often than
+  // not, and every stop asks. Reading the ring anyway would cost 64KB for a
+  // question the header already answered.
+  if (Header.Seq > Header.Drained) {
+    // The whole ring rather than the part the header claims is new. The header
+    // came from a live process, so a torn one must not decide how much memory
+    // to read; the drain tolerates a ring shorter than the capacity claims and
+    // reports what it could not reach.
+    std::vector<uint8_t> RingBytes(kDefaultRingCapacity * kPatchRecordSize);
+    if (Proc->ReadMemory(m_ring_address + kPatchRingHeaderSize,
+                         RingBytes.data(), RingBytes.size(),
+                         ReadError) != RingBytes.size())
+      return Refuse(PatchFailure::InferiorAccessFailed,
+                    llvm::Twine("the record ring could not be read: ") +
+                        ReadError.AsCString());
+
+    const PatchDrain Drain = DrainPatchRing(Header, RingBytes);
+    m_pending.insert(m_pending.end(), Drain.Records.begin(),
+                     Drain.Records.end());
+    m_pending_lost += Drain.Lost;
+
+    // Overflowing the backlog loses the oldest records, which is the direction
+    // the ring itself loses in, and counts them rather than dropping them
+    // quietly.
+    if (m_pending.size() > kMaxPendingRecords) {
+      const size_t Excess = m_pending.size() - kMaxPendingRecords;
+      m_pending.erase(m_pending.begin(), m_pending.begin() + Excess);
+      m_pending_lost += Excess;
+    }
+
+    // Written back only once the records are in hand, so a read that failed
+    // leaves the inferior believing they are still unread rather than letting
+    // the next write overwrite them.
+    uint8_t DrainedBytes[sizeof(uint64_t)] = {};
+    llvm::support::endian::write64le(DrainedBytes, Drain.NewDrained);
+    Status WriteError;
+    if (Proc->WriteMemory(m_ring_address + offsetof(PatchRingHeader, Drained),
+                          DrainedBytes, sizeof(DrainedBytes),
+                          WriteError) != sizeof(DrainedBytes))
+      return Refuse(PatchFailure::InferiorAccessFailed,
+                    llvm::Twine("the count of records read could not be "
+                                "written back: ") +
+                        WriteError.AsCString());
+  }
+
+  // Read here rather than when a caller asks, because a run's final counters
+  // are only readable while the process holding them is still there.
+  for (const auto &[SiteID, Slot] : m_site_slots) {
+    uint8_t SlotBytes[kPatchSiteSlotSize] = {};
+    if (Proc->ReadMemory(Slot, SlotBytes, sizeof(SlotBytes), ReadError) !=
+        sizeof(SlotBytes))
+      return Refuse(PatchFailure::InferiorAccessFailed,
+                    llvm::Twine("a site's counters could not be read: ") +
+                        ReadError.AsCString());
+    SiteCounters &Counters = m_counters[SiteID];
+    Counters.Hits = llvm::support::endian::read64le(
+        SlotBytes + offsetof(PatchSiteSlot, Hits));
+    Counters.CondTrue = llvm::support::endian::read64le(
+        SlotBytes + offsetof(PatchSiteSlot, CondTrue));
+  }
+
+  return llvm::Error::success();
+}
+
+llvm::Expected<PatchDrainResult> FunctionPatchManager::Drain() {
+  // Read anything the debugger's own drains have not already taken, so that a
+  // caller which only ever calls this still sees every record.
+  if (llvm::Error Err = CollectRecords()) {
+    // Nothing is being handed over, so the reason is all there is to hand over.
+    if (m_pending.empty() && m_counters.empty())
+      return std::move(Err);
+    // A caller cannot be given both its values and a reason, and of the two
+    // only the values cannot be had again: the reason is in the log, and the
+    // next call will run into it afresh.
+    LLDB_LOG_ERROR(GetLog(LLDBLog::Breakpoints), std::move(Err),
+                   "recorded values were read back incompletely: {0}");
+  }
+
+  PatchDrainResult Result;
+  Result.Counters = m_counters;
+  Result.Lost = m_pending_lost;
+  m_pending_lost = 0;
+
+  Process *Proc = m_target.GetProcessSP().get();
+  // The process while there is one, since that is what a value's own address
+  // size and byte order come from, and the target once it has gone -- a record
+  // read at the exit stop is still owed to whoever asks next.
+  ExecutionContextScope *Scope =
+      Proc ? static_cast<ExecutionContextScope *>(Proc) : &m_target;
+  const lldb::ByteOrder Order = m_target.GetArchitecture().GetByteOrder();
+  const uint32_t AddrSize = m_target.GetArchitecture().GetAddressByteSize();
+
+  Result.Values.reserve(m_pending.size());
+  for (const PatchRecord &Rec : m_pending) {
+    auto Known = m_captures.find(Rec.Site);
+    if (Known == m_captures.end() || Rec.Capture >= Known->second.size()) {
+      // Written by a copy whose capture the current one no longer has, or by a
+      // site since removed. Counted rather than passed over, because a value
+      // nobody can name is a value that did not reach the caller.
+      ++Result.Lost;
+      continue;
+    }
+    const RecordedCapture &Capture = Known->second[Rec.Capture];
+
+    llvm::Expected<uint64_t> ByteSize = Capture.Type.GetByteSize(Scope);
+    if (!ByteSize) {
+      llvm::consumeError(ByteSize.takeError());
+      ++Result.Lost;
+      continue;
+    }
+
+    // The type's own width, not the field's. The inferior copied the value into
+    // eight bytes, so reading all eight back would report the padding beside a
+    // `char` as part of its value.
+    const llvm::SmallVector<uint8_t, 8> Bytes =
+        CaptureValueBytes(Rec.Value, *ByteSize, Order);
+    const DataExtractor Data(Bytes.data(), Bytes.size(), Order, AddrSize);
+    lldb::ValueObjectSP Value = ValueObjectConstResult::Create(
+        Scope, Capture.Type, ConstString(Capture.Expression), Data);
+    if (!Value) {
+      ++Result.Lost;
+      continue;
+    }
+    Result.Values.push_back(
+        CapturedValue{Rec.Site, Rec.Capture, std::move(Value)});
+  }
+  m_pending.clear();
+  return Result;
 }
 
 llvm::Expected<lldb::break_id_t>

@@ -76,6 +76,35 @@ bool SourceSkewExceedsNoise(llvm::sys::TimePoint<> Source,
 llvm::SmallVector<uint8_t, 8> CaptureValueBytes(uint64_t Value, size_t ByteSize,
                                                 lldb::ByteOrder Order);
 
+/// One value the injected code recorded, as a value the rest of lldb can
+/// format.
+struct CapturedValue {
+  uint32_t SiteID = 0;
+
+  /// Which of the site's captures this is, by position in its capture list.
+  uint32_t Capture = 0;
+
+  lldb::ValueObjectSP Value;
+};
+
+/// What one site's slot in the inferior says about it.
+struct SiteCounters {
+  uint64_t Hits = 0;
+  uint64_t CondTrue = 0;
+};
+
+/// What the injected code has recorded and the debugger has read back.
+struct PatchDrainResult {
+  std::vector<CapturedValue> Values;
+
+  llvm::DenseMap<uint32_t, SiteCounters> Counters;
+
+  /// Records that did not reach the caller, because the ring overwrote them
+  /// before they were read. Reported rather than absorbed: a short list that
+  /// looks complete is worse than one that says what is missing.
+  uint64_t Lost = 0;
+};
+
 /// One injection to install, in the caller's terms.
 struct PatchRequest {
   /// The entry of the function to patch. The patch always goes at the entry,
@@ -122,6 +151,38 @@ public:
 
   /// Drops one injection and recompiles what remains.
   llvm::Error Remove(uint32_t SiteID);
+
+  /// Reads whatever the injected code has recorded since the last read, and
+  /// holds it until \ref Drain hands it to a caller.
+  ///
+  /// Separate from \ref Drain because the reads that keep the ring from
+  /// overwriting itself are the debugger's own errand: they happen at traps and
+  /// at stops nobody asked a question at, where there is no caller to hand a
+  /// value to. Reading without taking is what lets those happen as often as
+  /// they need to.
+  ///
+  /// Callable only while the process is held still, since inferior memory
+  /// cannot be read while it runs.
+  llvm::Error CollectRecords();
+
+  /// Takes everything recorded since the last call, as typed values.
+  ///
+  /// Each value carries the type its capture's local had in the patched copy's
+  /// debug info, so the formatters that print a variable print this too.
+  ///
+  /// Reads the inferior first when it can, so a caller that only ever calls
+  /// this still sees every record; a call that finds nothing new costs a memory
+  /// read.
+  llvm::Expected<PatchDrainResult> Drain();
+
+  /// Why the values recorded after the last stop of a run may never arrive, or
+  /// empty when nothing stands in their way.
+  ///
+  /// A run that never fills the ring never raises a drain trap, so its records
+  /// are read at the stop the exit path takes. When no exit symbol could be
+  /// found there is no such stop, and a caller told nothing would read the
+  /// missing tail as a run that recorded nothing.
+  llvm::StringRef GetTailDrainRefusal() const { return m_tail_drain_refusal; }
 
   /// Why a capture of \p SiteID was dropped, one string per dropped capture.
   ///
@@ -178,6 +239,12 @@ private:
   bool RecordCaptureTypes(PatchedFunction &Fn, Function &Copy,
                           llvm::StringRef Tag);
 
+  /// Sets the internal breakpoint whose stop the tail of a run is read at.
+  ///
+  /// A run too short to fill the ring never raises a drain trap, so without a
+  /// stop on the way out its records are never read at all.
+  void EnsureExitDrainBreakpoint();
+
   /// Registers the site that attributes the trap the compiled copy contains at
   /// \p Trap, and gives it an internal breakpoint of its own to carry \p
   /// OnTrap. Returns that breakpoint's id.
@@ -199,6 +266,28 @@ private:
   /// injection has no new site to name it after, so the tag is its own
   /// sequence rather than borrowed from one that does not always advance.
   uint32_t m_next_compile_tag = 0;
+
+  /// The internal breakpoint the tail of a run is read at, if one could be set.
+  lldb::break_id_t m_exit_drain = LLDB_INVALID_BREAK_ID;
+
+  std::string m_tail_drain_refusal;
+
+  /// Records read out of the ring but not yet handed to a caller. Held raw
+  /// rather than as values, because a read the debugger made for its own sake
+  /// should cost a memcpy per record rather than a value object. Bounded, and
+  /// lossy at the bound like the ring it came out of.
+  std::vector<PatchRecord> m_pending;
+
+  /// Records that will never reach a caller, since the last time one was told.
+  uint64_t m_pending_lost = 0;
+
+  /// Every site's counters as of the last read. Cached rather than read when
+  /// asked for, because a run's final counters are only readable while the
+  /// process holding them is still there.
+  llvm::DenseMap<uint32_t, SiteCounters> m_counters;
+
+  /// Where each live site's counters are, which is what makes them readable.
+  llvm::DenseMap<uint32_t, lldb::addr_t> m_site_slots;
 
   /// Each site's captures, in the order the injected code numbers them.
   llvm::DenseMap<uint32_t, std::vector<RecordedCapture>> m_captures;

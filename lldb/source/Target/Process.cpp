@@ -4054,6 +4054,10 @@ bool Process::ShouldBroadcastEvent(Event *event_ptr) {
     // threads and the memory cache describe where the program actually is. Not
     // every stop can carry it: whether this one can is the target's to say.
     GetTarget().CompileBreakpointConditionsIntoProcess();
+    // Values that code compiled into the process recorded are read at any stop
+    // that happens for any reason, since a ring the debugger never empties
+    // overwrites what it holds and the process cannot be read while it runs.
+    GetTarget().DrainPatchRecords();
     if (ProcessEventData::GetInterruptedFromEvent(event_ptr)) {
       LLDB_LOGF(log,
                 "Process::ShouldBroadcastEvent (%p) stopped due to an "

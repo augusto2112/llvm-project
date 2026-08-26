@@ -3215,6 +3215,16 @@ void Target::CompileBreakpointConditionsIntoProcess() {
     bp_sp->CompileConditionsIntoProcess();
 }
 
+void Target::DrainPatchRecords() {
+  // Asked only of a target that has patched something. Going through the
+  // accessor would give every target a manager for a stop with nothing to read.
+  if (!m_function_patch_manager_up)
+    return;
+  if (llvm::Error error = m_function_patch_manager_up->CollectRecords())
+    LLDB_LOG_ERROR(GetLog(LLDBLog::Breakpoints), std::move(error),
+                   "recorded values could not be read at this stop: {0}");
+}
+
 Target::StopHookSP Target::CreateStopHook(StopHook::StopHookKind kind,
                                           bool internal) {
   user_id_t new_uid = (internal ? LLDB_INVALID_UID : ++m_stop_hook_next_id);

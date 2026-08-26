@@ -2000,6 +2000,14 @@ public:
   /// moment at which it can be compiled in: see CanCompileCodeIntoProcess.
   void CompileBreakpointConditionsIntoProcess();
 
+  /// Read out whatever the code compiled into the process has recorded since it
+  /// was last read.
+  ///
+  /// Called at every stop, because inferior memory cannot be read while the
+  /// process runs and the ring the values are written to is finite: what is not
+  /// read before it wraps is gone.
+  void DrainPatchRecords();
+
   /// Whether the process is being held still, so that reading or writing its
   /// memory means anything.
   ///
