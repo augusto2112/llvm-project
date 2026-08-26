@@ -38,6 +38,19 @@ int countdown(int n) {
   return rest + n;
 }
 
+// Contains a trap of its own, which is what makes a copy of it compile and then
+// be refused: the traps read back out of a copy are matched to injections by
+// position, and one the program's own code contains cannot be told from one the
+// builder emitted.
+int has_its_own_trap(int seed) {
+  int trapped = seed;
+  if (seed == -1) {
+    __builtin_debugtrap();
+  }
+  trapped += 1;
+  return trapped;
+}
+
 int main(int argc, char **argv) {
   long sum = 0;
   for (int k = 0; k < 100000; k++)
@@ -46,6 +59,8 @@ int main(int argc, char **argv) {
     sum += file_local(k, 3);
   for (int k = 0; k < 200; k++)
     sum += countdown(k % 8);
+  for (int k = 0; k < 200; k++)
+    sum += has_its_own_trap(k);
   printf("sum=%ld\n", sum);
   // Somewhere a test can read once the debugger has let go of this process,
   // which is how a run that finished is told from one a trap killed.

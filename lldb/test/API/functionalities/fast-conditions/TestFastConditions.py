@@ -33,6 +33,10 @@ FILE_LOCAL_LINE = r"local_total \+= i;"
 # A line of the recursive function, whose body names the function it is in.
 RECURSIVE_LINE = r"int rest = countdown"
 
+# A line of the function that contains a trap of its own, whose copy compiles and
+# is then refused.
+OWN_TRAP_LINE = r"trapped \+= 1;"
+
 
 class FastConditionsTestCase(TestBase):
     NO_DEBUG_INFO_TESTCASE = True
@@ -796,6 +800,53 @@ class FastConditionsTestCase(TestBase):
         )
         with open(finished) as f:
             self.assertIn("sum=", f.read())
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_refused_copy_leaves_no_location_behind(self):
+        """A copy that is refused after compiling takes its locations with it.
+
+        Parsing a copy announces the module describing it, which is what gives a
+        breakpoint set by file and line a location inside the copy -- and there is
+        no asking for the compile without the announcement. So a copy that turns
+        out not to be installable has to be announced as gone rather than merely
+        let go of.
+
+        Letting go of it cleared those locations without removing them. Each
+        breakpoint over the function's lines kept a location with no address that
+        could never resolve again: it read as a resolved breakpoint, it reported a
+        refusal of its own, and it hid from the report of breakpoints a redirect
+        has stranded that the breakpoint's other locations were unreachable.
+        """
+        target = self.setup()
+        plain = target.BreakpointCreateByLocation(
+            "main.c", self.find_line("trapped += 1;")
+        )
+        self.assertEqual(plain.GetNumLocations(), 1, "one location to begin with")
+
+        refused = target.BreakpointCreateBySourceRegex(
+            OWN_TRAP_LINE, lldb.SBFileSpec("main.c")
+        )
+        refused.SetCondition("seed == 100")
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+
+        # Refused for the one reason there is, rather than for that reason plus
+        # whatever a location with no address has to say about itself.
+        self.expect(
+            "breakpoint list %d" % refused.GetID(),
+            substrs=["debug traps where its source emitted"],
+        )
+        self.assertEqual(
+            refused.GetNumLocations(), 1, "no location was left in the refused copy"
+        )
+        self.assertEqual(
+            plain.GetNumLocations(), 1, "nor in a breakpoint that only shared its lines"
+        )
+        # And the breakpoints still work, which is what a refusal costs: a stop
+        # per hit rather than none.
+        self.assertGreater(plain.GetHitCount(), 0)
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))

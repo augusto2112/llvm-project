@@ -45,6 +45,7 @@
 #include "lldb/Utility/SupportFile.h"
 #include "lldb/ValueObject/ValueObjectConstResult.h"
 #include "llvm/ADT/STLExtras.h"
+#include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/Support/FormatVariadic.h"
@@ -506,6 +507,36 @@ struct CompiledCopy {
   Function *Definition = nullptr;
 };
 
+/// Drops a copy nothing is going to run, and with it every breakpoint location
+/// that resolved into it.
+///
+/// Parsing a copy appends the module describing it to the target's images and
+/// announces it, and there is no asking for the one without the other. The
+/// announcement is what gives a `file:line` breakpoint a location inside the copy,
+/// which for a copy that is installed is the point -- it is how such a breakpoint
+/// survives the redirect.
+///
+/// A copy that turns out not to be installable therefore has to be announced as
+/// gone rather than merely let go of. Letting go clears those locations without
+/// removing them, so each breakpoint keeps a location with no address that can
+/// never resolve again -- which reads as a resolved breakpoint, and hides from the
+/// report of breakpoints a redirect has stranded that every other location of that
+/// breakpoint is unreachable.
+void DiscardCopy(Target &Tgt, CompiledCopy &Copy) {
+  Copy.Definition = nullptr;
+  if (!Copy.Module) {
+    Copy.Expression.reset();
+    return;
+  }
+
+  ModuleList JustTheCopy;
+  JustTheCopy.Append(Copy.Module);
+  Tgt.GetImages().Remove(Copy.Module, /*notify=*/false);
+  Tgt.ModulesDidUnload(JustTheCopy, /*delete_locations=*/true);
+  Copy.Module.reset();
+  Copy.Expression.reset();
+}
+
 /// Takes \p Name back out of the declarations the target remembers.
 ///
 /// A top-level expression's declarations persist so that a later expression can
@@ -591,6 +622,14 @@ llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
     return Refuse(PatchFailure::CompileFailed,
                   "nothing describes the compiled copy's code");
 
+  // Everything from here on refuses a copy whose module has already been
+  // announced, so each refusal announces it as gone rather than leaving the
+  // locations it gave every breakpoint behind unresolvable.
+  auto DiscardUnlessReturned = llvm::scope_exit([&] {
+    if (!Copy.Definition)
+      DiscardCopy(Tgt, Copy);
+  });
+
   // Looked up inside the one module rather than by evaluating `&name`: the copy
   // carries the original's name on purpose, so that a stop inside it names the
   // function the caller knows -- which is also what makes a lookup across the
@@ -618,6 +657,7 @@ llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
   if (Copy.Address == LLDB_INVALID_ADDRESS || Copy.Size == 0)
     return Refuse(PatchFailure::CompileFailed,
                   "the compiled copy's code has no address in the process");
+  // Which is also what says the copy is being handed back rather than refused.
   Copy.Definition = CopyFunction;
   return Copy;
 }
@@ -1306,6 +1346,15 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   // what that came to. Each pass drops at least one capture, so the number of
   // passes is bounded by the number of captures.
   std::optional<CompiledCopy> Copy;
+  // A copy this refuses to install is announced as gone rather than merely let go
+  // of, wherever below that happens: the parse announced it, which gave every
+  // `file:line` breakpoint over these lines a location inside it, and a location
+  // in a module nothing has said is gone can never resolve again.
+  auto DiscardUnlessInstalled = llvm::scope_exit([&] {
+    if (Copy)
+      DiscardCopy(m_target, *Copy);
+  });
+
   while (!Copy) {
     PatchSourceRequest Request;
     Request.Body = Fn.Body;
@@ -1336,9 +1385,13 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
     // program running exactly the code it was already running.
     llvm::Expected<bool> Dropped =
         RecordCaptureTypes(Fn, *Compiled->Definition, Request.Tag);
-    if (!Dropped)
+    if (!Dropped) {
+      DiscardCopy(m_target, *Compiled);
       return Dropped.takeError();
-    if (!*Dropped)
+    }
+    if (*Dropped)
+      DiscardCopy(m_target, *Compiled);
+    else
       Copy = std::move(*Compiled);
   }
 
@@ -1486,6 +1539,10 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   Fn.CurrentModule = std::move(Copy->Module);
   Fn.CurrentExpression = std::move(Copy->Expression);
   Fn.CopyAddress = Copy->Address;
+  // Installed, so the guard above has nothing left to discard: what it would
+  // have taken out of the target's images is now what describes the code the
+  // program runs.
+  Copy.reset();
   return llvm::Error::success();
 }
 
