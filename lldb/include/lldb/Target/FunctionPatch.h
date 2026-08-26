@@ -252,6 +252,9 @@ private:
   /// result.
   llvm::Error Recompile(PatchedFunction &Fn);
 
+  /// Every module describing a copy this manager has compiled, live or retired.
+  std::vector<lldb::ModuleSP> CopyModules() const;
+
   /// Records the type the compiled copy's debug info gives every capture of \p
   /// Fn's injections, and drops from \p Fn the captures that type refuses.
   ///

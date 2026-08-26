@@ -29,6 +29,9 @@ SECOND_CONDITION_LINE = "return total;"
 # A line of the file-local function, whose declaration also spans two lines.
 FILE_LOCAL_LINE = r"local_total \+= i;"
 
+# A line of the recursive function, whose body names the function it is in.
+RECURSIVE_LINE = r"int rest = countdown"
+
 
 class FastConditionsTestCase(TestBase):
     NO_DEBUG_INFO_TESTCASE = True
@@ -697,6 +700,57 @@ class FastConditionsTestCase(TestBase):
         self.assertLess(
             process.GetStopID(True), STOPS_ALLOWANCE, "the run paid for no hits"
         )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_recursive_function_can_be_patched_twice(self):
+        """A function whose body names itself is recompiled as often as asked.
+
+        The copy carries the original's name on purpose, so while it is among the
+        target's images that name has two definitions -- the program's and the
+        debugger's -- and the expression parser answers a reference to it by
+        refusing the reference as ambiguous rather than by picking one. A body
+        that calls the function it is in makes exactly that reference.
+
+        What that cost was worse than a refusal. Editing the condition takes the
+        old injection out before putting the new one in, and the take-out is
+        itself a recompile: it failed, leaving the injection carrying the replaced
+        text in the program with its traps silenced and the original body
+        unreachable behind the redirect. The breakpoint read as resolved, with a
+        condition, and could never fire again.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            RECURSIVE_LINE, lldb.SBFileSpec("main.c")
+        )
+        bp.SetCondition("n == 4")
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(
+            process.GetSelectedThread().GetFrameAtIndex(0)
+            .FindVariable("n")
+            .GetValueAsSigned(),
+            4,
+        )
+
+        # The edit, which is a removal and an install, and so two compiles of a
+        # body that names itself.
+        bp.SetCondition("n == 6")
+        self.expect(
+            "breakpoint list %d" % bp.GetID(),
+            substrs=["Condition not compiled into the process"],
+            matching=False,
+        )
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(
+            process.GetSelectedThread().GetFrameAtIndex(0)
+            .FindVariable("n")
+            .GetValueAsSigned(),
+            6,
+        )
+        self.assertEqual(bp.GetHitCount(), 2)
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))

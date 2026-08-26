@@ -733,6 +733,42 @@ std::string WhyNotRecordable(const CompilerType &Type) {
   return "";
 }
 
+/// Takes modules out of a target's images for as long as it is alive.
+///
+/// A copy carries the original's name on purpose, so that a stop inside it names
+/// the function the caller knows. The cost is that while a copy is among the
+/// target's images, that name has two definitions -- the program's and the
+/// debugger's -- and the expression parser answers a reference to it by refusing
+/// the reference as ambiguous rather than by picking one.
+///
+/// That only bites when a patch's own source names a patched function, which
+/// happens for direct recursion and for one patched function calling another. It
+/// bites hard: measured, a second compile of a recursive function fails outright,
+/// which is every edit to a condition in one and every second condition on one.
+///
+/// Removed without notification and put back the same way, so no breakpoint is
+/// re-resolved on account of the copies going away and coming back.
+class ModulesHiddenFromLookup {
+public:
+  ModulesHiddenFromLookup(Target &Tgt, std::vector<lldb::ModuleSP> Modules)
+      : m_target(Tgt), m_modules(std::move(Modules)) {
+    for (const lldb::ModuleSP &Module : m_modules)
+      m_target.GetImages().Remove(Module, /*notify=*/false);
+  }
+
+  ~ModulesHiddenFromLookup() {
+    for (const lldb::ModuleSP &Module : m_modules)
+      m_target.GetImages().AppendIfNeeded(Module, /*notify=*/false);
+  }
+
+  ModulesHiddenFromLookup(const ModulesHiddenFromLookup &) = delete;
+  ModulesHiddenFromLookup &operator=(const ModulesHiddenFromLookup &) = delete;
+
+private:
+  Target &m_target;
+  std::vector<lldb::ModuleSP> m_modules;
+};
+
 /// What a drain trap does: read what the ring holds, and let the program carry
 /// on.
 ///
@@ -1125,6 +1161,17 @@ llvm::Expected<lldb::addr_t> FunctionPatchManager::AllocateSiteSlot() {
   return Slot;
 }
 
+std::vector<lldb::ModuleSP> FunctionPatchManager::CopyModules() const {
+  std::vector<lldb::ModuleSP> Modules;
+  for (const auto &[Entry, Fn] : m_functions) {
+    if (Fn->CurrentModule)
+      Modules.push_back(Fn->CurrentModule);
+    Modules.insert(Modules.end(), Fn->RetiredModules.begin(),
+                   Fn->RetiredModules.end());
+  }
+  return Modules;
+}
+
 llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   Process *Proc = m_target.GetProcessSP().get();
   if (!Proc)
@@ -1171,8 +1218,14 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
     // whether recompiling only dropped an injection rather than adding one.
     Request.Tag = std::to_string(m_next_compile_tag++);
 
-    llvm::Expected<CompiledCopy> Compiled =
-        CompileCopy(m_target, BuildPatchSource(Request), Fn.Name);
+    // Compiled with the copies already in the program hidden, since each of them
+    // defines a name the program also defines and a reference to such a name is
+    // refused as ambiguous. Restored before anything below reads the copy's own
+    // debug info.
+    llvm::Expected<CompiledCopy> Compiled = [&] {
+      ModulesHiddenFromLookup Hidden(m_target, CopyModules());
+      return CompileCopy(m_target, BuildPatchSource(Request), Fn.Name);
+    }();
     if (!Compiled)
       return Compiled.takeError();
 

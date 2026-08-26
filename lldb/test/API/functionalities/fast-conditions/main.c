@@ -27,12 +27,25 @@ file_local(int seed, int rounds)
   return local_total;
 }
 
+// Names itself, which is what makes a second compile of it interesting: the copy
+// carries the original's name, so a copy already in the program is a second
+// definition of the name this body calls.
+int countdown(int n) {
+  if (n <= 0) {
+    return 0;
+  }
+  int rest = countdown(n - 1);
+  return rest + n;
+}
+
 int main(void) {
   long sum = 0;
   for (int k = 0; k < 100000; k++)
     sum += accumulate(k, 3);
   for (int k = 0; k < 100000; k++)
     sum += file_local(k, 3);
+  for (int k = 0; k < 200; k++)
+    sum += countdown(k % 8);
   printf("sum=%ld\n", sum);
   return 0;
 }

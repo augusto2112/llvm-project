@@ -374,10 +374,44 @@ BreakpointLocation::InstallInProcessCondition(llvm::StringRef condition_text) {
 
   SymbolContext sc;
   GetAddress().CalculateSymbolContext(&sc, eSymbolContextFunction |
+                                               eSymbolContextBlock |
                                                eSymbolContextLineEntry);
   if (!sc.function || sc.line_entry.line == 0)
     return llvm::createStringError(
         "no debug info describes a function and line at the location");
+
+  // An injection is placed by line into text read from the function's own source
+  // file, and the function this location is in is the one whose entry a redirect
+  // would be written over. A location inside an inlined instance answers those
+  // two questions from different functions: the line is the inlined callee's,
+  // where the condition's names are in scope, and the function is the caller the
+  // callee was inlined into. Recompiling the caller with the callee's line puts
+  // the injection at whatever the caller has at that line number -- an unrelated
+  // statement, and in a different file whenever the callee came from a header.
+  //
+  // Which is why the line entry's own file is checked too, rather than only the
+  // block: the file is the thing the injection is spliced into, so a line entry
+  // naming another file is the same mistake by another route.
+  if (sc.block && sc.block->GetContainingInlinedBlock())
+    return llvm::createStringError(
+        "the location is inside an inlined instance, whose line belongs to the "
+        "function that was inlined rather than to the one a redirect would be "
+        "written over");
+
+  SupportFileNSP declared_in = std::make_shared<SupportFile>();
+  uint32_t declared_at = 0;
+  sc.function->GetStartLineSourceInfo(declared_in, declared_at);
+  if (!sc.line_entry.file_sp ||
+      !sc.line_entry.file_sp->Equal(*declared_in,
+                                    SupportFile::eEqualFileSpecAndChecksumIfSet))
+    return llvm::createStringError(
+        llvm::Twine("the line at the location is in \"") +
+        (sc.line_entry.file_sp
+             ? sc.line_entry.file_sp->GetSpecOnly().GetPath()
+             : "no file") +
+        "\", where the function it is in is declared in \"" +
+        declared_in->GetSpecOnly().GetPath() +
+        "\", so a line of the one is not a line of the other");
 
   assert(!IsInDebuggerCompiledCode(GetAddress()) &&
          "recompiling a copy the debugger compiled would patch a patch");
