@@ -40,6 +40,7 @@
 #include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -747,6 +748,12 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   Request.RingAddress = m_ring_address;
   Request.RingCapacity = kDefaultRingCapacity;
   Request.Injections = Fn.Injections;
+
+  // Every compile is a fresh top-level expression whose declarations persist
+  // in the target, so a tag of its own is what keeps this one from redefining
+  // the last one's -- whether that was for this function or another, and
+  // whether recompiling only dropped an injection rather than adding one.
+  Request.Tag = std::to_string(m_next_compile_tag++);
 
   llvm::Expected<CompiledCopy> Copy =
       CompileCopy(m_target, BuildPatchSource(Request), Fn.Name);

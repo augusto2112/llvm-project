@@ -191,8 +191,8 @@ TEST(PatchSourceBuilderTest, NamesEachCaptureLocalDistinctly) {
   std::string Source = BuildPatchSource(Request({Inj}));
   EXPECT_NE(std::string::npos, Source.find("__lldb_cap_1_0"));
   EXPECT_NE(std::string::npos, Source.find("__lldb_cap_1_1"));
-  EXPECT_EQ("__lldb_cap_1_0", CaptureLocalName(1, 0));
-  EXPECT_EQ("__lldb_cap_1_1", CaptureLocalName(1, 1));
+  EXPECT_EQ("__lldb_cap_1_0", CaptureLocalName("", 1, 0));
+  EXPECT_EQ("__lldb_cap_1_1", CaptureLocalName("", 1, 1));
 }
 
 TEST(PatchSourceBuilderTest, TrapsWhenTheSiteWantsAStop) {
@@ -339,4 +339,37 @@ TEST(PatchSourceBuilderTest, MasksTheRingIndexWithALiteralCapacity) {
   Inj.WantStop = false;
   std::string Source = BuildPatchSource(Request({Inj}));
   EXPECT_NE(std::string::npos, Source.find("& 4095"));
+}
+
+// The source is compiled as a top-level expression, whose declarations
+// persist in the target so a later expression can still name them -- so two
+// patches declaring the same helper would be a redefinition on the second
+// compile. A tag of its own is what keeps one compile's names from being the
+// other's.
+TEST(PatchSourceBuilderTest, TwoTagsDeclareDifferentNames) {
+  auto Inj = Bare(5);
+  Inj.Captures = {"acc"};
+  Inj.WantStop = false;
+
+  PatchSourceRequest First = Request({Inj});
+  First.Tag = "1";
+  PatchSourceRequest Second = Request({Inj});
+  Second.Tag = "2";
+
+  std::string SourceOne = BuildPatchSource(First);
+  std::string SourceTwo = BuildPatchSource(Second);
+
+  // Spelled as the declaration itself, not the bare identifier, so that one
+  // tag being a prefix of another could not make this pass by accident.
+  const char *Declarations[] = {
+      "struct __lldb_rec_t_1 {",
+      "struct __lldb_hdr_t_1 {",
+      "struct __lldb_site_t_1 {",
+      "#define __LLDB_HDR_1 ",
+      "static void __lldb_rec_1(",
+  };
+  for (const char *Decl : Declarations) {
+    EXPECT_NE(std::string::npos, SourceOne.find(Decl)) << Decl;
+    EXPECT_EQ(std::string::npos, SourceTwo.find(Decl)) << Decl;
+  }
 }

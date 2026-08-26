@@ -14,8 +14,25 @@
 
 using namespace lldb_private;
 
-std::string lldb_private::CaptureLocalName(uint32_t SiteID, uint32_t Capture) {
-  return llvm::formatv("__lldb_cap_{0}_{1}", SiteID, Capture).str();
+namespace {
+
+/// \p Name, with \p Tag appended if it is not empty.
+///
+/// Every name the preamble declares goes through this, so that a non-empty tag
+/// keeps two compiles' declarations from colliding and an empty one -- the
+/// default -- reproduces the untagged spelling every existing caller expects.
+std::string Tagged(llvm::StringRef Tag, llvm::StringRef Name) {
+  if (Tag.empty())
+    return Name.str();
+  return (Name + "_" + Tag).str();
+}
+
+} // namespace
+
+std::string lldb_private::CaptureLocalName(llvm::StringRef Tag,
+                                           uint32_t SiteID, uint32_t Capture) {
+  return Tagged(Tag,
+               llvm::formatv("__lldb_cap_{0}_{1}", SiteID, Capture).str());
 }
 
 namespace {
@@ -26,11 +43,19 @@ namespace {
 /// program's source, which would make a stop in the preamble report a line the
 /// user could read but that says nothing.
 std::string Preamble(const PatchSourceRequest &Request) {
+  const llvm::StringRef Tag = Request.Tag;
+  const std::string RecT = Tagged(Tag, "__lldb_rec_t");
+  const std::string HdrT = Tagged(Tag, "__lldb_hdr_t");
+  const std::string SiteT = Tagged(Tag, "__lldb_site_t");
+  const std::string HdrMacro = Tagged(Tag, "__LLDB_HDR");
+  const std::string RecFn = Tagged(Tag, "__lldb_rec");
+
   std::string Text;
   llvm::raw_string_ostream OS(Text);
   OS << "#line 1 \"<lldb patch preamble>\"\n";
-  OS << "struct __lldb_rec_t { unsigned int site, cap; unsigned long long "
-        "val; };\n";
+  OS << llvm::formatv(
+      "struct {0} {{ unsigned int site, cap; unsigned long long val; };\n",
+      RecT);
 
   // The header's shape is a contract with the struct the debugger reads the
   // block with (PatchRingHeader in lldb/include/lldb/Target/PatchControlBlock.h,
@@ -38,32 +63,41 @@ std::string Preamble(const PatchSourceRequest &Request) {
   // need. Omitting a field would move `ring` and cost nothing, since a
   // declaration is not storage, but it would break the contract. Always emit the
   // full declaration.
-  OS << "struct __lldb_hdr_t { unsigned long seq, drained, capacity, "
-        "high_water; struct __lldb_rec_t ring[]; };\n";
-
-  OS << "struct __lldb_site_t { unsigned long hits, cond_true; unsigned char "
-        "gate; };\n";
-  OS << llvm::formatv("#define __LLDB_HDR ((volatile struct __lldb_hdr_t "
-                      "*){0:x+})\n",
-                      Request.RingAddress);
   OS << llvm::formatv(
-      "static void __lldb_rec(unsigned k, unsigned c, unsigned long long v) {{ "
-      "unsigned long s = __atomic_fetch_add(&__LLDB_HDR->seq, 1, "
-      "__ATOMIC_RELAXED); volatile struct __lldb_rec_t *r = "
-      "&__LLDB_HDR->ring[s & {0}]; r->site = k; r->cap = c; r->val = v; }}\n",
+      "struct {0} {{ unsigned long seq, drained, capacity, high_water; "
+      "struct {1} ring[]; };\n",
+      HdrT, RecT);
+
+  OS << llvm::formatv(
+      "struct {0} {{ unsigned long hits, cond_true; unsigned char gate; "
+      "};\n",
+      SiteT);
+  OS << llvm::formatv("#define {0} ((volatile struct {1} *){2:x+})\n",
+                      HdrMacro, HdrT, Request.RingAddress);
+  OS << llvm::formatv(
+      "static void {0}(unsigned k, unsigned c, unsigned long long v) {{ "
+      "unsigned long s = __atomic_fetch_add(&{1}->seq, 1, "
+      "__ATOMIC_RELAXED); volatile struct {2} *r = "
+      "&{1}->ring[s & {3}]; r->site = k; r->cap = c; r->val = v; }}\n",
+      RecFn, HdrMacro, RecT,
       Request.RingCapacity ? Request.RingCapacity - 1 : 0);
   return Text;
 }
 
 /// One injection, as a single physical line.
-std::string InjectionLine(const PatchInjection &Inj) {
+std::string InjectionLine(llvm::StringRef Tag, const PatchInjection &Inj) {
   std::string Text;
   llvm::raw_string_ostream OS(Text);
 
+  const std::string SiteT = Tagged(Tag, "__lldb_site_t");
+  const std::string HdrMacro = Tagged(Tag, "__LLDB_HDR");
+  const std::string RecFn = Tagged(Tag, "__lldb_rec");
   const std::string Slot =
-      llvm::formatv("((volatile struct __lldb_site_t *){0:x+})", Inj.SlotAddress)
+      llvm::formatv("((volatile struct {0} *){1:x+})", SiteT,
+                    Inj.SlotAddress)
           .str();
-  const std::string Hit = llvm::formatv("__lldb_h_{0}", Inj.SiteID).str();
+  const std::string Hit =
+      Tagged(Tag, llvm::formatv("__lldb_h_{0}", Inj.SiteID).str());
 
   if (Inj.Gated)
     OS << llvm::formatv("if ({0}->gate) {{ ", Slot);
@@ -93,9 +127,9 @@ std::string InjectionLine(const PatchInjection &Inj) {
                         Slot);
 
   for (uint32_t I = 0; I < Inj.Captures.size(); ++I) {
-    const std::string Local = CaptureLocalName(Inj.SiteID, I);
+    const std::string Local = CaptureLocalName(Tag, Inj.SiteID, I);
     const std::string Value =
-        llvm::formatv("__lldb_v_{0}_{1}", Inj.SiteID, I).str();
+        Tagged(Tag, llvm::formatv("__lldb_v_{0}_{1}", Inj.SiteID, I).str());
     // A memcpy rather than a cast, because a cast converts and a double's bits
     // would not survive it. The width comes from the value itself, so every
     // scalar is handled by the same line.
@@ -104,7 +138,7 @@ std::string InjectionLine(const PatchInjection &Inj) {
     OS << llvm::formatv("unsigned long long {0} = 0; ", Value);
     OS << llvm::formatv("__builtin_memcpy(&{0}, &{1}, sizeof {1}); ", Value,
                         Local);
-    OS << llvm::formatv("__lldb_rec({0}, {1}, {2}); ", Inj.SiteID, I, Value);
+    OS << llvm::formatv("{0}({1}, {2}, {3}); ", RecFn, Inj.SiteID, I, Value);
   }
 
   if (Inj.WantStop)
@@ -119,8 +153,9 @@ std::string InjectionLine(const PatchInjection &Inj) {
   // asking whether it is full would be two loads per hit for an answer that
   // cannot change.
   if (!Inj.Captures.empty())
-    OS << "if (__LLDB_HDR->seq - __LLDB_HDR->drained >= "
-          "__LLDB_HDR->high_water) __builtin_debugtrap(); ";
+    OS << llvm::formatv("if ({0}->seq - {0}->drained >= "
+                        "{0}->high_water) __builtin_debugtrap(); ",
+                        HdrMacro);
 
   if (Inj.Gated)
     OS << "}";
@@ -164,7 +199,7 @@ std::string lldb_private::BuildPatchSource(const PatchSourceRequest &Request) {
 
     while (Next < Ordered.size() && Ordered[Next]->Line == Line) {
       OS << llvm::formatv("#line {0} \"{1}\"\n", Line, Request.SourcePath);
-      OS << InjectionLine(*Ordered[Next]) << "\n";
+      OS << InjectionLine(Request.Tag, *Ordered[Next]) << "\n";
       ++Next;
     }
 

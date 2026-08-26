@@ -11,6 +11,7 @@
 
 #include "lldb/Target/FunctionBodySource.h"
 #include "lldb/lldb-types.h"
+#include "llvm/ADT/StringRef.h"
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -66,14 +67,25 @@ struct PatchSourceRequest {
   uint64_t RingCapacity = 0;
 
   std::vector<PatchInjection> Injections;
+
+  /// Distinguishes this compile's own declarations from every other patch's.
+  ///
+  /// The generated source is compiled as a top-level expression, whose
+  /// declarations persist in the target so later expressions can name them. Two
+  /// patches declaring the same helper would therefore be a redefinition, so
+  /// each compile's names carry a tag of its own. Empty leaves the names
+  /// unadorned.
+  std::string Tag;
 };
 
-/// The local that holds capture \p Capture of site \p SiteID.
+/// The local that holds capture \p Capture of site \p SiteID, in a compile
+/// tagged \p Tag.
 ///
 /// Its type in the compiled copy's debug info is how the capture's type is
 /// recovered, so the caller reading that debug info and the builder emitting
 /// the local have to agree on this spelling.
-std::string CaptureLocalName(uint32_t SiteID, uint32_t Capture);
+std::string CaptureLocalName(llvm::StringRef Tag, uint32_t SiteID,
+                             uint32_t Capture);
 
 /// Writes the top-level C source for one patched function.
 ///

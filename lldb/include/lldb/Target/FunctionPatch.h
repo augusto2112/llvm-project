@@ -133,6 +133,13 @@ private:
   lldb::addr_t m_slot_pool = LLDB_INVALID_ADDRESS;
   size_t m_slots_used_in_page = 0;
   uint32_t m_next_site_id = 1;
+
+  /// Counts compiles so each gets a \ref PatchSourceRequest::Tag of its own.
+  /// A site id would also be unique, but a recompile that only drops an
+  /// injection has no new site to name it after, so the tag is its own
+  /// sequence rather than borrowed from one that does not always advance.
+  uint32_t m_next_compile_tag = 0;
+
   llvm::DenseMap<lldb::addr_t, std::unique_ptr<PatchedFunction>> m_functions;
   llvm::DenseMap<uint32_t, lldb::addr_t> m_site_to_function;
 };
