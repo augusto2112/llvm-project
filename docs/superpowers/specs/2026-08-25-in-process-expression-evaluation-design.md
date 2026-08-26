@@ -482,10 +482,21 @@ read from the other end.
 
 A disabled breakpoint neither stops nor counts, but its injection stays in the
 program and each hit whose condition holds still costs a private stop that ends
-in nothing. Removing it on disable and reinstalling it on enable would cost two
-recompiles per toggle; leaving it costs stops in proportion to how often the
-condition holds while disabled. The gate byte already in the control block would
-make this free, and is the obvious next move if the cost ever shows up.
+in nothing. Measured: disabling a breakpoint whose condition holds on the last
+hundred of a hundred thousand calls costs 104 stops over the rest of the run, one
+per remaining hit.
+
+The control block's gate byte looks like the free fix — one byte, no recompile,
+and the injection reads it before doing anything — and it was rejected after
+working out what re-enabling would mean. A gate can only be written while the
+process is held still, and everything that reconciles debugger state with the
+program runs at a stop. Closing the gate removes exactly the stops that would
+reopen it: a breakpoint disabled, then re-enabled while the program runs, would
+have a closed gate and no stop at which to notice, so it would never fire again.
+That trades a bounded, visible cost for an unbounded silent one, which is the
+wrong direction for this facility. The cost stays, and it is proportional to how
+often the condition holds while the breakpoint is disabled -- zero for the false
+conditions this whole facility exists for.
 
 ## Known behavioural differences
 

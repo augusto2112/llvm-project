@@ -1186,14 +1186,16 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   for (const PatchInjection *Inj : Ordered)
     TrapsExpected += TrapsEmittedFor(*Inj);
   if (Traps->size() != TrapsExpected)
-    // Not a refusal. The source this read back is the source this built, so a
-    // disagreement is between two halves of one implementation rather than
-    // something about the program being patched -- and assigning the traps
-    // anyway would credit hits to whichever site the miscount shifted them
-    // onto.
+    // Assigning them anyway would credit hits to whichever site the miscount
+    // shifted them onto, so this refuses instead. Two ways to get here, and the
+    // count cannot tell them apart: the body itself contains a `brk #0xf000` --
+    // `__builtin_debugtrap()` in the program's own source is the only ordinary
+    // way -- or the builder and this reader disagree about what was emitted,
+    // which is two halves of one implementation falling out of step.
     return llvm::createStringError(
         llvm::inconvertibleErrorCode(),
-        "the compiled copy holds %zu traps where its source emitted %zu",
+        "the compiled copy holds %zu debug traps where its source emitted %zu, "
+        "so a trap cannot be told from one the function's own code contains",
         Traps->size(), TrapsExpected);
 
   // Registered before the module is announced, so that a `file:line` breakpoint
@@ -1264,10 +1266,35 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   if (Proc->WriteMemory(Fn.Entry + WriteOffset, Trampoline.data() + WriteOffset,
                         WriteSize, WriteError) != WriteSize) {
     DropRegistered();
-    return Refuse(PatchFailure::InferiorAccessFailed,
-                  llvm::Twine("the redirect could not be written over the "
-                              "function's entry: ") +
-                      WriteError.AsCString());
+
+    // A write that reported less than it was asked for may have landed in part,
+    // which for these bytes means an entry that branches to nothing anyone
+    // compiled. What was there is known -- the original instructions before the
+    // first patch, and the literal naming the copy still in the program after
+    // one -- so it is put back rather than left as the failure found it.
+    const std::array<uint8_t, kEntryTrampolineSize> Previous =
+        AlreadyRedirected ? EncodeEntryTrampoline(Fn.CopyAddress)
+                          : Fn.OriginalBytes;
+    Status RestoreError;
+    const bool Restored =
+        Proc->WriteMemory(Fn.Entry + WriteOffset, Previous.data() + WriteOffset,
+                          WriteSize, RestoreError) == WriteSize;
+    // A string rather than a Twine held in a variable: a Twine refers to the
+    // pieces it was built from, which here are temporaries of this statement.
+    const std::string Detail =
+        std::string("the redirect could not be written over the function's "
+                    "entry: ") +
+        WriteError.AsCString();
+    if (!Restored)
+      // Said as loudly as prose can: every other refusal here leaves the program
+      // running the code it was already running, and this one may not have.
+      return Refuse(PatchFailure::InferiorAccessFailed,
+                    Detail + "; nor could the bytes it overwrote be put back (" +
+                        RestoreError.AsCString() +
+                        "), so the entry may hold part of a redirect and the "
+                        "program can no longer be trusted to be the one that "
+                        "was built");
+    return Refuse(PatchFailure::InferiorAccessFailed, Detail);
   }
 
   // The sites of the copy this one replaces are retired rather than
