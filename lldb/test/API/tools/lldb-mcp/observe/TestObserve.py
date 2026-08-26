@@ -1287,10 +1287,19 @@ class ObserveTestCase(TestBase):
         # Every one of those hits carried a value nothing else did, which makes
         # every value rare -- which is to say that none of them is. The claim is
         # withheld rather than bounded, since a list of three thousand equally
-        # rare values is the stream this is supposed to stand in for.
+        # rare values is the stream this is supposed to stand in for. Withheld out
+        # loud, though: an absent claim reads the same as a population that had no
+        # outliers, which is the opposite finding. A string rather than an empty
+        # array for the same reason -- a client that reads the field as a list gets
+        # a type error where it would otherwise conclude nothing rare happened.
         aggregate = document["aggregate"]["tick"]["n"]
         self.assertEqual(aggregate["distinct"], 3000, str(aggregate)[:400])
-        self.assertNotIn("outliers", aggregate)
+        self.assertIsInstance(aggregate["outliers"], str, str(aggregate)[:400])
+        self.assertTrue(
+            aggregate["outliers"].startswith("withheld:"), str(aggregate)[:400]
+        )
+        self.assertEqual(aggregate["outliers_of"], 3000, str(aggregate)[:400])
+        # Nothing was elided: the claim was not made at all rather than shortened.
         self.assertNotIn("outliers_elided", aggregate)
 
         # Nothing dominates a population that is entirely distinct, so the
@@ -1448,34 +1457,40 @@ class ObserveTestCase(TestBase):
         says which spelling actually ran."""
         self.build()
 
-        # `o` is an `Outer *`, so `o.c` is not a path and the evaluator repairs it
-        # to `o->c`. That repair happens whether or not anything reports it; what
-        # is under test is that the caller can see it and that the run stops
-        # paying for a failed parse at every hit.
+        # `o` is an `Outer *`, so `o.c` is not valid C and the evaluator repairs
+        # it to `o->c`. Written as part of a larger expression on purpose: a bare
+        # `o.c` never reaches the expression evaluator at all, because the
+        # variable-path tier accepts a dot through a pointer and answers it
+        # directly. A capture that needs repairing is therefore one that tier
+        # cannot answer, and this is the smallest such expression.
         document = self.observe(
             {
                 "program": self.getBuildArtifact("a.out"),
                 "timeout_seconds": 300,
-                "observe": [{"at": "nested", "capture": ["o.c"]}],
+                "observe": [{"at": "nested", "capture": ["o.c + 0"]}],
             }
         )
 
         self.assertEqual(document["outcome"], "exited", str(document))
         report = document["plan_report"]["nested"]
-        capture = report["captures"]["o.c"]
-        self.assertEqual(capture["fixed_as"], "o->c", str(capture))
+        capture = report["captures"]["o.c + 0"]
+        self.assertEqual(capture["fixed_as"], "o->c + 0", str(capture))
+        self.assertEqual(capture["tier"], "expression", str(capture))
+        # One evaluation for the one hit, which is what adopting the repair buys:
+        # the failed parse is paid for once rather than at every hit.
+        self.assertEqual(capture["evaluations"], report["hits"], str(capture))
 
         # Keyed on what the caller wrote, in the report and in the aggregate
         # alike, so that a request can be correlated with its histogram.
-        self.assertIn("o.c", report["captures"], str(report))
-        self.assertNotIn("o->c", report["captures"], str(report))
+        self.assertIn("o.c + 0", report["captures"], str(report))
+        self.assertNotIn("o->c + 0", report["captures"], str(report))
         aggregate = document["aggregate"]["nested"]
-        self.assertIn("o.c", aggregate, str(aggregate))
-        self.assertNotIn("o->c", aggregate, str(aggregate))
+        self.assertIn("o.c + 0", aggregate, str(aggregate))
+        self.assertNotIn("o->c + 0", aggregate, str(aggregate))
 
         # And the capture worked, so it is not a failure.
         self.assertNotIn("capture_failures", document, str(document))
-        self.assertEqual(serialized_scalar(list(aggregate["o.c"]["values"])[0]), "3")
+        self.assertEqual(aggregate["o.c + 0"], "3 x1", str(aggregate))
 
     def test_a_stable_failure_is_reported_and_not_retried(self):
         """A capture naming nothing in scope is reported at top level, disabled,

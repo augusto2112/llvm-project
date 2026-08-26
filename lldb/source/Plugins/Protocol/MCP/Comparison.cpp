@@ -840,7 +840,13 @@ json::Value lldb_private::mcp::CompareRuns(ArrayRef<ComparedRun> Runs) {
     Out["notes"] = std::move(Notes);
   // Names alone. What a caller asks a comparison is whether anything else moved,
   // and the answer is a list of what did not rather than the values that did not.
-  if (!Agreed.empty())
+  //
+  // Not said at all when only one run answered. Every row of a single run agrees
+  // with itself, so the list would be as long as the run's own report while
+  // meaning nothing -- and a caller reading it would take it for evidence that
+  // the change under comparison moved nothing, when the other side of the
+  // comparison never ran at all.
+  if (Answered > 1 && !Agreed.empty())
     Out["agreed"] = std::move(Agreed);
   return Out;
 }
