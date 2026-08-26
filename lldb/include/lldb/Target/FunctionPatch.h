@@ -84,6 +84,13 @@ struct CapturedValue {
   /// Which of the site's captures this is, by position in its capture list.
   uint32_t Capture = 0;
 
+  /// The hit that recorded it, as the site's own counter numbered that hit.
+  ///
+  /// What a caller joins one hit's several captures by. Two threads inside one
+  /// site write their records interleaved, so the order values arrive in does
+  /// not say which of them belong together.
+  uint64_t Hit = 0;
+
   lldb::ValueObjectSP Value;
 };
 
@@ -249,9 +256,13 @@ private:
   /// Fn's injections, and drops from \p Fn the captures that type refuses.
   ///
   /// Returns whether anything was dropped, which means the copy just compiled
-  /// records something it should not and has to be compiled again.
-  bool RecordCaptureTypes(PatchedFunction &Fn, Function &Copy,
-                          llvm::StringRef Tag);
+  /// records something it should not and has to be compiled again. Returns an
+  /// error instead where the injection that would lose the capture does not
+  /// stop: the recording is then the only way that value ever leaves the
+  /// program, so dropping it would report the hit with one of the values the
+  /// caller asked for silently missing.
+  llvm::Expected<bool> RecordCaptureTypes(PatchedFunction &Fn, Function &Copy,
+                                          llvm::StringRef Tag);
 
   /// Sets the internal breakpoint whose stop the tail of a run is read at.
   ///

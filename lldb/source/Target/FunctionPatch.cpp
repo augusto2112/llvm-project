@@ -1179,7 +1179,11 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
     // A copy that records something it should not is discarded here rather than
     // installed: nothing points at it yet, so letting go of it leaves the
     // program running exactly the code it was already running.
-    if (!RecordCaptureTypes(Fn, *Compiled->Definition, Request.Tag))
+    llvm::Expected<bool> Dropped =
+        RecordCaptureTypes(Fn, *Compiled->Definition, Request.Tag);
+    if (!Dropped)
+      return Dropped.takeError();
+    if (!*Dropped)
       Copy = std::move(*Compiled);
   }
 
@@ -1330,41 +1334,61 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   return llvm::Error::success();
 }
 
-bool FunctionPatchManager::RecordCaptureTypes(PatchedFunction &Fn,
-                                              Function &Copy,
-                                              llvm::StringRef Tag) {
-  bool Dropped = false;
-  for (PatchInjection &Inj : Fn.Injections) {
-    std::vector<RecordedCapture> Recorded;
-    std::vector<std::string> Kept;
+llvm::Expected<bool> FunctionPatchManager::RecordCaptureTypes(
+    PatchedFunction &Fn, Function &Copy, llvm::StringRef Tag) {
+  // Buffered rather than written as they are read, because a refusal below
+  // discards the copy this debug info belongs to -- and a type left behind from a
+  // module nothing points at is a type whose type system may not outlive the
+  // statement that returned the error.
+  llvm::DenseMap<uint32_t, std::vector<RecordedCapture>> Recorded;
+  llvm::DenseMap<uint32_t, std::vector<std::string>> Kept;
+  std::vector<std::pair<uint32_t, std::string>> Refused;
+
+  for (const PatchInjection &Inj : Fn.Injections) {
     for (uint32_t I = 0; I < Inj.Captures.size(); ++I) {
       const CompilerType Type =
           LocalType(Copy, CaptureLocalName(Tag, Inj.SiteID, I));
       const std::string Why = WhyNotRecordable(Type);
-      if (!Why.empty()) {
-        // Dropped on its own rather than refusing the injection, because one
-        // aggregate in a capture list must not cost the caller every scalar
-        // beside it. Kept for as long as the site, since a capture that never
-        // arrives has to be explainable whenever the caller asks -- and not
-        // cleared by the recompile it causes, which is the pass that no longer
-        // has the capture to refuse.
-        m_dropped_captures[Inj.SiteID].push_back(
-            llvm::formatv("\"{0}\": {1}: {2}", Inj.Captures[I],
-                          ToString(PatchFailure::CaptureNotScalar), Why)
-                .str());
-        Dropped = true;
+      if (Why.empty()) {
+        Recorded[Inj.SiteID].push_back(RecordedCapture{Type, Inj.Captures[I]});
+        Kept[Inj.SiteID].push_back(Inj.Captures[I]);
         continue;
       }
-      Recorded.push_back(RecordedCapture{Type, Inj.Captures[I]});
-      Kept.push_back(Inj.Captures[I]);
+
+      // The recording is the only way a value leaves a site that does not stop,
+      // so dropping one there would hand back a hit with a value the caller asked
+      // for silently absent. Refused whole instead, which sends the caller to a
+      // path that stops and can read anything.
+      if (!Inj.WantStop)
+        return Refuse(PatchFailure::CaptureNotScalar,
+                      llvm::Twine('"') + Inj.Captures[I] + "\": " + Why +
+                          ", and this site records without stopping, so there "
+                          "is no stop at which to read it instead");
+
+      // Otherwise dropped on its own rather than refusing the injection, because
+      // one aggregate in a capture list must not cost the caller every scalar
+      // beside it.
+      Refused.emplace_back(
+          Inj.SiteID, llvm::formatv("\"{0}\": {1}: {2}", Inj.Captures[I],
+                                    ToString(PatchFailure::CaptureNotScalar),
+                                    Why)
+                          .str());
     }
+  }
+
+  for (PatchInjection &Inj : Fn.Injections) {
     // Replaced whole rather than updated in place. A capture's number is its
     // position in the list that survives, so dropping one renumbers those after
     // it and anything left over from before would answer for the wrong capture.
-    m_captures[Inj.SiteID] = std::move(Recorded);
-    Inj.Captures = std::move(Kept);
+    m_captures[Inj.SiteID] = std::move(Recorded[Inj.SiteID]);
+    Inj.Captures = std::move(Kept[Inj.SiteID]);
   }
-  return Dropped;
+  // Kept for as long as the site, since a capture that never arrives has to be
+  // explainable whenever the caller asks -- and not cleared by the recompile it
+  // causes, which is the pass that no longer has the capture to refuse.
+  for (auto &[SiteID, Why] : Refused)
+    m_dropped_captures[SiteID].push_back(std::move(Why));
+  return !Refused.empty();
 }
 
 llvm::Error FunctionPatchManager::CollectRecords() {
@@ -1526,7 +1550,7 @@ llvm::Expected<PatchDrainResult> FunctionPatchManager::Drain() {
       continue;
     }
     Result.Values.push_back(
-        CapturedValue{Rec.Site, Rec.Capture, std::move(Value)});
+        CapturedValue{Rec.Site, Rec.Capture, Rec.Hit, std::move(Value)});
   }
   m_pending.clear();
   return Result;
