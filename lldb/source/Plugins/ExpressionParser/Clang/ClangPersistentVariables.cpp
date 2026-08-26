@@ -109,6 +109,13 @@ ClangPersistentVariables::GetPersistentDecl(ConstString name) {
   return m_persistent_decls.lookup(name.GetCString()).m_decl;
 }
 
+void ClangPersistentVariables::ForgetPersistentDecl(ConstString name) {
+  // Only the map entry goes. The declaration itself lives in the scratch AST
+  // context, which is shared with everything already parsed against it and is
+  // not this map's to tear down.
+  m_persistent_decls.erase(name.GetCString());
+}
+
 std::shared_ptr<ClangASTImporter>
 ClangPersistentVariables::GetClangASTImporter() {
   if (!m_ast_importer_sp) {

@@ -264,6 +264,15 @@ public:
   virtual std::optional<CompilerType>
   GetCompilerTypeFromPersistentDecl(ConstString type_name) = 0;
 
+  /// Forgets the declaration recorded under \p name, if there is one.
+  ///
+  /// A top-level expression's declarations persist so that a later expression
+  /// can name them, which is what a caller wants for something somebody
+  /// declared. Code the debugger compiled for its own ends is not that, and
+  /// leaving its declarations behind makes recompiling it a redefinition of
+  /// itself. Nothing to do for a language that records no declarations.
+  virtual void ForgetPersistentDecl(ConstString name) {}
+
   virtual lldb::addr_t LookupSymbol(ConstString name);
 
   void RegisterExecutionUnit(lldb::IRExecutionUnitSP &execution_unit_sp);

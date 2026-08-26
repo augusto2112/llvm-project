@@ -74,6 +74,8 @@ public:
 
   clang::NamedDecl *GetPersistentDecl(ConstString name);
 
+  void ForgetPersistentDecl(ConstString name) override;
+
   void AddHandLoadedClangModule(ClangModulesDeclVendor::ModuleID module) {
     m_hand_loaded_clang_modules.push_back(module);
   }

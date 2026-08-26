@@ -16,6 +16,7 @@
 #include "lldb/Core/ModuleList.h"
 #include "lldb/Core/SourceManager.h"
 #include "lldb/Expression/DiagnosticManager.h"
+#include "lldb/Expression/ExpressionVariable.h"
 #include "lldb/Expression/LLVMUserExpression.h"
 #include "lldb/Expression/UserExpression.h"
 #include "lldb/Host/FileSystem.h"
@@ -368,6 +369,20 @@ struct CompiledCopy {
   lldb::addr_t Size = 0;
 };
 
+/// Takes \p Name back out of the declarations the target remembers.
+///
+/// A top-level expression's declarations persist so that a later expression can
+/// name them. A copy is compiled as a top-level definition and deliberately
+/// carries the original's name, so what persists is a definition of a name the
+/// program already has: the next compile of the same function finds it and is a
+/// redefinition of it, and a user expression naming the function finds the
+/// debugger's copy of it rather than the program's own.
+void ForgetCopyDeclaration(Target &Tgt, ConstString Name) {
+  if (PersistentExpressionState *State =
+          Tgt.GetPersistentExpressionStateForLanguage(lldb::eLanguageTypeC))
+    State->ForgetPersistentDecl(Name);
+}
+
 /// Compiles \p Source into the inferior and finds the definition of \p Name it
 /// contains.
 ///
@@ -415,9 +430,15 @@ llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
   // Target::EvaluateExpression is what keeps the expression object, since the
   // module describing the copy lives exactly as long as it does.
   DiagnosticManager Diagnostics;
-  if (!Expr->Parse(Diagnostics, ExeCtx, eExecutionPolicyTopLevel,
-                   /*keep_result_in_memory=*/true,
-                   /*generate_debug_info=*/true))
+  const bool Parsed = Expr->Parse(Diagnostics, ExeCtx, eExecutionPolicyTopLevel,
+                                  /*keep_result_in_memory=*/true,
+                                  /*generate_debug_info=*/true);
+
+  // Whatever the parse recorded is recorded whether or not it went on to
+  // succeed, so this is undone here rather than only on the way out.
+  ForgetCopyDeclaration(Tgt, Name);
+
+  if (!Parsed)
     return Refuse(PatchFailure::CompileFailed, Diagnostics.GetString());
 
   auto *JITExpr = llvm::dyn_cast<LLVMUserExpression>(Expr.get());
