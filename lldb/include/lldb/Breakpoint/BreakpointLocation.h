@@ -163,10 +163,11 @@ public:
   /// Compile this location's condition into the process, so that a hit whose
   /// condition does not hold costs no stop.
   ///
-  /// Does nothing, and reports nothing, unless the target asked for it. Every
-  /// way it can fail leaves the condition to be evaluated at a stop, so calling
-  /// this never changes whether a condition works -- only what it costs.
-  /// Repeated calls are cheap: a condition is only ever compiled in once.
+  /// Does nothing, and reports nothing, unless the target asked for it and the
+  /// process is at a stop where compiled-in code will survive. Every way it can
+  /// fail leaves the condition to be evaluated at a stop, so calling this never
+  /// changes whether a condition works -- only what it costs. Called at every
+  /// stop until it has an answer, and cheap once it has one.
   void CompileConditionIntoProcess();
 
   /// Return the breakpoint condition.
@@ -449,9 +450,14 @@ private:
   ///< For testing whether the condition source code changed.
   size_t m_condition_hash = 0;
   ///< The site attributing the trap of this location's compiled-in condition,
-  /// if the condition was compiled into the process. Also what keeps it from
-  /// being compiled in twice.
+  /// if the condition was compiled into the process.
   std::optional<uint32_t> m_in_process_site_id;
+  ///< Whether compiling this location's condition into the process has been
+  /// tried. Tried once and not again, whichever way it went: a refusal is a
+  /// property of the location and the program rather than of the moment, and
+  /// retrying at every stop would pay to recompile the function over and over
+  /// only to be refused each time.
+  bool m_in_process_condition_attempted = false;
   ///< Breakpoint location ID.
   lldb::break_id_t m_loc_id;
   ///< Number of times this breakpoint location has been hit.

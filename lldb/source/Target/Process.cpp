@@ -4049,6 +4049,11 @@ bool Process::ShouldBroadcastEvent(Event *event_ptr) {
 
     m_stdio_communication.SynchronizeWithReadThread();
     RefreshStateAfterStop();
+    // Breakpoint conditions that asked to be compiled into the process wait for
+    // a stop to be compiled in, and this is the first point in one where the
+    // threads and the memory cache describe where the program actually is. Not
+    // every stop can carry it: whether this one can is the target's to say.
+    GetTarget().CompileBreakpointConditionsIntoProcess();
     if (ProcessEventData::GetInterruptedFromEvent(event_ptr)) {
       LLDB_LOGF(log,
                 "Process::ShouldBroadcastEvent (%p) stopped due to an "

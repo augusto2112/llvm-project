@@ -1015,6 +1015,20 @@ void Breakpoint::GetDescriptionForType(Stream *s, lldb::DescriptionLevel level,
 
     m_options.GetDescription(s, level);
 
+    // Printed where the condition is, because it is about the condition: it
+    // says the condition is being evaluated at every stop after all, which is a
+    // cost the caller asked to be rid of and has no other way to learn it still
+    // pays.
+    if (level != lldb::eDescriptionLevelBrief &&
+        !GetWhyConditionIsNotCompiledIntoProcess().empty()) {
+      // A condition on the breakpoint has printed its own line just above; one
+      // set on a location has not.
+      if (!m_options.GetCondition())
+        s->EOL();
+      s->Format("Condition not compiled into the process: {0}\n",
+                GetWhyConditionIsNotCompiledIntoProcess());
+    }
+
     if (m_precondition_sp)
       m_precondition_sp->GetDescription(*s, level);
 

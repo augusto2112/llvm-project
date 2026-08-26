@@ -140,7 +140,7 @@ llvm::StringRef lldb_private::ToString(PatchFailure Reason) {
   case PatchFailure::NotArm64:
     return "in-process evaluation is implemented for arm64 only";
   case PatchFailure::NoProcess:
-    return "there is no running process to patch";
+    return "there is no process this can be patched into right now";
   case PatchFailure::InferiorAccessFailed:
     return "an operation on the inferior's memory failed";
   case PatchFailure::NoSourceFile:
@@ -529,12 +529,12 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
   if (m_target.GetArchitecture().GetTriple().getArch() != llvm::Triple::aarch64)
     return Refuse(PatchFailure::NotArm64);
 
-  Process *Proc = m_target.GetProcessSP().get();
-  // Stopped rather than merely alive: installing rewrites the inferior's code
-  // and reads every thread's PC, and neither means anything while it runs.
-  if (!Proc || !Proc->IsAlive() ||
-      !StateIsStoppedState(Proc->GetState(), /*must_exist=*/true))
+  // Held still and past the loader's startup, rather than merely alive:
+  // installing rewrites the inferior's code and reads every thread's PC, and a
+  // copy the loader is about to forget describes nothing anyone can use.
+  if (!m_target.CanCompileCodeIntoProcess())
     return Refuse(PatchFailure::NoProcess);
+  Process *Proc = m_target.GetProcessSP().get();
 
   const lldb::addr_t Entry = Request.FunctionEntry;
 

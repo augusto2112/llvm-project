@@ -250,9 +250,7 @@ const StopCondition &BreakpointLocation::GetCondition() const {
 }
 
 void BreakpointLocation::CompileConditionIntoProcess() {
-  // Once is enough: a second compile would rewrite the program's code for a
-  // condition already in it.
-  if (m_in_process_site_id)
+  if (m_in_process_condition_attempted)
     return;
 
   const StopCondition &condition = GetCondition();
@@ -263,12 +261,35 @@ void BreakpointLocation::CompileConditionIntoProcess() {
   if (!GetTarget().GetFastConditions(&exe_ctx))
     return;
 
-  // Logged rather than reported. Every way this can fail leaves the condition
+  // A location in code the debugger compiled is a location a patch produced:
+  // the copy's line table points back at the original source, so the breakpoint
+  // resolves into the copy as well. There is nothing to compile in for it, and
+  // recompiling from a copy would patch a patch, so this is not a refusal to
+  // report.
+  if (IsInDebuggerCompiledCode(GetAddress())) {
+    m_in_process_condition_attempted = true;
+    return;
+  }
+
+  // Not yet rather than no: a condition is set long before the program is at a
+  // stop that a patch would survive, so this is asked again at every stop until
+  // one is.
+  if (!GetTarget().CanCompileCodeIntoProcess())
+    return;
+
+  m_in_process_condition_attempted = true;
+  llvm::Error error = InstallInProcessCondition(condition.GetText());
+  if (!error)
+    return;
+
+  // Kept rather than only logged. Every way this can fail leaves the condition
   // to be evaluated at a stop, so a refusal costs speed rather than correctness
-  // -- but the reason has to be findable, since the speed is the whole point.
-  if (llvm::Error error = InstallInProcessCondition(condition.GetText()))
-    LLDB_LOG_ERROR(GetLog(LLDBLog::Breakpoints), std::move(error),
-                   "condition not compiled into the process: {0}");
+  // -- but the speed is the whole point, so whoever asked has to be able to
+  // read back why they did not get it.
+  m_owner.m_condition_not_compiled_reason = llvm::toString(std::move(error));
+  LLDB_LOG(GetLog(LLDBLog::Breakpoints),
+           "condition not compiled into the process: {0}",
+           m_owner.m_condition_not_compiled_reason);
 }
 
 llvm::Error
@@ -284,11 +305,8 @@ BreakpointLocation::InstallInProcessCondition(llvm::StringRef condition_text) {
     return llvm::createStringError(
         "no debug info describes a function and line at the location");
 
-  // Recompiling from a copy would patch a patch, and the copy is not the source
-  // of truth for what the program does.
-  if (IsInDebuggerCompiledCode(GetAddress()))
-    return llvm::createStringError(
-        "the location is in code the debugger compiled, not in the program");
+  assert(!IsInDebuggerCompiledCode(GetAddress()) &&
+         "recompiling a copy the debugger compiled would patch a patch");
 
   PatchRequest request;
   request.FunctionEntry =

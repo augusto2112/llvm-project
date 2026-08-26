@@ -1994,9 +1994,24 @@ public:
   FunctionPatchManager &GetFunctionPatchManager();
 
   /// Compile into the process the condition of every breakpoint that asked for
-  /// that, which is normally every one of them: a condition is set before there
-  /// is a process to compile it into, so the ask outlives the refusal.
+  /// that and has not had it done yet.
+  ///
+  /// Called at every stop, because a condition is set long before there is a
+  /// moment at which it can be compiled in: see CanCompileCodeIntoProcess.
   void CompileBreakpointConditionsIntoProcess();
+
+  /// Whether code the debugger compiles into the process now would still be
+  /// there, and still be described, at the next stop.
+  ///
+  /// Two things have to hold. The process has to be held still, since writing
+  /// the program's code and reading every thread's pc mean nothing while it
+  /// runs. And the dynamic loader has to be past its own startup: a loader that
+  /// is still starting up can rebuild all of the debugger's image bookkeeping
+  /// from scratch, which drops the module describing anything the debugger
+  /// compiled -- and with it that code's line table, the sites attributing its
+  /// traps, and every breakpoint location resident in it. The code itself
+  /// survives in the program; nothing that made sense of it does.
+  bool CanCompileCodeIntoProcess();
 
   // Methods.
   lldb::SearchFilterSP

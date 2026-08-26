@@ -445,6 +445,18 @@ public:
     return m_condition_compiled_into_process;
   }
 
+  /// Why this breakpoint's condition is not compiled into the process, when it
+  /// was asked for and refused; empty when nothing asked or nothing refused.
+  ///
+  /// A refusal never stops a condition working -- it is evaluated at a stop
+  /// instead -- but that costs a stop on every hit, which on a hot line is the
+  /// difference between a run of seconds and one of tens of minutes. So a
+  /// caller that asked for a compiled-in condition and did not get one has to
+  /// be able to find out why.
+  llvm::StringRef GetWhyConditionIsNotCompiledIntoProcess() const {
+    return m_condition_not_compiled_reason;
+  }
+
   /// Return the breakpoint condition.
   const StopCondition &GetCondition() const;
 
@@ -727,6 +739,11 @@ private:
   /// Set once a location has compiled this breakpoint's condition into the
   /// process, and never cleared: compiled-in code stays in the program.
   bool m_condition_compiled_into_process = false;
+
+  /// The last reason a location gave for not compiling this breakpoint's
+  /// condition into the process. Prose, because it is read rather than
+  /// dispatched on, and every layer that can refuse has its own vocabulary.
+  std::string m_condition_not_compiled_reason;
 
   /// Number of times this breakpoint has been hit. This is kept separately
   /// from the locations hit counts, since locations can go away when their

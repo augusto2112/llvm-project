@@ -48,6 +48,7 @@
 #include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Symbol/Symbol.h"
 #include "lldb/Target/ABI.h"
+#include "lldb/Target/DynamicLoader.h"
 #include "lldb/Target/ExecutionContext.h"
 #include "lldb/Target/FunctionPatch.h"
 #include "lldb/Target/Language.h"
@@ -3171,7 +3172,29 @@ FunctionPatchManager &Target::GetFunctionPatchManager() {
   return *m_function_patch_manager_up;
 }
 
+bool Target::CanCompileCodeIntoProcess() {
+  Process *process = m_process_sp.get();
+  if (!process || !process->IsAlive())
+    return false;
+
+  // The private state, not the public one. At a stop the debugger handles and
+  // resumes itself -- which is every stop the dynamic loader takes while it
+  // starts up -- the public state still reads as running, and the threads are
+  // nonetheless held still.
+  if (process->GetPrivateState() != eStateStopped)
+    return false;
+
+  DynamicLoader *loader = process->GetDynamicLoader();
+  return !loader || loader->IsFullyInitialized();
+}
+
 void Target::CompileBreakpointConditionsIntoProcess() {
+  // Asked of the target before the breakpoints, so that a target which never
+  // asked for this pays a single check per stop.
+  ExecutionContext exe_ctx(shared_from_this(), false);
+  if (!GetFastConditions(&exe_ctx) || !CanCompileCodeIntoProcess())
+    return;
+
   // Copied out first: compiling a condition in appends a module, which resolves
   // breakpoints, which can add to the list being walked.
   std::vector<BreakpointSP> breakpoints;
@@ -3734,12 +3757,6 @@ Status Target::Launch(ProcessLaunchInfo &launch_info, Stream *stream) {
                                              launch_info.GetHijackListener());
   m_process_sp->RestoreProcessEvents();
 
-  // Here rather than where the conditions were set: this is the first moment
-  // there is a process to compile one into, and the last before the program
-  // runs.
-  if (state == eStateStopped)
-    CompileBreakpointConditionsIntoProcess();
-
   if (rebroadcast_first_stop) {
     // We don't need to run the stop hooks by hand here, they will get
     // triggered when this rebroadcast event gets fetched.
@@ -3914,8 +3931,6 @@ Status Target::Attach(ProcessAttachInfo &attach_info, Stream *stream) {
           error = Status::FromErrorString(
               "process did not stop (no such process or permission problem?)");
         process_sp->Destroy(false);
-      } else {
-        CompileBreakpointConditionsIntoProcess();
       }
     }
   }
