@@ -140,6 +140,9 @@ private:
   RegisterTrapSite(lldb::addr_t Trap, BreakpointHitCallback OnTrap,
                    const lldb::BatonSP &Baton);
 
+  /// Makes the site carried by \p BreakID resume without reporting anything.
+  void SilenceSite(lldb::break_id_t BreakID);
+
   Target &m_target;
   lldb::addr_t m_ring_address = LLDB_INVALID_ADDRESS;
   lldb::addr_t m_slot_pool = LLDB_INVALID_ADDRESS;

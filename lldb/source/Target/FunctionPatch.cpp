@@ -33,6 +33,7 @@
 #include "lldb/Utility/ConstString.h"
 #include "lldb/Utility/State.h"
 #include "lldb/Utility/SupportFile.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/TargetParser/Triple.h"
@@ -107,8 +108,8 @@ struct FunctionPatchManager::PatchedFunction {
 
   llvm::DenseMap<uint32_t, PatchSiteCallback> Callbacks;
 
-  /// The internal breakpoints that carry each site's callback, one per trap the
-  /// copies compiled for that site contain.
+  /// The internal breakpoints that carry each live site's callback, one per
+  /// trap the current copy contains for that site.
   llvm::DenseMap<uint32_t, std::vector<lldb::break_id_t>> SiteBreakpoints;
 
   /// The instructions the redirect replaced, so the entry can be put back.
@@ -132,6 +133,13 @@ struct FunctionPatchManager::PatchedFunction {
   /// The expressions those copies belong to, held for the same reason and for
   /// as long.
   std::vector<lldb::UserExpressionSP> RetiredExpressions;
+
+  /// The sites that attribute the traps those copies still contain, under the
+  /// site each belongs to. Left registered, because a thread already inside a
+  /// retired copy runs its traps, and a trap with no site to attribute it
+  /// surfaces as a bare exception. Kept per site so that removing an injection
+  /// can reach every trap of it that is still in the program's text.
+  llvm::DenseMap<uint32_t, std::vector<lldb::break_id_t>> RetiredSites;
 };
 
 } // namespace lldb_private
@@ -538,6 +546,17 @@ size_t TrapsEmittedFor(const PatchInjection &Inj) {
   return (Inj.WantStop ? 1 : 0) + (Inj.Captures.empty() ? 0 : 1);
 }
 
+/// What a site whose injection has been removed does when its trap still fires.
+///
+/// The trap is in a copy a thread may be running inside, so it cannot be taken
+/// back out, and nobody is waiting for it any more. Resuming without reporting
+/// is the only outcome left; it beats unregistering the site, which would let
+/// the trap arrive as an exception with nothing to explain it.
+bool ResumeWithoutReporting(void *, StoppointCallbackContext *, lldb::user_id_t,
+                            lldb::user_id_t) {
+  return false;
+}
+
 } // namespace
 
 FunctionPatchManager::FunctionPatchManager(Target &Tgt) : m_target(Tgt) {}
@@ -650,8 +669,44 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
 }
 
 llvm::Error FunctionPatchManager::Remove(uint32_t SiteID) {
-  return llvm::make_error<llvm::StringError>("not yet implemented",
-                                             llvm::inconvertibleErrorCode());
+  auto SiteIt = m_site_to_function.find(SiteID);
+  if (SiteIt == m_site_to_function.end())
+    return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                   "site %u has not been installed", SiteID);
+  auto FnIt = m_functions.find(SiteIt->second);
+  if (FnIt == m_functions.end())
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "site %u names a function that is not patched", SiteID);
+  PatchedFunction &Fn = *FnIt->second;
+
+  // Silenced rather than unregistered, which is all removal can do for a trap
+  // the program's text still holds: a thread already inside one of these copies
+  // reaches it, and a stop nobody wants is a better outcome than one nothing
+  // can explain. Every copy that holds this injection's trap, not only the
+  // current one, since an earlier copy a thread is still inside holds it too.
+  for (lldb::break_id_t BreakID : Fn.SiteBreakpoints.lookup(SiteID))
+    SilenceSite(BreakID);
+  for (lldb::break_id_t BreakID : Fn.RetiredSites.lookup(SiteID))
+    SilenceSite(BreakID);
+
+  llvm::erase_if(Fn.Injections, [SiteID](const PatchInjection &Inj) {
+    return Inj.SiteID == SiteID;
+  });
+  Fn.Callbacks.erase(SiteID);
+  m_site_to_function.erase(SiteIt);
+
+  // Recompiled even when nothing is left to inject, rather than putting the
+  // original entry back. Restoring it means writing all sixteen bytes of a
+  // trampoline threads are branching through, where re-pointing the literal at
+  // a fresh copy is one aligned store that no thread can observe half of.
+  return Recompile(Fn);
+}
+
+void FunctionPatchManager::SilenceSite(lldb::break_id_t BreakID) {
+  if (lldb::BreakpointSP Bp = m_target.GetBreakpointByID(BreakID))
+    Bp->SetCallback(ResumeWithoutReporting, lldb::BatonSP(),
+                    /*is_synchronous=*/false);
 }
 
 void FunctionPatchManager::SetGate(uint32_t SiteID, bool Open) {
@@ -874,11 +929,21 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   // Written last, and only now that the copy's address is known: until this
   // lands the copy is unreachable, so every refusal above leaves the program
   // running the code it was already running.
+  //
+  // A function already redirected has its trampoline's literal re-pointed
+  // rather than the whole trampoline rewritten. The literal is one aligned
+  // eight-byte store, so a thread running the two instructions above it reads
+  // one target or the other; rewriting all sixteen bytes would leave a window
+  // in which a half-written redirect was reachable.
   const std::array<uint8_t, kEntryTrampolineSize> Trampoline =
       EncodeEntryTrampoline(Copy->Address);
+  const bool AlreadyRedirected = Fn.CopyAddress != LLDB_INVALID_ADDRESS;
+  const size_t WriteOffset =
+      AlreadyRedirected ? kEntryTrampolineTargetOffset : 0;
+  const size_t WriteSize = Trampoline.size() - WriteOffset;
   Status WriteError;
-  if (Proc->WriteMemory(Fn.Entry, Trampoline.data(), Trampoline.size(),
-                        WriteError) != Trampoline.size()) {
+  if (Proc->WriteMemory(Fn.Entry + WriteOffset, Trampoline.data() + WriteOffset,
+                        WriteSize, WriteError) != WriteSize) {
     DropRegistered();
     return Refuse(PatchFailure::InferiorAccessFailed,
                   llvm::Twine("the redirect could not be written over the "
@@ -886,6 +951,15 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
                       WriteError.AsCString());
   }
 
+  // The sites of the copy this one replaces are retired rather than
+  // unregistered, for the same reason its module is kept: a thread already
+  // inside that copy still runs its traps, and a trap whose site has gone
+  // surfaces as a bare exception instead of as the hit it is.
+  for (const auto &Live : Fn.SiteBreakpoints) {
+    std::vector<lldb::break_id_t> &Retired = Fn.RetiredSites[Live.first];
+    Retired.insert(Retired.end(), Live.second.begin(), Live.second.end());
+  }
+  Fn.SiteBreakpoints.clear();
   for (const auto &[SiteID, BreakID] : Registered)
     Fn.SiteBreakpoints[SiteID].push_back(BreakID);
 
