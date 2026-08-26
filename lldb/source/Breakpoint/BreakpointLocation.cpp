@@ -315,21 +315,22 @@ void BreakpointLocation::CompileConditionIntoProcess() {
   // old text comes out before one carrying the new text goes in. Nothing here can
   // amend a copy in place: each half is a recompile of the function.
   if (m_in_process_site_id) {
-    llvm::Error removed =
-        GetTarget().GetFunctionPatchManager().Remove(*m_in_process_site_id);
-    m_in_process_site_id.reset();
-    if (removed) {
-      // Reported rather than worked around. A removal that failed has already
-      // silenced the old injection's traps, so this location has no way left to
-      // stop, and installing beside an injection that still tests the replaced
-      // text would not give it one.
+    if (llvm::Error removed =
+            GetTarget().GetFunctionPatchManager().Remove(*m_in_process_site_id)) {
+      // Reported rather than worked around, and the site kept: a removal that
+      // failed left the injection carrying the replaced text in the program,
+      // still able to stop, which is a location that tests an out-of-date
+      // condition. Forgetting the site would make it a location that cannot stop
+      // at all, since its own trap is in a body the redirect no longer reaches.
       m_condition_not_compiled_reason = llvm::toString(std::move(removed));
       LLDB_LOG(GetLog(LLDBLog::Breakpoints),
                "the compiled-in condition this location replaced could not be "
-               "taken back out of the program: {0}",
+               "taken back out of the program, so the program is still testing "
+               "it: {0}",
                m_condition_not_compiled_reason);
       return;
     }
+    m_in_process_site_id.reset();
   }
 
   llvm::Error error = InstallInProcessCondition(wanted_text);

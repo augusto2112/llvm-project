@@ -927,19 +927,47 @@ llvm::Error FunctionPatchManager::Remove(uint32_t SiteID) {
         "site %u names a function that is not patched", SiteID);
   PatchedFunction &Fn = *FnIt->second;
 
+  auto Doomed = llvm::find_if(Fn.Injections, [SiteID](const PatchInjection &Inj) {
+    return Inj.SiteID == SiteID;
+  });
+  if (Doomed == Fn.Injections.end())
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "site %u is not among the injections of the function it names", SiteID);
+
+  // Recompiled first, and nothing forgotten until it has succeeded. A compile
+  // that fails would otherwise leave the manager believing the injection is gone
+  // while the program still runs a copy that contains it -- and if that copy's
+  // traps had been silenced by then, the caller would be left with an injection
+  // it can neither hear from nor take out.
+  //
+  // Recompiled even when nothing is left to inject, rather than putting the
+  // original entry back. Restoring it means writing all sixteen bytes of a
+  // trampoline threads are branching through, where re-pointing the literal at
+  // a fresh copy is one aligned store that no thread can observe half of.
+  const size_t Index = Doomed - Fn.Injections.begin();
+  PatchInjection Saved = std::move(*Doomed);
+  Fn.Injections.erase(Doomed);
+  if (llvm::Error Err = Recompile(Fn)) {
+    Fn.Injections.insert(Fn.Injections.begin() + Index, std::move(Saved));
+    return Err;
+  }
+
   // Silenced rather than unregistered, which is all removal can do for a trap
   // the program's text still holds: a thread already inside one of these copies
   // reaches it, and a stop nobody wants is a better outcome than one nothing
-  // can explain. Every copy that holds this injection's trap, not only the
-  // current one, since an earlier copy a thread is still inside holds it too.
+  // can explain. Every copy that holds this injection's trap, not only the one
+  // the recompile just retired, since an earlier copy a thread is still inside
+  // holds it too.
+  //
+  // After the recompile rather than before it, which costs nothing: no thread
+  // runs between the two, since a patch is only ever written while the process
+  // is held still.
   for (lldb::break_id_t BreakID : Fn.SiteBreakpoints.lookup(SiteID))
     SilenceSite(BreakID);
   for (lldb::break_id_t BreakID : Fn.RetiredSites.lookup(SiteID))
     SilenceSite(BreakID);
 
-  llvm::erase_if(Fn.Injections, [SiteID](const PatchInjection &Inj) {
-    return Inj.SiteID == SiteID;
-  });
   Fn.Callbacks.erase(SiteID);
   m_site_to_function.erase(SiteIt);
 
@@ -949,12 +977,7 @@ llvm::Error FunctionPatchManager::Remove(uint32_t SiteID) {
   m_counters.erase(SiteID);
   m_captures.erase(SiteID);
   m_dropped_captures.erase(SiteID);
-
-  // Recompiled even when nothing is left to inject, rather than putting the
-  // original entry back. Restoring it means writing all sixteen bytes of a
-  // trampoline threads are branching through, where re-pointing the literal at
-  // a fresh copy is one aligned store that no thread can observe half of.
-  return Recompile(Fn);
+  return llvm::Error::success();
 }
 
 void FunctionPatchManager::SilenceSite(lldb::break_id_t BreakID) {

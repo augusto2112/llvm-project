@@ -167,6 +167,11 @@ public:
   llvm::Expected<uint32_t> Install(const PatchRequest &Request);
 
   /// Drops one injection and recompiles what remains.
+  ///
+  /// The recompile happens first and nothing is forgotten until it has
+  /// succeeded, so a failure leaves the site exactly as it was: still installed,
+  /// still able to stop, and still testing what it was compiled with. A caller
+  /// that has been refused here has an out-of-date injection rather than none.
   llvm::Error Remove(uint32_t SiteID);
 
   /// Reads whatever the injected code has recorded since the last read, and
