@@ -1103,6 +1103,21 @@ json::Value CaptureReport::Render() const {
                         {"errors", static_cast<int64_t>(Errors)}};
   }
 
+  // A capture the program recorded for itself has no tier and no cost for the
+  // same reason: no name was resolved and no expression was run. It is also the
+  // one word here that says the hit it came from cost nothing at all -- the
+  // observation's own `eval` says the tracepoint's work is in the program, and
+  // this says the values are too, so nothing stopped.
+  if (InProcess) {
+    if (Evaluations == 0)
+      return "not_evaluated";
+    if (Errors == 0)
+      return "in_process" + Times;
+    return json::Object{{"tier", "in_process"},
+                        {"evaluations", static_cast<int64_t>(Evaluations)},
+                        {"errors", static_cast<int64_t>(Errors)}};
+  }
+
   // A capture that resolved as a path and never failed has nothing to say
   // beyond how it resolved and how often, and most captures are that.
   if (!Disabled && Errors == 0 && FixedExpr.empty() &&
@@ -1189,15 +1204,19 @@ json::Value ObservationReport::Render() const {
     O["condition_true"] = static_cast<int64_t>(ConditionTrue);
     O["condition_errors"] = static_cast<int64_t>(ConditionErrors);
     O["condition_ms"] = Round2(ConditionMs);
+  }
 
-    // Said per observation because the answer differs per observation: one
-    // tracepoint's condition may be compiled in while another's function had no
-    // source to recompile. A caller comparing hit counts between runs needs to
-    // know which of them paid for a stop per hit.
-    //
-    // Beside the condition counters and under the same test, so that its
-    // absence says "no condition" rather than "a condition nothing was decided
-    // about".
+  // Said per observation because the answer differs per observation: one
+  // tracepoint's condition may be compiled in while another's function had no
+  // source to recompile. A caller comparing hit counts between runs needs to
+  // know which of them paid for a stop per hit.
+  //
+  // Under the test that says there was something to compile at all. A bare hit
+  // counter has neither a condition to test nor a value to read, so there is
+  // nothing for the program to do for itself and nothing to report about it --
+  // whereas for an observation that reads something, its absence would say the
+  // question was never asked.
+  if (HasCondition || !Captures.empty()) {
     if (InProcess)
       O["eval"] = "in-process";
     else if (FallbackReason.empty())
@@ -1622,6 +1641,11 @@ struct ObservationSite {
     /// the rule an unresolved tracepoint location already follows by re-reading
     /// its location count after the run rather than before it.
     size_t DisabledAtModules = 0;
+
+    /// Whether the program recorded this capture for itself. No name was
+    /// resolved and no expression was run, so it has no tier and no cost, and
+    /// the hit it came from cost no stop.
+    bool InProcess = false;
   };
   std::vector<CaptureState> Captures;
 
@@ -1661,6 +1685,38 @@ struct ObservationSite {
   /// The compiled-in site this observation's condition was installed as, unset
   /// while the condition is being evaluated at a stop instead.
   std::optional<uint32_t> CompiledIn;
+
+  /// Whether that site records this observation's captures and so never stops.
+  /// The values arrive at a drain instead, and everything a hit does with them
+  /// happens there.
+  bool RecordsWithoutStopping = false;
+
+  /// The function the copy was compiled from, which is the only thing a hit read
+  /// out of a record knows about where it happened: no frame was ever current
+  /// for it, because nothing stopped.
+  std::string CompiledInFunction;
+
+  /// One hit of this site whose captures have not all arrived.
+  ///
+  /// A thread held still partway through a hit has written some of that hit's
+  /// values and not the rest, so a hit can straddle two reads. Held until it is
+  /// complete rather than reported short, since the rest usually arrives at the
+  /// next read -- and a tuple missing a value is a different hit as far as
+  /// change detection and a comparison are concerned.
+  struct PartialHit {
+    /// As the site's own counter numbered it. Records carry it because two
+    /// threads inside one site interleave theirs.
+    uint64_t Hit = 0;
+
+    /// By capture position, with the ones not yet recorded left null.
+    std::vector<lldb::ValueObjectSP> Values;
+
+    uint32_t Filled = 0;
+  };
+
+  /// In arrival order, so that hits reach the report in the order the program
+  /// wrote them.
+  std::vector<PartialHit> Partial;
 
   /// This observation's counts as of the moment its condition was compiled in.
   /// The injected code's own counters start from zero there, so the two halves
@@ -1722,6 +1778,17 @@ constexpr size_t MaxTerminalFrames = 16;
 /// diverge in every case observed; past that the count of what was not kept is
 /// what stops "identical" from overclaiming.
 constexpr size_t MaxComparedHits = 4096;
+
+/// Hits whose recorded values are still incomplete that one observation will hold
+/// while the program runs.
+///
+/// A hit waits only for the values of it that a thread had not finished writing
+/// when the program was held still, so under ordinary conditions there is at most
+/// one of these per thread. The bound exists for the case where the rest of a
+/// hit's values were overwritten before they could be read and are never coming:
+/// such a hit is filed as it stands rather than held, so that the queue cannot
+/// grow by one for every value the ring lost.
+constexpr size_t MaxPartialHits = 256;
 
 /// Locals the terminal event reports.
 constexpr size_t MaxTerminalLocals = 32;
@@ -2742,6 +2809,16 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     }
   }
 
+  FileHit(Site, Seq, std::move(Values), std::move(Rendered), Frame,
+          /*AtAStop=*/true);
+  return EndIfDue();
+}
+
+void ObservationEngine::FileHit(ObservationSite &Site, uint64_t Seq,
+                                json::Object Values, std::string Rendered,
+                                StackFrame *Frame, bool AtAStop) {
+  const Observation &Obs = *Site.Obs;
+
   // The location and what was read there, so that a repetition means the program
   // is arriving at the same places holding the same values. The locations alone
   // repeat for any loop, wedged or not; the values are what separate them. A plan
@@ -2779,11 +2856,18 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
   Site.Previous = std::move(Rendered);
 
   if (What != EmitDecision::Skip) {
-    const double At =
-        ToMs(std::chrono::duration_cast<Micros>(Clock::now() - m_start));
     json::Object Event{{"seq", static_cast<int64_t>(Seq)},
-                       {"label", Obs.Label},
-                       {"t_ms", Round2(At)}};
+                       {"label", Obs.Label}};
+
+    // Left off a hit the program recorded rather than stopped for. Nothing
+    // watched that hit happen, so the only time to hand back would be the
+    // moment its record was read -- which is one instant shared by the
+    // thousands of hits read together, and would read as the program having
+    // arrived at all of them at once.
+    if (AtAStop)
+      Event["t_ms"] =
+          Round2(ToMs(std::chrono::duration_cast<Micros>(Clock::now() -
+                                                         m_start)));
 
     // Hits of one observation are numbered and compared as a single sequence,
     // so on a program with more than one thread that sequence is an
@@ -2792,6 +2876,11 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
       Event["tid"] = static_cast<int64_t>(T->GetID());
     if (Frame)
       Event["frame"] = DescribeFrame(*Frame).Function;
+    else if (!Site.CompiledInFunction.empty())
+      // The function whose copy recorded it. Not read from a frame, there having
+      // been none, but known all the same: it is the function that was
+      // recompiled to do this observation's work.
+      Event["frame"] = Site.CompiledInFunction;
     if (!Values.empty())
       Event["values"] = std::move(Values);
     if (Obs.Backtrace != 0 && Frame)
@@ -2803,8 +2892,6 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     else
       Site.Held = std::move(Event);
   }
-
-  return EndIfDue();
 }
 
 void ObservationEngine::WriteEvent(ObservationSite &Site, json::Object Event) {
@@ -2913,7 +3000,7 @@ Error ObservationEngine::InstallObservations() {
   }
 
   if (m_plan.Fast)
-    ArrangeCompilingConditionsIn();
+    ArrangeCompilingTracepointsIn();
   else
     for (ObservationReport &Report : m_result.Observations)
       Report.FallbackReason = "\"fast\" is off for this plan";
@@ -2921,13 +3008,13 @@ Error ObservationEngine::InstallObservations() {
   return Error::success();
 }
 
-void ObservationEngine::ArrangeCompilingConditionsIn() {
-  // Nothing to arrange for a plan no observation of which carries a condition:
-  // a capture is read at a stop, which is where the thread and the frame it
-  // came from are known, and there is nothing else a tracepoint does that the
-  // program could do for itself.
-  if (none_of(m_plan.Observations,
-              [](const Observation &Obs) { return Obs.WhenExpr.has_value(); }))
+void ObservationEngine::ArrangeCompilingTracepointsIn() {
+  // Nothing to arrange for a plan whose observations neither test a condition
+  // nor read anything: a bare hit counter has nothing for the program to do that
+  // the location's own trap does not already do more cheaply.
+  if (none_of(m_plan.Observations, [](const Observation &Obs) {
+        return Obs.WhenExpr.has_value() || !Obs.Capture.empty();
+      }))
     return;
 
   const char *const Entry = "main";
@@ -2961,7 +3048,7 @@ void ObservationEngine::ArrangeCompilingConditionsIn() {
 bool ObservationEngine::CompileAtThisStop(void *Baton,
                                           StoppointCallbackContext *,
                                           lldb::user_id_t, lldb::user_id_t) {
-  static_cast<ObservationEngine *>(Baton)->CompileConditionsIntoProcess();
+  static_cast<ObservationEngine *>(Baton)->CompileTracepointsIntoProcess();
   return false;
 }
 
@@ -2999,7 +3086,47 @@ ObservationEngine::WhyNotInProcess(const ObservationSite &Site) const {
   return std::nullopt;
 }
 
-void ObservationEngine::CompileConditionsIntoProcess() {
+std::optional<std::string>
+ObservationEngine::WhyCapturesAreReadAtAStop(const ObservationSite &Site) const {
+  const Observation &Obs = *Site.Obs;
+
+  // Everything here has the same shape: something this hit produces cannot be
+  // written into a record, so the debugger has to be standing in the frame. And
+  // once it is standing there it reads every capture itself -- including the ones
+  // no record could carry -- so recording them as well would be the same values
+  // read twice.
+  if (Obs.Backtrace != 0)
+    return "a backtrace is the stack the hit happened on, which only exists "
+           "while the program is held still at it";
+
+  if (Obs.OnlyHit)
+    return "\"only_hit\" names one of the hits this observation records, and "
+           "which hit that is is decided where the hits are counted";
+
+  // The gate byte the program reads is one byte for all of them, so it can only
+  // say that some thread is inside the gating function. Which is enough while the
+  // hit still stops: the gate keeps the callback from running at all when nobody
+  // is inside, and the callback then answers the real question. Nothing answers
+  // it for a hit nobody sees.
+  if (Obs.CalledFrom)
+    return formatv("\"called_from\" is whether a frame of \"{0}\" is below this "
+                   "hit on the same thread, which is a question about a stack "
+                   "and not about a byte the program can read",
+                   *Obs.CalledFrom)
+        .str();
+
+  for (const std::string &Expr : Obs.Capture)
+    if (Expr == ReturnValueCapture)
+      return formatv("\"{0}\" is read from where the ABI leaves a result, "
+                     "which is a register rather than anything the function's "
+                     "own code can name",
+                     ReturnValueCapture)
+          .str();
+
+  return std::nullopt;
+}
+
+void ObservationEngine::CompileTracepointsIntoProcess() {
   // Asked once. A refusal at this stop is a refusal for a reason the rest of
   // the run cannot change, and a second attempt would recompile every function
   // that succeeded.
@@ -3015,10 +3142,29 @@ void ObservationEngine::CompileConditionsIntoProcess() {
   for (std::unique_ptr<ObservationSite> &Owned : m_sites) {
     ObservationSite &Site = *Owned;
     ObservationReport &Report = m_result.Observations[Site.Index];
-    if (!Site.Obs->WhenExpr)
+    const Observation &Obs = *Site.Obs;
+    if (!Obs.WhenExpr && Obs.Capture.empty())
       continue;
     if (std::optional<std::string> Why = WhyNotInProcess(Site)) {
       Report.FallbackReason = std::move(*Why);
+      continue;
+    }
+
+    // Captures go into the program exactly when that lets the site stop for
+    // nothing at all. While it still traps at every hit the guards let through,
+    // the debugger is standing in the frame and reads every capture there --
+    // anything a record can carry and everything it cannot -- so recording them
+    // as well would be the same values read twice.
+    std::optional<std::string> CapturesReadAtAStop;
+    if (!Obs.Capture.empty())
+      CapturesReadAtAStop = WhyCapturesAreReadAtAStop(Site);
+    const bool Records = !Obs.Capture.empty() && !CapturesReadAtAStop;
+
+    // Which can leave nothing for the program to do: a site with no condition
+    // whose captures have to be read at a stop stops at every hit, which is what
+    // it would do with this feature switched off.
+    if (!Obs.WhenExpr && !Records) {
+      Report.FallbackReason = *CapturesReadAtAStop;
       continue;
     }
 
@@ -3040,15 +3186,17 @@ void ObservationEngine::CompileConditionsIntoProcess() {
     Request.FunctionEntry =
         SC.function->GetAddress().GetLoadAddress(m_target.get());
     Request.Line = SC.line_entry.line;
-    Request.Condition = *Site.Obs->WhenExpr;
+    Request.Condition = Obs.WhenExpr;
+    if (Records)
+      Request.Captures = Obs.Capture;
 
     // Only what the skip has left. The hits taken before this moment were
     // counted at a stop and skipped there, and the injected code's counter
     // starts from zero, so passing the whole of `skip_first` would swallow the
     // same hits a second time.
     Request.SkipFirst =
-        Site.Obs->SkipFirst > Site.Hits
-            ? Site.Obs->SkipFirst - static_cast<uint32_t>(Site.Hits)
+        Obs.SkipFirst > Site.Hits
+            ? Obs.SkipFirst - static_cast<uint32_t>(Site.Hits)
             : 0;
 
     // `only_hit` is deliberately not passed. The injected code would compare it
@@ -3057,9 +3205,12 @@ void ObservationEngine::CompileConditionsIntoProcess() {
     // different numbers, so the two would select different hits. Applied at the
     // stop instead, which costs a trap per hit whose condition held and picks
     // the hit the aggregate names.
-    Request.Gated =
-        Site.Obs->CalledFrom.has_value() || Site.Obs->EnabledAfter.has_value();
-    Request.WantStop = true;
+    Request.Gated = Obs.CalledFrom.has_value() || Obs.EnabledAfter.has_value();
+
+    // A site that has written its values into the ring has already said
+    // everything the hit had to say, so stopping would cost exactly what the
+    // recording saved.
+    Request.WantStop = !Records;
     Request.OnTrap = TracepointHit;
     Request.Baton = std::make_shared<UntypedBaton>(&Site);
     Request.HitsCarriedBy = Site.Breakpoint->GetID();
@@ -3094,9 +3245,20 @@ void ObservationEngine::CompileConditionsIntoProcess() {
     }
 
     Site.CompiledIn = *Installed;
+    Site.RecordsWithoutStopping = Records;
+    Site.CompiledInFunction = SC.function->GetName().GetString();
     Site.HitsBeforeCompile = Site.Hits;
     Site.ConditionTrueBeforeCompile = Site.ConditionTrue;
     Report.InProcess = true;
+    if (Records) {
+      m_recorded_without_stopping = true;
+      // Set here rather than where a value arrives, so that a capture on an
+      // observation whose code never ran still reports the mode it was given
+      // rather than the mode it would have had.
+      for (ObservationSite::CaptureState &Capture : Site.Captures)
+        Capture.InProcess = true;
+      Site.Partial.clear();
+    }
 
     // A gated site starts closed, and the debugger may already have opened this
     // observation. The gate byte mirrors the tracepoint's own enabled bit,
@@ -3107,9 +3269,8 @@ void ObservationEngine::CompileConditionsIntoProcess() {
 
     // The function, not the observation: two tracepoints in one function are
     // one recompile, and it is the recompile the note is about.
-    std::string FunctionName = SC.function->GetName().GetString();
-    if (!llvm::is_contained(Recompiled, FunctionName))
-      Recompiled.push_back(std::move(FunctionName));
+    if (!llvm::is_contained(Recompiled, Site.CompiledInFunction))
+      Recompiled.push_back(Site.CompiledInFunction);
   }
 
   if (Recompiled.empty())
@@ -3135,7 +3296,7 @@ void ObservationEngine::CompileConditionsIntoProcess() {
   m_result.Notes.push_back(
       formatv(
           "this run recompiled {0} without optimization and pointed the "
-          "program at the {1}, so that the conditions on {2} could run "
+          "program at the {1}, so that the tracepoints on {2} could run "
           "without stopping it. The program's own timing is therefore not "
           "what it was built to be, and code that relied on what the "
           "optimizer did can behave differently; \"fast\": false leaves the "
@@ -3143,6 +3304,18 @@ void ObservationEngine::CompileConditionsIntoProcess() {
           Names, Recompiled.size() == 1 ? "copy" : "copies",
           Recompiled.size() == 1 ? "it" : "them")
           .str());
+
+  // Said once for the run, because it is a property of how a hit was observed
+  // rather than of any one observation: a hit the program recorded for itself was
+  // never current anywhere, so there was no thread to name it on and no moment at
+  // which anything looked at the clock. Every other field of such an event is what
+  // it would have been at a stop.
+  if (m_recorded_without_stopping)
+    m_result.Notes.push_back(
+        "the hits whose captures are marked \"in_process\" were recorded by the "
+        "program without stopping it, so their events carry no \"tid\" and no "
+        "\"t_ms\": nothing watched them happen. Their values, their order and "
+        "their counts are what a stop would have reported.");
 }
 
 void ObservationEngine::SetCompiledInGate(const ObservationSite &Site,
@@ -3151,7 +3324,7 @@ void ObservationEngine::SetCompiledInGate(const ObservationSite &Site,
     m_target->GetFunctionPatchManager().SetGate(*Site.CompiledIn, Open);
 }
 
-void ObservationEngine::TakeCompiledInCounters() {
+void ObservationEngine::TakeWhatTheProgramRecorded(bool RunHasEnded) {
   if (!m_target ||
       none_of(m_sites, [](const std::unique_ptr<ObservationSite> &Site) {
         return Site->CompiledIn.has_value();
@@ -3164,11 +3337,16 @@ void ObservationEngine::TakeCompiledInCounters() {
     // Loud, because the alternative is an observation that reports the hits it
     // was stopped for -- none, for a condition that never held -- as the hits
     // the program took.
+    //
+    // Nothing held from an earlier read is stranded by returning here. A drain
+    // reports a failure rather than what it has only when it has nothing at all,
+    // which for a run that had read anything before cannot be true.
     m_result.Notes.push_back(
-        formatv("the hit counts the compiled-in conditions kept could not be "
-                "read back out of the program: {0}. The observations reported "
-                "as \"in-process\" undercount their hits by however many the "
-                "program did not stop for.",
+        formatv("what the compiled-in tracepoints recorded could not be read "
+                "back out of the program: {0}. The observations reported as "
+                "\"in-process\" undercount their hits by however many the "
+                "program did not stop for, and are missing the values it "
+                "recorded at them.",
                 StringRef(toString(Drained.takeError())).rtrim())
             .str());
     return;
@@ -3187,6 +3365,77 @@ void ObservationEngine::TakeCompiledInCounters() {
     Site->CompiledInConditionTrue = Counted->second.CondTrue;
   }
 
+  // Each value against the hit that recorded it. The site's own counter numbered
+  // that hit, and the number travels in the record, because two threads inside
+  // one site write theirs interleaved: joined by arrival order instead, a hit
+  // would be built out of one thread's first value and another's second, and the
+  // tuple that results is a hit the program never had.
+  llvm::DenseMap<uint32_t, ObservationSite *> BySite;
+  for (std::unique_ptr<ObservationSite> &Site : m_sites)
+    if (Site->CompiledIn && Site->RecordsWithoutStopping)
+      BySite[*Site->CompiledIn] = Site.get();
+
+  for (CapturedValue &Recorded : Drained->Values) {
+    ObservationSite *Site = BySite.lookup(Recorded.SiteID);
+    if (!Site || Recorded.Capture >= Site->Captures.size()) {
+      // A value nobody can put anywhere: written by a site this run no longer
+      // knows, or naming a capture the observation does not have. Counted rather
+      // than passed over, since it is a value the program produced and the
+      // report does not hold.
+      ++m_records_lost;
+      continue;
+    }
+
+    auto Held = llvm::find_if(Site->Partial,
+                              [&](const ObservationSite::PartialHit &Hit) {
+                                return Hit.Hit == Recorded.Hit;
+                              });
+    if (Held == Site->Partial.end()) {
+      ObservationSite::PartialHit Fresh;
+      Fresh.Hit = Recorded.Hit;
+      Fresh.Values.resize(Site->Captures.size());
+      Site->Partial.push_back(std::move(Fresh));
+      Held = std::prev(Site->Partial.end());
+    }
+    // Counted only for a slot that was empty, so that a record read twice cannot
+    // make a hit look complete when it is not.
+    if (!Held->Values[Recorded.Capture])
+      ++Held->Filled;
+    Held->Values[Recorded.Capture] = std::move(Recorded.Value);
+  }
+
+  for (std::unique_ptr<ObservationSite> &Owned : m_sites) {
+    ObservationSite &Site = *Owned;
+    if (!Site.RecordsWithoutStopping)
+      continue;
+
+    // A hit is filed once every capture of it has arrived. A thread held still
+    // partway through one has written some of its values and not the rest, and
+    // while the program is still running the rest is likelier to arrive than not
+    // -- so the hit waits, in the position it arrived in, rather than being
+    // reported a value short.
+    //
+    // Once the program has stopped for good, what is there is all there will be.
+    // Bounded either way: a hit whose remaining values the ring overwrote would
+    // otherwise be held for the life of the run, and the queue holding it would
+    // grow by one for every such hit.
+    const bool ReleaseEverything =
+        RunHasEnded || Site.Partial.size() > MaxPartialHits;
+    llvm::erase_if(Site.Partial, [&](ObservationSite::PartialHit &Hit) {
+      if (Hit.Filled < Hit.Values.size() && !ReleaseEverything)
+        return false;
+      RecordCompiledInHit(Site, Hit.Values);
+      return true;
+    });
+  }
+
+  m_records_lost += Drained->Lost;
+  if (!RunHasEnded)
+    return;
+
+  // Said once, at the end. Every stop of the run reads what the program has
+  // recorded since the last one, and a note pushed at each of them would repeat
+  // itself as many times as the run stopped.
   if (!Unread.empty())
     m_result.Notes.push_back(
         formatv("the program never reported the hits it counted for {0}, so "
@@ -3195,13 +3444,92 @@ void ObservationEngine::TakeCompiledInCounters() {
                 join(Unread, ", "))
             .str());
 
-  if (Drained->Lost != 0)
+  if (m_records_lost != 0)
     m_result.Notes.push_back(
-        formatv("{0} records the compiled-in tracepoints wrote never reached "
+        formatv("{0} values the compiled-in tracepoints recorded never reached "
                 "this report, because they were overwritten before they could "
-                "be read.",
-                Drained->Lost)
+                "be read. The hits they belonged to are still counted; what was "
+                "captured at them is missing from \"aggregate\".",
+                m_records_lost)
             .str());
+
+  // Only where the values are the ones at risk: a run that never fills the ring
+  // never raises a drain trap, so nothing but the stop on the way out reads what
+  // it recorded -- and where that stop could not be set, the tail of the run is
+  // missing rather than empty.
+  if (m_recorded_without_stopping) {
+    StringRef Refusal =
+        m_target->GetFunctionPatchManager().GetTailDrainRefusal();
+    if (!Refusal.empty())
+      m_result.Notes.push_back(
+          formatv("the values recorded after this run's last stop may be "
+                  "missing: {0}. What is reported is what had already been read.",
+                  Refusal)
+              .str());
+  }
+}
+
+void ObservationEngine::RecordCompiledInHit(
+    ObservationSite &Site, llvm::ArrayRef<lldb::ValueObjectSP> Values) {
+  const Observation &Obs = *Site.Obs;
+
+  // Counted here for the same reason the stopping path counts it there: it is
+  // what numbers the hit, and what an emission mode compares against.
+  ++Site.Recorded;
+
+  // Ordered as the records were written, which for hits of one site is the order
+  // the program took them in. The number itself is assigned at the read rather
+  // than at the hit, so a hit recorded without a stop and one stopped for later
+  // in the run can appear in the stream out of order -- there being no clock in
+  // the record to put them back with.
+  const uint64_t Seq = ++m_seq;
+  const uint64_t Hit = static_cast<uint64_t>(Obs.SkipFirst) + Site.Recorded;
+
+  json::Object Rendered;
+  std::string Tuple;
+  for (size_t I = 0; I < Site.Captures.size(); ++I) {
+    ObservationSite::CaptureState &Capture = Site.Captures[I];
+    ++Capture.Evaluations;
+
+    const lldb::ValueObjectSP Value = I < Values.size() ? Values[I]
+                                                        : lldb::ValueObjectSP();
+    if (!Value) {
+      // The record carrying it never reached the debugger. Counted as an error on
+      // the capture, which is where a reader looks to find out whether a value
+      // was ever read, and given a reason there, since a capture that failed at
+      // every hit earns an entry in `capture_failures` and an entry with nothing
+      // in the reason field explains nothing.
+      //
+      // Situational rather than stable: the value was recorded, and what went
+      // wrong is a property of this hit and not of the expression, so the next
+      // hit is a fresh question.
+      ++Capture.Errors;
+      Capture.Failure = CaptureFailure::Situational;
+      Capture.FailureReason =
+          "the program recorded this value, and the record was overwritten "
+          "before the debugger could read it";
+    }
+
+    ValueObjectNode Node(Value);
+    SerializeValueOptions SOpts;
+    SOpts.MaxDepth = Obs.Depth;
+    SOpts.MaxRenderedChars = MaxCaptureChars;
+    SOpts.ArtifactRef = formatv("$artifact#seq={0}", Seq).str();
+    SOpts.SawSummary = &m_saw_summary;
+    SOpts.SawExpansion = &m_saw_expansion;
+    json::Value V = SerializeValue(Node, SOpts);
+
+    AggregatedValue Filed = AggregateKey(V);
+    if (!IsUnavailable(V))
+      m_aggregator.Record(Obs.Label, Capture.Expr, Filed.Key, Filed.Document,
+                          Seq, Hit);
+    Tuple += Filed.Key;
+    Tuple += CaptureTupleSeparator;
+    Rendered[Capture.Expr] = std::move(V);
+  }
+
+  FileHit(Site, Seq, std::move(Rendered), std::move(Tuple), /*Frame=*/nullptr,
+          /*AtAStop=*/false);
 }
 
 Error ObservationEngine::Launch() {
@@ -3349,7 +3677,7 @@ Outcome ObservationEngine::WaitForEnd() {
     // Read here as well as at the end of the run, so that a run long enough to
     // be cut short by its ceiling reports the hits it took rather than the ones
     // it happened to have stopped for.
-    TakeCompiledInCounters();
+    TakeWhatTheProgramRecorded(/*RunHasEnded=*/false);
 
     // A callback that found the run's time was up is the only place a program
     // busy hitting tracepoints can be noticed to have overrun.
@@ -3881,7 +4209,7 @@ Expected<ObservationResult> ObservationEngine::Run() {
   // Before anything else, because the counters the injected code keeps are only
   // readable while the process holding them is there, and for a program that
   // exited they are whatever the stop on its way out read.
-  TakeCompiledInCounters();
+  TakeWhatTheProgramRecorded(/*RunHasEnded=*/true);
 
   FlushHeldEvents();
   DrainInferiorOutput();
@@ -4066,6 +4394,7 @@ Expected<ObservationResult> ObservationEngine::Run() {
         Rendered.Disabled->TotalHits = Site->TotalHits();
       Rendered.FromABI =
           Site->Obs->OnReturn && Capture.Expr == ReturnValueCapture;
+      Rendered.InProcess = Capture.InProcess;
       Report.Captures.push_back(std::move(Rendered));
 
       // Read after the run rather than at the failure, which is the same rule

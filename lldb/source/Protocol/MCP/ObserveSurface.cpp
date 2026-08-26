@@ -145,7 +145,9 @@ json::Value lldb_protocol::mcp::ObservationPlanSchema() {
             json::Object{{"type", "boolean"},
                          {"default", true},
                          {"description",
-                          "Compile a tracepoint's condition into the program. "
+                          "Compile a tracepoint's condition and its scalar "
+                          "captures into the program, so a hit costs no stop. "
+                          "Each observation's \"eval\" says which mode it got. "
                           "Off recompiles nothing, at a stop per hit; turn it "
                           "off when the program's own timing is what is under "
                           "investigation."}}},

@@ -868,6 +868,71 @@ TEST(ObservationEngineTest, ReturnValueCaptureReportsThatItCameFromTheABI) {
   EXPECT_EQ(Render(Capture.Render()), "\"not_evaluated\"");
 }
 
+// A capture the program recorded for itself resolved no name and ran no
+// expression, so it has no tier and no cost -- and being told so is how a reader
+// learns that the hit it came from cost no stop at all. `eval` on the observation
+// only says the tracepoint's work is in the program; a condition compiled in
+// still stops at every hit it lets through.
+TEST(ObservationEngineTest, RecordedCaptureSaysTheProgramReadItAndNotAStop) {
+  CaptureReport Capture;
+  Capture.Expr = "bucket";
+  Capture.InProcess = true;
+  Capture.Evaluations = 20000;
+  EXPECT_EQ(Render(Capture.Render()), "\"in_process x20000\"");
+
+  // The tier would otherwise be the default, which renders "unavailable" -- the
+  // word a capture that was read and failed gets.
+  EXPECT_EQ(Render(Capture.Render()).find("unavailable"), std::string::npos);
+
+  // A value the ring overwrote before it could be read is a value that did not
+  // arrive, and the count is what says how many did.
+  Capture.Errors = 12;
+  const std::string Lost = Render(Capture.Render());
+  EXPECT_NE(Lost.find("\"errors\":12"), std::string::npos) << Lost;
+  EXPECT_NE(Lost.find("\"tier\":\"in_process\""), std::string::npos) << Lost;
+
+  // And a tracepoint that never fired is not a value that failed to arrive.
+  Capture.Evaluations = 0;
+  Capture.Errors = 0;
+  EXPECT_EQ(Render(Capture.Render()), "\"not_evaluated\"");
+}
+
+// `eval` is the answer to "which mode did this observation get", and an
+// observation that reads values has that question whether or not it also tests a
+// condition. Under the condition's own test it was reported for one and not the
+// other, so a plan whose captures were being read at a stop per hit said nothing
+// about it at all.
+TEST(ObservationEngineTest, AnObservationThatOnlyReadsValuesStillSaysItsMode) {
+  ObservationReport Report;
+  Report.Label = "hot_step";
+  Report.At = "hot_step";
+  Report.HasCondition = false;
+  Report.InProcess = true;
+  CaptureReport Capture;
+  Capture.Expr = "bucket";
+  Capture.InProcess = true;
+  Capture.Evaluations = 20000;
+  Report.Captures.push_back(Capture);
+
+  std::string S = Render(Report.Render());
+  EXPECT_NE(S.find("\"eval\":\"in-process\""), std::string::npos) << S;
+  // And no condition counters beside it, there being no condition.
+  EXPECT_EQ(S.find("condition_true"), std::string::npos) << S;
+}
+
+// A bare hit counter has nothing for the program to do for itself, so there is
+// nothing to report a mode about. Reported anyway, its absence would be the only
+// way to tell "nothing was asked" from "the question was never answered".
+TEST(ObservationEngineTest, ABareHitCounterHasNoModeToReport) {
+  ObservationReport Report;
+  Report.Label = "reached";
+  Report.At = "compute_value";
+  Report.Hits = 1;
+
+  std::string S = Render(Report.Render());
+  EXPECT_EQ(S.find("eval"), std::string::npos) << S;
+}
+
 TEST(ObservationEngineTest, DisabledCaptureCarriesItsNumbers) {
   CaptureReport Capture;
   Capture.Expr = "I->getName()";

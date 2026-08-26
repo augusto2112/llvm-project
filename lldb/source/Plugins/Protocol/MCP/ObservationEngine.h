@@ -708,6 +708,15 @@ struct CaptureReport {
   /// than resolved from a name, so it has neither a tier nor a per-hit cost.
   bool FromABI = false;
 
+  /// Set for a capture the program recorded for itself, which likewise has
+  /// neither a tier nor a per-hit cost: no name was resolved and no expression
+  /// was run, because the value was copied out where the program held it.
+  ///
+  /// This is also what says whether the stops an observation's condition still
+  /// takes were spent reading values. A capture recorded in the program means
+  /// the hit cost nothing at all; one read at a stop means it cost a stop.
+  bool InProcess = false;
+
   llvm::json::Value Render() const;
 };
 
@@ -746,13 +755,18 @@ struct ObservationReport {
   bool HasCondition = false;
   double ConditionMs = 0.0;
 
-  /// Whether this observation's condition was compiled into the program rather
-  /// than evaluated at a stop, and why it was not where it was not.
+  /// Whether this observation's own work was compiled into the program rather
+  /// than done at a stop, and why it was not where it was not.
   ///
   /// Said per observation because the answer differs per observation: one
   /// tracepoint's condition may be compiled in while another's function had no
   /// source to recompile. A caller comparing hit counts between runs needs to
   /// know which of them paid for a stop per hit.
+  ///
+  /// "In-process" is not by itself the claim that nothing stopped. An
+  /// observation whose condition is compiled in still stops at every hit the
+  /// condition lets through, unless its captures went into the program too;
+  /// which of them did is on each capture, where the granularity belongs.
   bool InProcess = false;
   std::string FallbackReason;
 
@@ -1106,6 +1120,23 @@ private:
   /// is that this normally declines the stop.
   bool RecordHit(ObservationSite &Site, StoppointCallbackContext *Ctx);
 
+  /// The last of what recording a hit does, once its values are in hand: the
+  /// tuple two runs are compared by, the tail a cycle is found over, and the
+  /// event the emission mode allows.
+  ///
+  /// Shared, because a hit the program recorded for itself has to reach the
+  /// report by the same route as one the debugger stopped for. Only how the
+  /// values were obtained differs, and a report in which that changed the
+  /// emission decision or the comparison would make the two modes
+  /// incomparable -- which is the one thing this feature must not do.
+  ///
+  /// \p AtAStop is false for a hit read out of the program's own records. Such a
+  /// hit carries no thread and no time of its own, nothing having watched it
+  /// happen, so the event leaves those out rather than filling them with the
+  /// moment the record was read.
+  void FileHit(ObservationSite &Site, uint64_t Seq, llvm::json::Object Values,
+               std::string Rendered, StackFrame *Frame, bool AtAStop);
+
   /// Arms a breakpoint at the return address of \p Ctx's frame, so that leaving
   /// a frame can be observed without unwinding at every hit of something else.
   /// Unwinding per hit to ask who called is what makes the obvious
@@ -1115,35 +1146,59 @@ private:
 
   llvm::Error InstallObservations();
 
-  /// Sets the internal breakpoint at which the plan's conditions are compiled
-  /// into the program.
+  /// Sets the internal breakpoint at which the plan's own work is compiled into
+  /// the program.
   ///
   /// Not here, before the launch: a copy cannot be compiled until the dynamic
   /// loader has finished starting up, so the launch stop is too early. Nor at
   /// whatever stop the run happens to take next, because a plan whose
-  /// conditions never hold takes none -- which is the case this exists for.
-  void ArrangeCompilingConditionsIn();
+  /// tracepoints never stop the program takes none -- which is the case this
+  /// exists for.
+  void ArrangeCompilingTracepointsIn();
 
   /// The internal breakpoint's callback, which compiles what it can and never
   /// reports the stop.
   static bool CompileAtThisStop(void *Baton, StoppointCallbackContext *Ctx,
                                 lldb::user_id_t, lldb::user_id_t);
 
-  /// Compiles each observation's condition into the program where it can be,
-  /// and records why it could not where it could not.
-  void CompileConditionsIntoProcess();
+  /// Compiles each observation's condition and captures into the program where
+  /// it can, and records why it could not where it could not.
+  void CompileTracepointsIntoProcess();
 
-  /// Why \p Site's condition cannot be compiled into the program, or nothing
+  /// Why \p Site's work cannot be compiled into the program at all, or nothing
   /// when it can.
   ///
   /// Prose rather than a code, because every one of these costs speed and not
-  /// correctness: the condition is evaluated at a stop instead, and the only
-  /// thing to do with the reason is read it.
+  /// correctness: the work is done at a stop instead, and the only thing to do
+  /// with the reason is read it.
   std::optional<std::string> WhyNotInProcess(const ObservationSite &Site) const;
 
-  /// Takes the hit counts the injected code keeps, so that a hit the program
-  /// was not stopped for is still a hit the report knows about.
-  void TakeCompiledInCounters();
+  /// Why \p Site's captures have to be read at a stop even though the rest of
+  /// its work can be compiled in, or nothing when the program can record them
+  /// itself.
+  ///
+  /// Kept apart from \ref WhyNotInProcess because the two answers are different
+  /// sizes. A condition compiled in removes the stops of the hits it excludes;
+  /// captures recorded in the program remove the rest, and an observation can
+  /// have the first without the second.
+  std::optional<std::string>
+  WhyCapturesAreReadAtAStop(const ObservationSite &Site) const;
+
+  /// Takes what the injected code has recorded -- the hit counts it keeps and
+  /// the values it wrote -- so that a hit the program was not stopped for is
+  /// still a hit the report knows about.
+  ///
+  /// \p RunHasEnded releases the hits whose values are still incomplete. A
+  /// thread held still partway through a hit has written some of that hit's
+  /// values and not the rest, and while the program is running the rest is
+  /// likelier to arrive than not; once it has stopped for good, what is there is
+  /// all there will be.
+  void TakeWhatTheProgramRecorded(bool RunHasEnded);
+
+  /// Files one hit whose values the program recorded, as \ref RecordHit files
+  /// one the debugger read at a stop.
+  void RecordCompiledInHit(ObservationSite &Site,
+                           llvm::ArrayRef<lldb::ValueObjectSP> Values);
 
   /// Mirrors \p Site's tracepoint being switched on or off onto its compiled-in
   /// site, which is what gates code the debugger cannot enable and disable.
@@ -1257,6 +1312,16 @@ private:
   /// refused for a reason the run cannot change.
   lldb::break_id_t m_compile_at = LLDB_INVALID_BREAK_ID;
   bool m_compile_attempted = false;
+
+  /// Whether any observation records its values in the program rather than being
+  /// stopped for them, which is what makes the note about what such a hit cannot
+  /// carry worth writing.
+  bool m_recorded_without_stopping = false;
+
+  /// Values the compiled-in tracepoints recorded that never reached the report.
+  /// Accumulated over the run and said once, since every stop reads what has been
+  /// recorded since the last one and a note per stop would repeat itself.
+  uint64_t m_records_lost = 0;
 
   Aggregator m_aggregator;
   StackProfile m_profile;
