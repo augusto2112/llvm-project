@@ -3177,19 +3177,24 @@ FunctionPatchManager &Target::GetFunctionPatchManager() {
   return *m_function_patch_manager_up;
 }
 
-bool Target::CanCompileCodeIntoProcess() {
+bool Target::IsProcessHeldStill() {
   Process *process = m_process_sp.get();
   if (!process || !process->IsAlive())
     return false;
 
   // The private state, not the public one. At a stop the debugger handles and
   // resumes itself -- which is every stop the dynamic loader takes while it
-  // starts up -- the public state still reads as running, and the threads are
-  // nonetheless held still.
-  if (process->GetPrivateState() != eStateStopped)
+  // starts up, and every stop taken only to read what patched code recorded --
+  // the public state still reads as running, and the threads are nonetheless
+  // held still.
+  return process->GetPrivateState() == eStateStopped;
+}
+
+bool Target::CanCompileCodeIntoProcess() {
+  if (!IsProcessHeldStill())
     return false;
 
-  DynamicLoader *loader = process->GetDynamicLoader();
+  DynamicLoader *loader = m_process_sp->GetDynamicLoader();
   return !loader || loader->IsFullyInitialized();
 }
 

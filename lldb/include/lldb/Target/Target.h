@@ -2000,6 +2000,14 @@ public:
   /// moment at which it can be compiled in: see CanCompileCodeIntoProcess.
   void CompileBreakpointConditionsIntoProcess();
 
+  /// Whether the process is being held still, so that reading or writing its
+  /// memory means anything.
+  ///
+  /// Answered from the private state rather than the public one, because a stop
+  /// the debugger takes and resumes itself holds the threads still while the
+  /// public state still reads as running.
+  bool IsProcessHeldStill();
+
   /// Whether code the debugger compiles into the process now would still be
   /// there, and still be described, at the next stop.
   ///
