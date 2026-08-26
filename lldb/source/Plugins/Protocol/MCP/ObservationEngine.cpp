@@ -10,8 +10,10 @@
 #include "SerializeValue.h"
 #include "ValueObjectNode.h"
 #include "lldb/Breakpoint/Breakpoint.h"
+#include "lldb/Breakpoint/BreakpointLocation.h"
 #include "lldb/Breakpoint/StoppointCallbackContext.h"
 #include "lldb/Core/Debugger.h"
+#include "lldb/Core/Module.h"
 #include "lldb/Core/SourceManager.h"
 #include "lldb/Host/Host.h"
 #include "lldb/Host/PosixApi.h"
@@ -19,21 +21,24 @@
 #include "lldb/Symbol/CompilerType.h"
 #include "lldb/Symbol/Function.h"
 #include "lldb/Symbol/LineEntry.h"
+#include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Symbol/SymbolContext.h"
 #include "lldb/Symbol/Variable.h"
 #include "lldb/Symbol/VariableList.h"
 #include "lldb/Target/ABI.h"
 #include "lldb/Target/ExecutionContext.h"
+#include "lldb/Target/FunctionPatch.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/StackFrame.h"
 #include "lldb/Target/StackID.h"
+#include "lldb/Target/StopInfo.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/TargetList.h"
 #include "lldb/Target/Thread.h"
 #include "lldb/Target/ThreadList.h"
 #include "lldb/Target/UnixSignals.h"
-#include "lldb/Target/StopInfo.h"
+#include "lldb/Utility/Baton.h"
 #include "lldb/Utility/Environment.h"
 #include "lldb/Utility/FileSpec.h"
 #include "lldb/Utility/Listener.h"
@@ -1184,6 +1189,21 @@ json::Value ObservationReport::Render() const {
     O["condition_true"] = static_cast<int64_t>(ConditionTrue);
     O["condition_errors"] = static_cast<int64_t>(ConditionErrors);
     O["condition_ms"] = Round2(ConditionMs);
+
+    // Said per observation because the answer differs per observation: one
+    // tracepoint's condition may be compiled in while another's function had no
+    // source to recompile. A caller comparing hit counts between runs needs to
+    // know which of them paid for a stop per hit.
+    //
+    // Beside the condition counters and under the same test, so that its
+    // absence says "no condition" rather than "a condition nothing was decided
+    // about".
+    if (InProcess)
+      O["eval"] = "in-process";
+    else if (FallbackReason.empty())
+      O["eval"] = "stopped";
+    else
+      O["eval"] = "stopped: " + FallbackReason;
   }
 
   // One thread is the case a reader assumes, so saying so would be noise. More
@@ -1632,6 +1652,39 @@ struct ObservationSite {
   /// Sites this one enables the first time it is hit.
   std::vector<ObservationSite *> Enables;
 
+  /// Whether the sites this one enables have been opened, which happens at the
+  /// first hit this observation records. Kept as a state rather than tested
+  /// against a hit number, because the hits are counted in two places once the
+  /// condition is compiled in.
+  bool Opened = false;
+
+  /// The compiled-in site this observation's condition was installed as, unset
+  /// while the condition is being evaluated at a stop instead.
+  std::optional<uint32_t> CompiledIn;
+
+  /// This observation's counts as of the moment its condition was compiled in.
+  /// The injected code's own counters start from zero there, so the two halves
+  /// have to be added rather than one of them read.
+  uint64_t HitsBeforeCompile = 0;
+  uint64_t ConditionTrueBeforeCompile = 0;
+
+  /// What the injected code has counted, read back while the program is still
+  /// there to read it from.
+  uint64_t CompiledInHits = 0;
+  uint64_t CompiledInConditionTrue = 0;
+
+  /// Times the location was reached, wherever the count was kept. A hit whose
+  /// condition was false never stops once the condition is compiled in, so the
+  /// program's own counter is the only place it was ever recorded.
+  uint64_t TotalHits() const {
+    return CompiledIn ? HitsBeforeCompile + CompiledInHits : Hits;
+  }
+
+  uint64_t TotalConditionTrue() const {
+    return CompiledIn ? ConditionTrueBeforeCompile + CompiledInConditionTrue
+                      : ConditionTrue;
+  }
+
   /// What the breakpoint callbacks do, as members so that the engine's
   /// collection interface stays private to it.
   bool OnHit(StoppointCallbackContext *Ctx);
@@ -1813,6 +1866,58 @@ bool GateLeft(void *Baton, StoppointCallbackContext *Ctx, lldb::user_id_t,
   return static_cast<ObservationSite *>(Baton)->OnGateLeft(Ctx);
 }
 
+/// \p Text as a single line, bounded to \p MaxChars.
+///
+/// A refusal is reported as one clause of a sentence, and the reasons for one
+/// include compiler diagnostics, which arrive as several lines. Kept whole
+/// rather than reduced to the line that names the fault, the way a capture's
+/// diagnostic is: the sentence the reason opens with is what says the recompile
+/// is the thing that failed, and without it a diagnostic reads as the condition
+/// itself having failed to evaluate.
+std::string OneLine(StringRef Text, size_t MaxChars) {
+  std::string Out;
+  bool Pending = false;
+  for (char C : Text) {
+    if (isspace(static_cast<unsigned char>(C))) {
+      Pending = !Out.empty();
+      continue;
+    }
+    if (Pending) {
+      Out += ' ';
+      Pending = false;
+    }
+    Out += C;
+  }
+  if (Out.size() > MaxChars) {
+    Out.resize(MaxChars);
+    Out += "...";
+  }
+  return Out;
+}
+
+/// Locations of \p Bp that stand at code the program was built with.
+///
+/// A patched function's copy is compiled from the program's own source and its
+/// line table points back at it, so a breakpoint on the original resolves into
+/// the copy as well. That location is never armed -- the trap the copy already
+/// holds is what reports these hits -- so counting it would report one
+/// tracepoint as two places the program can be caught at.
+uint32_t LocationsInTheProgram(Breakpoint &Bp) {
+  uint32_t Count = 0;
+  const size_t Locations = Bp.GetNumLocations();
+  for (size_t I = 0; I < Locations; ++I) {
+    lldb::BreakpointLocationSP Loc = Bp.GetLocationAtIndex(I);
+    if (!Loc)
+      continue;
+    lldb::ModuleSP Module = Loc->GetAddress().GetModule();
+    ObjectFile *Object = Module ? Module->GetObjectFile() : nullptr;
+    if (Object && Object->GetType() == ObjectFile::eTypeJIT)
+      continue;
+    ++Count;
+  }
+  return Count;
+}
+
 /// The frame the callback was invoked for, or null when the stop carried none.
 StackFrame *FrameOf(StoppointCallbackContext *Ctx) {
   if (!Ctx)
@@ -1911,17 +2016,28 @@ bool ObservationSite::OnHit(StoppointCallbackContext *Ctx) {
   // ignore count is consulted only in the asynchronous half of stop processing,
   // which a synchronous callback that declines the stop never reaches, so
   // setting it would leave the skip silently unapplied.
-  if (Hits <= Obs->SkipFirst)
+  //
+  // Not once the injected code keeps the count: it applies the skip ahead of
+  // the condition, so a hit that reaches here is one the program has already
+  // let through, and applying it again would swallow the same hits twice.
+  if (!CompiledIn && Hits <= Obs->SkipFirst)
     return false;
 
   // A gate opens on a state change rather than being re-tested at each hit,
   // which is what keeps it off the per-hit path entirely. It opens at the first
   // hit that is observed and not at the first that occurs, since a skipped hit
   // is one this observation was told not to see.
-  if (Hits == static_cast<uint64_t>(Obs->SkipFirst) + 1)
-    for (ObservationSite *Dependent : Enables)
-      if (Dependent->Breakpoint)
+  if (!Opened) {
+    Opened = true;
+    for (ObservationSite *Dependent : Enables) {
+      // Not for one whose work is compiled in: its location sits in a body the
+      // redirect has made unreachable, and arming it there would write a trap
+      // over the redirect itself. Its gate is what opens it.
+      if (Dependent->Breakpoint && !Dependent->CompiledIn)
         Dependent->Breakpoint->SetEnabled(true);
+      Engine->SetCompiledInGate(*Dependent, true);
+    }
+  }
 
   if (Obs->OnReturn) {
     // Resolved from the observed function's own frame. At the return address
@@ -1966,8 +2082,11 @@ bool ObservationSite::OnGateEntered(StoppointCallbackContext *Ctx) {
   // Enabling the tracepoint is an optimization on top of the per-hit test in
   // OnHit: it keeps the callback from running at all while no thread is inside
   // the gating function.
-  if (Breakpoint && !GateReturns.Armed.Empty())
-    Breakpoint->SetEnabled(true);
+  if (!GateReturns.Armed.Empty()) {
+    if (Breakpoint && !CompiledIn)
+      Breakpoint->SetEnabled(true);
+    Engine->SetCompiledInGate(*this, true);
+  }
   return false;
 }
 
@@ -1981,8 +2100,9 @@ bool ObservationSite::OnGateLeft(StoppointCallbackContext *Ctx) {
   // and another thread may be inside it either way.
   if (GateReturns.Armed.Empty()) {
     GateReturns.SetEnabled(false);
-    if (Breakpoint)
+    if (Breakpoint && !CompiledIn)
       Breakpoint->SetEnabled(false);
+    Engine->SetCompiledInGate(*this, false);
   }
   return false;
 }
@@ -2200,7 +2320,14 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
   StackFrame *Frame = FrameOf(Ctx);
   const Observation &Obs = *Site.Obs;
 
-  if (Obs.WhenExpr) {
+  // The condition compiled into the program has already held -- that is why the
+  // injected code trapped -- so it is not asked again. Paying for the answer
+  // twice would be the smaller problem: an evaluation here that disagreed with
+  // the one the program made would drop a hit the program has already counted
+  // as one, and the two evaluators are not the same compiler.
+  if (Obs.WhenExpr && Site.CompiledIn) {
+    ++Site.ConditionTrue;
+  } else if (Obs.WhenExpr) {
     // As for a capture: once a fixit has repaired the condition and the repair
     // has run, that is what gets evaluated for the rest of the run.
     StringRef Effective = Site.WhenFixedExpr.empty()
@@ -2596,7 +2723,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     Cost.Tier = Capture.Tier;
     Cost.Spent = Capture.Spent;
     Cost.ObservedHits = Capture.Evaluations;
-    Cost.TotalHits = Site.Hits;
+    Cost.TotalHits = Site.TotalHits();
     Cost.Remaining = Remaining();
     Cost.Errors = Capture.Errors;
     Cost.AtReturn = Obs.OnReturn;
@@ -2605,8 +2732,7 @@ bool ObservationEngine::RecordHit(ObservationSite &Site,
     // location that arrived with a library counts: it is another program
     // counter this name may be in scope at.
     if (Site.Breakpoint)
-      Cost.Locations =
-          static_cast<uint32_t>(Site.Breakpoint->GetNumLocations());
+      Cost.Locations = LocationsInTheProgram(*Site.Breakpoint);
     // The caller's own spelling, matching the key this capture is filed under.
     Cost.Expr = Capture.Expr;
     if (CaptureCostDecision Decision = AssessCaptureCost(Cost);
@@ -2786,7 +2912,296 @@ Error ObservationEngine::InstallObservations() {
     m_result.Observations.push_back(std::move(Report));
   }
 
+  if (m_plan.Fast)
+    ArrangeCompilingConditionsIn();
+  else
+    for (ObservationReport &Report : m_result.Observations)
+      Report.FallbackReason = "\"fast\" is off for this plan";
+
   return Error::success();
+}
+
+void ObservationEngine::ArrangeCompilingConditionsIn() {
+  // Nothing to arrange for a plan no observation of which carries a condition:
+  // a capture is read at a stop, which is where the thread and the frame it
+  // came from are known, and there is nothing else a tracepoint does that the
+  // program could do for itself.
+  if (none_of(m_plan.Observations,
+              [](const Observation &Obs) { return Obs.WhenExpr.has_value(); }))
+    return;
+
+  const char *const Entry = "main";
+  lldb::BreakpointSP Bp = m_target->CreateBreakpoint(
+      /*containingModules=*/nullptr, /*containingSourceFiles=*/nullptr, Entry,
+      lldb::eFunctionNameTypeFull, lldb::eLanguageTypeUnknown, /*offset=*/0,
+      /*offset_is_insn_count=*/false, eLazyBoolNo, /*internal=*/true,
+      /*request_hardware=*/false);
+  if (Bp && Bp->GetNumLocations() != 0) {
+    Bp->SetBreakpointKind("observe-compile-in");
+    // Asynchronous, like every other internal stop this feature takes: a
+    // callback that declines the stop there leaves the program resumed and
+    // nothing reported, and this breakpoint is not one the caller asked for.
+    Bp->SetCallback(CompileAtThisStop, std::make_shared<UntypedBaton>(this),
+                    /*is_synchronous=*/false);
+    m_compile_at = Bp->GetID();
+    return;
+  }
+
+  if (Bp)
+    m_target->RemoveBreakpointByID(Bp->GetID());
+
+  // Said per observation rather than as a note, because it is the answer to
+  // "which mode did this observation get" and that is where a caller reads it.
+  for (ObservationReport &Report : m_result.Observations)
+    Report.FallbackReason =
+        "the program has no \"main\" to stop at, and a copy cannot be compiled "
+        "before the dynamic loader has finished starting up";
+}
+
+bool ObservationEngine::CompileAtThisStop(void *Baton,
+                                          StoppointCallbackContext *,
+                                          lldb::user_id_t, lldb::user_id_t) {
+  static_cast<ObservationEngine *>(Baton)->CompileConditionsIntoProcess();
+  return false;
+}
+
+std::optional<std::string>
+ObservationEngine::WhyNotInProcess(const ObservationSite &Site) const {
+  const Observation &Obs = *Site.Obs;
+
+  if (Obs.OnReturn)
+    return "an observation taken as the function returns is watched where its "
+           "caller resumes, which is not in the function that would be "
+           "recompiled";
+
+  if (!Site.Enables.empty())
+    return "another observation is enabled after this one, which happens at "
+           "this one's first hit however its condition turned out -- and a hit "
+           "whose condition was false is one the program does not stop for";
+
+  if (m_plan.NoProgressSeconds)
+    return "\"no_progress_seconds\" is measured over hits, and a hit the "
+           "program does not stop for is one this run would not see in time to "
+           "count as progress";
+
+  if (!Site.Breakpoint)
+    return "the tracepoint resolved to nothing that could be recompiled";
+
+  const uint32_t Locations = LocationsInTheProgram(*Site.Breakpoint);
+  if (Locations == 0)
+    return "the tracepoint matched no code";
+  if (Locations != 1)
+    return formatv("the tracepoint matched {0} places, and a function is "
+                   "recompiled one at a time",
+                   Locations)
+        .str();
+
+  return std::nullopt;
+}
+
+void ObservationEngine::CompileConditionsIntoProcess() {
+  // Asked once. A refusal at this stop is a refusal for a reason the rest of
+  // the run cannot change, and a second attempt would recompile every function
+  // that succeeded.
+  if (m_compile_attempted || !m_target)
+    return;
+  m_compile_attempted = true;
+  if (lldb::BreakpointSP Bp = m_target->GetBreakpointByID(m_compile_at))
+    Bp->SetEnabled(false);
+
+  FunctionPatchManager &Patches = m_target->GetFunctionPatchManager();
+  std::vector<std::string> Recompiled;
+
+  for (std::unique_ptr<ObservationSite> &Owned : m_sites) {
+    ObservationSite &Site = *Owned;
+    ObservationReport &Report = m_result.Observations[Site.Index];
+    if (!Site.Obs->WhenExpr)
+      continue;
+    if (std::optional<std::string> Why = WhyNotInProcess(Site)) {
+      Report.FallbackReason = std::move(*Why);
+      continue;
+    }
+
+    lldb::BreakpointLocationSP Loc = Site.Breakpoint->GetLocationAtIndex(0);
+    SymbolContext SC;
+    if (Loc)
+      Loc->GetAddress().CalculateSymbolContext(
+          &SC, lldb::eSymbolContextFunction | lldb::eSymbolContextLineEntry);
+    if (!SC.function || SC.line_entry.line == 0) {
+      Report.FallbackReason =
+          "no debug info describes a function and a line at the tracepoint";
+      continue;
+    }
+
+    PatchRequest Request;
+    // The entry, whatever line the tracepoint is on: the whole function is
+    // recompiled and reached through a redirect written over its first
+    // instructions.
+    Request.FunctionEntry =
+        SC.function->GetAddress().GetLoadAddress(m_target.get());
+    Request.Line = SC.line_entry.line;
+    Request.Condition = *Site.Obs->WhenExpr;
+
+    // Only what the skip has left. The hits taken before this moment were
+    // counted at a stop and skipped there, and the injected code's counter
+    // starts from zero, so passing the whole of `skip_first` would swallow the
+    // same hits a second time.
+    Request.SkipFirst =
+        Site.Obs->SkipFirst > Site.Hits
+            ? Site.Obs->SkipFirst - static_cast<uint32_t>(Site.Hits)
+            : 0;
+
+    // `only_hit` is deliberately not passed. The injected code would compare it
+    // against every hit the location took, while the report numbers the hits
+    // this observation recorded -- and with a condition in play those are
+    // different numbers, so the two would select different hits. Applied at the
+    // stop instead, which costs a trap per hit whose condition held and picks
+    // the hit the aggregate names.
+    Request.Gated =
+        Site.Obs->CalledFrom.has_value() || Site.Obs->EnabledAfter.has_value();
+    Request.WantStop = true;
+    Request.OnTrap = TracepointHit;
+    Request.Baton = std::make_shared<UntypedBaton>(&Site);
+    Request.HitsCarriedBy = Site.Breakpoint->GetID();
+
+    // Marked before the install, because announcing the copy is part of
+    // installing it, and that is the moment this breakpoint acquires a location
+    // inside the copy which must not be armed.
+    Site.Breakpoint->SetHitsComeFromCompiledCode();
+
+    // And its own trap taken down before the redirect is written, for two
+    // reasons that both end in a corrupted program. A tracepoint on a function
+    // resolves to the end of its prologue, which for a small function is inside
+    // the first four instructions -- the ones the redirect is written over --
+    // so the patch is refused outright while a trap sits there. And a software
+    // breakpoint holds the byte it displaced and puts it back when it is
+    // removed, which after the redirect would restore an old instruction over
+    // part of it.
+    //
+    // Nothing is lost by taking it down: the body it sits in stops being
+    // reached, and the trap in the copy is what reports this breakpoint's hits
+    // from here on. It stays down for the rest of the run -- see the gate.
+    const bool WasEnabled = Site.Breakpoint->IsEnabled();
+    Site.Breakpoint->SetEnabled(false);
+
+    Expected<uint32_t> Installed = Patches.Install(Request);
+    if (!Installed) {
+      Site.Breakpoint->SetHitsComeFromCompiledCode(false);
+      Site.Breakpoint->SetEnabled(WasEnabled);
+      Report.FallbackReason =
+          OneLine(toString(Installed.takeError()), MaxFailureReasonChars);
+      continue;
+    }
+
+    Site.CompiledIn = *Installed;
+    Site.HitsBeforeCompile = Site.Hits;
+    Site.ConditionTrueBeforeCompile = Site.ConditionTrue;
+    Report.InProcess = true;
+
+    // A gated site starts closed, and the debugger may already have opened this
+    // observation. The gate byte mirrors the tracepoint's own enabled bit,
+    // which is the debugger's answer to whether this observation should be
+    // doing anything at all.
+    if (Request.Gated)
+      Patches.SetGate(*Installed, WasEnabled);
+
+    // The function, not the observation: two tracepoints in one function are
+    // one recompile, and it is the recompile the note is about.
+    std::string FunctionName = SC.function->GetName().GetString();
+    if (!llvm::is_contained(Recompiled, FunctionName))
+      Recompiled.push_back(std::move(FunctionName));
+  }
+
+  if (Recompiled.empty())
+    return;
+
+  // One note for the run, because the program under test is running unoptimized
+  // copies of these functions: slower than what it was built as, and where the
+  // original relied on what the optimizer did, not always the same code. That
+  // is a property of the run rather than of any one observation.
+  //
+  // Bounded and the rest counted, for the same reason every other list here is:
+  // a plan of twenty observations would otherwise put twenty names in one
+  // sentence.
+  constexpr size_t MaxNamed = 3;
+  std::string Names;
+  for (size_t I = 0; I < Recompiled.size() && I < MaxNamed; ++I) {
+    if (I != 0)
+      Names += ", ";
+    Names += formatv("\"{0}\"", Recompiled[I]).str();
+  }
+  if (Recompiled.size() > MaxNamed)
+    Names += formatv(" and {0} more", Recompiled.size() - MaxNamed).str();
+  m_result.Notes.push_back(
+      formatv(
+          "this run recompiled {0} without optimization and pointed the "
+          "program at the {1}, so that the conditions on {2} could run "
+          "without stopping it. The program's own timing is therefore not "
+          "what it was built to be, and code that relied on what the "
+          "optimizer did can behave differently; \"fast\": false leaves the "
+          "program as it was built, at a stop per hit.",
+          Names, Recompiled.size() == 1 ? "copy" : "copies",
+          Recompiled.size() == 1 ? "it" : "them")
+          .str());
+}
+
+void ObservationEngine::SetCompiledInGate(const ObservationSite &Site,
+                                          bool Open) {
+  if (Site.CompiledIn && m_target)
+    m_target->GetFunctionPatchManager().SetGate(*Site.CompiledIn, Open);
+}
+
+void ObservationEngine::TakeCompiledInCounters() {
+  if (!m_target ||
+      none_of(m_sites, [](const std::unique_ptr<ObservationSite> &Site) {
+        return Site->CompiledIn.has_value();
+      }))
+    return;
+
+  Expected<PatchDrainResult> Drained =
+      m_target->GetFunctionPatchManager().Drain();
+  if (!Drained) {
+    // Loud, because the alternative is an observation that reports the hits it
+    // was stopped for -- none, for a condition that never held -- as the hits
+    // the program took.
+    m_result.Notes.push_back(
+        formatv("the hit counts the compiled-in conditions kept could not be "
+                "read back out of the program: {0}. The observations reported "
+                "as \"in-process\" undercount their hits by however many the "
+                "program did not stop for.",
+                StringRef(toString(Drained.takeError())).rtrim())
+            .str());
+    return;
+  }
+
+  std::vector<std::string> Unread;
+  for (std::unique_ptr<ObservationSite> &Site : m_sites) {
+    if (!Site->CompiledIn)
+      continue;
+    auto Counted = Drained->Counters.find(*Site->CompiledIn);
+    if (Counted == Drained->Counters.end()) {
+      Unread.push_back(Site->Obs->Label);
+      continue;
+    }
+    Site->CompiledInHits = Counted->second.Hits;
+    Site->CompiledInConditionTrue = Counted->second.CondTrue;
+  }
+
+  if (!Unread.empty())
+    m_result.Notes.push_back(
+        formatv("the program never reported the hits it counted for {0}, so "
+                "those observations undercount: what is reported is the hits "
+                "they were stopped for.",
+                join(Unread, ", "))
+            .str());
+
+  if (Drained->Lost != 0)
+    m_result.Notes.push_back(
+        formatv("{0} records the compiled-in tracepoints wrote never reached "
+                "this report, because they were overwritten before they could "
+                "be read.",
+                Drained->Lost)
+            .str());
 }
 
 Error ObservationEngine::Launch() {
@@ -2930,6 +3345,11 @@ Outcome ObservationEngine::WaitForEnd() {
       }
       continue;
     }
+
+    // Read here as well as at the end of the run, so that a run long enough to
+    // be cut short by its ceiling reports the hits it took rather than the ones
+    // it happened to have stopped for.
+    TakeCompiledInCounters();
 
     // A callback that found the run's time was up is the only place a program
     // busy hitting tracepoints can be noticed to have overrun.
@@ -3383,7 +3803,7 @@ std::string HitLabels(ArrayRef<std::unique_ptr<ObservationSite>> Sites) {
   std::string Out;
   size_t Named = 0, Beyond = 0;
   for (const std::unique_ptr<ObservationSite> &Site : Sites) {
-    if (Site->Hits == 0)
+    if (Site->TotalHits() == 0)
       continue;
     if (Named == MaxNamed) {
       ++Beyond;
@@ -3445,6 +3865,12 @@ Expected<ObservationResult> ObservationEngine::Run() {
       ToMs(std::chrono::duration_cast<Micros>(m_running_since - m_start));
 
   const Outcome Result = WaitForEnd();
+
+  // Before anything else, because the counters the injected code keeps are only
+  // readable while the process holding them is there, and for a program that
+  // exited they are whatever the stop on its way out read.
+  TakeCompiledInCounters();
+
   FlushHeldEvents();
   DrainInferiorOutput();
   CollectTerminalEvent(Result);
@@ -3478,14 +3904,14 @@ Expected<ObservationResult> ObservationEngine::Run() {
   // Locations are read from the breakpoint for the same reason the report re-reads
   // them there -- a name in a library that loaded during the run resolves when it
   // loads, and the count taken before the launch would call that unresolved.
-  const uint64_t Hits =
-      std::accumulate(m_sites.begin(), m_sites.end(), uint64_t{0},
-                      [](uint64_t Sum, const std::unique_ptr<ObservationSite> &S) {
-                        return Sum + S->Hits;
-                      });
+  const uint64_t Hits = std::accumulate(
+      m_sites.begin(), m_sites.end(), uint64_t{0},
+      [](uint64_t Sum, const std::unique_ptr<ObservationSite> &S) {
+        return Sum + S->TotalHits();
+      });
   const bool AnyResolved =
       any_of(m_sites, [](const std::unique_ptr<ObservationSite> &S) {
-        return S->Breakpoint && S->Breakpoint->GetNumLocations() != 0;
+        return S->Breakpoint && LocationsInTheProgram(*S->Breakpoint) != 0;
       });
   if (Hits == 0 && AnyResolved)
     m_result.Notes.push_back(
@@ -3586,8 +4012,8 @@ Expected<ObservationResult> ObservationEngine::Run() {
   for (const std::unique_ptr<ObservationSite> &Site : m_sites) {
     Emitted += Site->Emitted;
     ObservationReport &Report = m_result.Observations[Site->Index];
-    Report.Hits = Site->Hits;
-    Report.ConditionTrue = Site->ConditionTrue;
+    Report.Hits = Site->TotalHits();
+    Report.ConditionTrue = Site->TotalConditionTrue();
     Report.ConditionErrors = Site->ConditionErrors;
     Report.ConditionMs = ToMs(Site->ConditionSpent);
     Report.Emitted = Site->Emitted;
@@ -3605,8 +4031,7 @@ Expected<ObservationResult> ObservationEngine::Run() {
     // and a report still saying it matched nothing -- next to a hit count that
     // says it did -- gives the one answer this field exists to rule out.
     if (Site->Breakpoint) {
-      Report.ResolvedLocations =
-          static_cast<uint32_t>(Site->Breakpoint->GetNumLocations());
+      Report.ResolvedLocations = LocationsInTheProgram(*Site->Breakpoint);
       if (Report.ResolvedLocations != 0)
         Report.ResolutionError.reset();
     }
@@ -3626,7 +4051,7 @@ Expected<ObservationResult> ObservationEngine::Run() {
       // here, where the run is over and the real total is known, so that the pair
       // is the share of the program the capture actually covered.
       if (Rendered.Disabled)
-        Rendered.Disabled->TotalHits = Site->Hits;
+        Rendered.Disabled->TotalHits = Site->TotalHits();
       Rendered.FromABI =
           Site->Obs->OnReturn && Capture.Expr == ReturnValueCapture;
       Report.Captures.push_back(std::move(Rendered));
@@ -3734,7 +4159,7 @@ Expected<ObservationResult> ObservationEngine::Run() {
               "a longjmp, or a thread that ended inside. Those calls "
               "produced no event; observe the function on entry to count "
               "all of them.",
-              Site->Obs->Label, Report.ReturnsAbandoned, Site->Hits)
+              Site->Obs->Label, Report.ReturnsAbandoned, Site->TotalHits())
               .str());
 
     // The interleaving is not a fault, but every number here is per observation

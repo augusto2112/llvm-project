@@ -746,6 +746,16 @@ struct ObservationReport {
   bool HasCondition = false;
   double ConditionMs = 0.0;
 
+  /// Whether this observation's condition was compiled into the program rather
+  /// than evaluated at a stop, and why it was not where it was not.
+  ///
+  /// Said per observation because the answer differs per observation: one
+  /// tracepoint's condition may be compiled in while another's function had no
+  /// source to recompile. A caller comparing hit counts between runs needs to
+  /// know which of them paid for a stop per hit.
+  bool InProcess = false;
+  std::string FallbackReason;
+
   /// Hits whose event was written to the event stream. Well below \ref Hits is
   /// the point of a reducing emission mode rather than a sign of loss, since
   /// the aggregate is computed over every hit.
@@ -1104,6 +1114,41 @@ private:
                  BreakpointHitCallback Callback, void *Baton);
 
   llvm::Error InstallObservations();
+
+  /// Sets the internal breakpoint at which the plan's conditions are compiled
+  /// into the program.
+  ///
+  /// Not here, before the launch: a copy cannot be compiled until the dynamic
+  /// loader has finished starting up, so the launch stop is too early. Nor at
+  /// whatever stop the run happens to take next, because a plan whose
+  /// conditions never hold takes none -- which is the case this exists for.
+  void ArrangeCompilingConditionsIn();
+
+  /// The internal breakpoint's callback, which compiles what it can and never
+  /// reports the stop.
+  static bool CompileAtThisStop(void *Baton, StoppointCallbackContext *Ctx,
+                                lldb::user_id_t, lldb::user_id_t);
+
+  /// Compiles each observation's condition into the program where it can be,
+  /// and records why it could not where it could not.
+  void CompileConditionsIntoProcess();
+
+  /// Why \p Site's condition cannot be compiled into the program, or nothing
+  /// when it can.
+  ///
+  /// Prose rather than a code, because every one of these costs speed and not
+  /// correctness: the condition is evaluated at a stop instead, and the only
+  /// thing to do with the reason is read it.
+  std::optional<std::string> WhyNotInProcess(const ObservationSite &Site) const;
+
+  /// Takes the hit counts the injected code keeps, so that a hit the program
+  /// was not stopped for is still a hit the report knows about.
+  void TakeCompiledInCounters();
+
+  /// Mirrors \p Site's tracepoint being switched on or off onto its compiled-in
+  /// site, which is what gates code the debugger cannot enable and disable.
+  void SetCompiledInGate(const ObservationSite &Site, bool Open);
+
   llvm::Error Launch();
   Outcome WaitForEnd();
 
@@ -1206,6 +1251,12 @@ private:
   lldb::TargetSP m_target;
 
   std::vector<std::unique_ptr<ObservationSite>> m_sites;
+
+  /// The internal breakpoint whose stop the conditions are compiled in at, and
+  /// whether that has happened. Asked once: a compile refused at that stop is
+  /// refused for a reason the run cannot change.
+  lldb::break_id_t m_compile_at = LLDB_INVALID_BREAK_ID;
+  bool m_compile_attempted = false;
 
   Aggregator m_aggregator;
   StackProfile m_profile;
