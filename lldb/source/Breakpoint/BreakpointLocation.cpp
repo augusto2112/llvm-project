@@ -17,12 +17,17 @@
 #include "lldb/Expression/ExpressionVariable.h"
 #include "lldb/Expression/UserExpression.h"
 #include "lldb/Symbol/CompileUnit.h"
+#include "lldb/Symbol/Function.h"
+#include "lldb/Symbol/ObjectFile.h"
 #include "lldb/Symbol/Symbol.h"
+#include "lldb/Symbol/SymbolContext.h"
 #include "lldb/Symbol/TypeSystem.h"
+#include "lldb/Target/FunctionPatch.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
 #include "lldb/Target/ThreadSpec.h"
+#include "lldb/Utility/Baton.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
 #include "lldb/Utility/StreamString.h"
@@ -30,6 +35,32 @@
 
 using namespace lldb;
 using namespace lldb_private;
+
+namespace {
+/// What the site of a compiled-in condition's trap needs in order to find the
+/// location whose condition it is.
+///
+/// Weakly, and by id rather than by pointer, because a patch outlives the
+/// breakpoint that asked for it: the trap stays in the program's code after the
+/// user deletes the breakpoint.
+struct InProcessConditionOwner {
+  lldb::BreakpointWP breakpoint_wp;
+  lldb::break_id_t loc_id = LLDB_INVALID_BREAK_ID;
+};
+
+/// Whether \p addr is in code the debugger compiled rather than in the program.
+///
+/// A patched copy is compiled from the program's own source and its line table
+/// points back at that source, so it answers a file-and-line lookup exactly as
+/// the program does. Where the code came from is what tells them apart.
+bool IsInDebuggerCompiledCode(const Address &addr) {
+  ModuleSP module_sp = addr.GetModule();
+  if (!module_sp)
+    return false;
+  ObjectFile *object_file = module_sp->GetObjectFile();
+  return object_file && object_file->GetType() == ObjectFile::eTypeJIT;
+}
+} // namespace
 
 BreakpointLocation::BreakpointLocation(break_id_t loc_id, Breakpoint &owner,
                                        const Address &addr, lldb::tid_t tid,
@@ -211,10 +242,106 @@ void BreakpointLocation::ClearCallback() {
 void BreakpointLocation::SetCondition(StopCondition condition) {
   GetLocationOptions().SetCondition(std::move(condition));
   SendBreakpointLocationChangedEvent(eBreakpointEventTypeConditionChanged);
+  CompileConditionIntoProcess();
 }
 
 const StopCondition &BreakpointLocation::GetCondition() const {
   return GetOptionsSpecifyingKind(BreakpointOptions::eCondition).GetCondition();
+}
+
+void BreakpointLocation::CompileConditionIntoProcess() {
+  // Once is enough: a second compile would rewrite the program's code for a
+  // condition already in it.
+  if (m_in_process_site_id)
+    return;
+
+  const StopCondition &condition = GetCondition();
+  if (!condition)
+    return;
+
+  ExecutionContext exe_ctx(GetTarget().shared_from_this(), false);
+  if (!GetTarget().GetFastConditions(&exe_ctx))
+    return;
+
+  // Logged rather than reported. Every way this can fail leaves the condition
+  // to be evaluated at a stop, so a refusal costs speed rather than correctness
+  // -- but the reason has to be findable, since the speed is the whole point.
+  if (llvm::Error error = InstallInProcessCondition(condition.GetText()))
+    LLDB_LOG_ERROR(GetLog(LLDBLog::Breakpoints), std::move(error),
+                   "condition not compiled into the process: {0}");
+}
+
+llvm::Error
+BreakpointLocation::InstallInProcessCondition(llvm::StringRef condition_text) {
+  if (IsFacade())
+    return llvm::createStringError(
+        "a facade location stands for no code that could be recompiled");
+
+  SymbolContext sc;
+  GetAddress().CalculateSymbolContext(&sc, eSymbolContextFunction |
+                                               eSymbolContextLineEntry);
+  if (!sc.function || sc.line_entry.line == 0)
+    return llvm::createStringError(
+        "no debug info describes a function and line at the location");
+
+  // Recompiling from a copy would patch a patch, and the copy is not the source
+  // of truth for what the program does.
+  if (IsInDebuggerCompiledCode(GetAddress()))
+    return llvm::createStringError(
+        "the location is in code the debugger compiled, not in the program");
+
+  PatchRequest request;
+  request.FunctionEntry =
+      sc.function->GetAddress().GetLoadAddress(&GetTarget());
+  request.Line = sc.line_entry.line;
+  request.Condition = condition_text.str();
+  request.WantStop = true;
+  request.OnTrap = ForwardInProcessTrap;
+
+  auto owner = std::make_unique<InProcessConditionOwner>();
+  owner->breakpoint_wp = GetBreakpoint().shared_from_this();
+  owner->loc_id = GetID();
+  request.Baton =
+      std::make_shared<TypedBaton<InProcessConditionOwner>>(std::move(owner));
+
+  // Marked before the patch is installed, not after: announcing the copy is
+  // part of installing it, and that is the moment this breakpoint acquires a
+  // location inside the copy that must not be armed.
+  const bool was_compiled_in = m_owner.m_condition_compiled_into_process;
+  m_owner.m_condition_compiled_into_process = true;
+
+  llvm::Expected<uint32_t> site_id =
+      GetTarget().GetFunctionPatchManager().Install(request);
+  if (!site_id) {
+    m_owner.m_condition_compiled_into_process = was_compiled_in;
+    return site_id.takeError();
+  }
+
+  // The original body is unreachable once the entry is redirected, so this
+  // location's own trap can never fire again. It is left in place all the same:
+  // a disabled location reports no hits, and the hits the compiled-in condition
+  // trapped for are forwarded to it.
+  m_in_process_site_id = *site_id;
+  return llvm::Error::success();
+}
+
+bool BreakpointLocation::ForwardInProcessTrap(void *baton,
+                                              StoppointCallbackContext *context,
+                                              lldb::user_id_t break_id,
+                                              lldb::user_id_t break_loc_id) {
+  auto *owner = static_cast<InProcessConditionOwner *>(baton);
+  BreakpointSP bp_sp = owner->breakpoint_wp.lock();
+  if (!bp_sp)
+    return false;
+  BreakpointLocationSP loc_sp = bp_sp->FindLocationByID(owner->loc_id);
+  if (!loc_sp)
+    return false;
+
+  // The condition has already held -- that is why the trap executed -- so the
+  // hit is unconditional here, where an ordinary hit still has its condition
+  // ahead of it.
+  loc_sp->BumpHitCount();
+  return loc_sp->InvokeCallback(context);
 }
 
 bool BreakpointLocation::ConditionSaysStop(ExecutionContext &exe_ctx,
@@ -494,6 +621,17 @@ llvm::Error BreakpointLocation::ResolveBreakpointSite() {
   // In that case, don't attempt to make a site.
   if (m_bp_site_sp || IsFacade())
     return llvm::Error::success();
+
+  // A patched copy's line table points back at the original source, so a
+  // breakpoint whose condition was compiled into the process resolves into the
+  // copy as well. Arming that location would stop on every pass and evaluate
+  // the condition at the stop, which is the cost compiling it in removed. The
+  // trap the copy already contains is what reports this breakpoint's hits.
+  if (m_owner.HasConditionCompiledIntoProcess() &&
+      IsInDebuggerCompiledCode(m_address))
+    return llvm::createStringError(
+        "not arming a location in the copy that carries this breakpoint's "
+        "compiled-in condition");
 
   Process *process = m_owner.GetTarget().GetProcessSP().get();
   if (process == nullptr)

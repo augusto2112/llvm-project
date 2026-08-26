@@ -78,7 +78,7 @@ std::string Preamble(const PatchSourceRequest &Request) {
       "static void {0}(unsigned k, unsigned c, unsigned long long v) {{ "
       "unsigned long s = __atomic_fetch_add(&{1}->seq, 1, "
       "__ATOMIC_RELAXED); volatile struct {2} *r = "
-      "&{1}->ring[s & {3}]; r->site = k; r->cap = c; r->val = v; }}\n",
+      "&{1}->ring[s & {3}]; r->site = k; r->cap = c; r->val = v; }\n",
       RecFn, HdrMacro, RecT,
       Request.RingCapacity ? Request.RingCapacity - 1 : 0);
   return Text;

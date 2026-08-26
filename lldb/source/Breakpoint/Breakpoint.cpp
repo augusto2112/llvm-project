@@ -476,6 +476,22 @@ const char *Breakpoint::GetQueueName() const {
 void Breakpoint::SetCondition(StopCondition condition) {
   m_options.SetCondition(std::move(condition));
   SendBreakpointChangedEvent(eBreakpointEventTypeConditionChanged);
+  CompileConditionsIntoProcess();
+}
+
+void Breakpoint::CompileConditionsIntoProcess() {
+  // A location is what knows the function to recompile, so the work is theirs.
+  // Compiling a condition in appends a module, which can give this breakpoint
+  // locations it did not have; they are collected first so that the walk is
+  // over the locations that asked rather than over the ones a patch produced.
+  std::vector<lldb::BreakpointLocationSP> locations;
+  const size_t num_locations = m_locations.GetSize();
+  locations.reserve(num_locations);
+  for (size_t i = 0; i < num_locations; ++i)
+    locations.push_back(m_locations.GetByIndex(i));
+
+  for (const lldb::BreakpointLocationSP &loc_sp : locations)
+    loc_sp->CompileConditionIntoProcess();
 }
 
 const StopCondition &Breakpoint::GetCondition() const {

@@ -160,6 +160,15 @@ public:
   ///    The condition to evaluate when the breakpoint is hit.
   void SetCondition(StopCondition condition);
 
+  /// Compile this location's condition into the process, so that a hit whose
+  /// condition does not hold costs no stop.
+  ///
+  /// Does nothing, and reports nothing, unless the target asked for it. Every
+  /// way it can fail leaves the condition to be evaluated at a stop, so calling
+  /// this never changes whether a condition works -- only what it costs.
+  /// Repeated calls are cheap: a condition is only ever compiled in once.
+  void CompileConditionIntoProcess();
+
   /// Return the breakpoint condition.
   const StopCondition &GetCondition() const;
 
@@ -356,6 +365,20 @@ private:
 
   void UndoBumpHitCount();
 
+  /// Recompiles the enclosing function with \p condition_text compiled in, and
+  /// registers a site for the trap the copy now contains.
+  llvm::Error InstallInProcessCondition(llvm::StringRef condition_text);
+
+  /// Credits this location with a hit the compiled-in condition trapped for.
+  ///
+  /// The trap fires in code the debugger compiled, so the stop is attributed to
+  /// an internal breakpoint of its own rather than to this location; this is
+  /// how the hit reaches the location the user set.
+  static bool ForwardInProcessTrap(void *baton,
+                                   StoppointCallbackContext *context,
+                                   lldb::user_id_t break_id,
+                                   lldb::user_id_t break_loc_id);
+
   /// Updates the thread ID internally.
   ///
   /// This method was created to handle actually mutating the thread ID
@@ -425,6 +448,10 @@ private:
   std::mutex m_condition_mutex;
   ///< For testing whether the condition source code changed.
   size_t m_condition_hash = 0;
+  ///< The site attributing the trap of this location's compiled-in condition,
+  /// if the condition was compiled into the process. Also what keeps it from
+  /// being compiled in twice.
+  std::optional<uint32_t> m_in_process_site_id;
   ///< Breakpoint location ID.
   lldb::break_id_t m_loc_id;
   ///< Number of times this breakpoint location has been hit.

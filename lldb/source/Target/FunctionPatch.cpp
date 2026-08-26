@@ -83,7 +83,7 @@ namespace lldb_private {
 /// describes the code to emit, and a callback is not part of that description.
 struct PatchSiteCallback {
   BreakpointHitCallback OnTrap = nullptr;
-  void *Baton = nullptr;
+  lldb::BatonSP Baton;
 };
 
 struct FunctionPatchManager::PatchedFunction {
@@ -220,6 +220,21 @@ std::string ReadWholeFile(SourceManager::File &File) {
   return Text;
 }
 
+/// How many bytes of \p Fn's code the piece containing \p Addr occupies, or
+/// zero if no piece of it does.
+///
+/// A function whose code is in several pieces is described by one range per
+/// piece, and a redirect written at the entry can only rely on the piece the
+/// entry is in. Asked of the function's block by address rather than by load
+/// address, because the load-address form of the same question answers whether
+/// a range was found without handing back the range it found.
+lldb::addr_t CodeSizeContaining(Function &Fn, const Address &Addr) {
+  AddressRange Range;
+  if (!Fn.GetBlock(/*can_create=*/false).GetRangeContainingAddress(Addr, Range))
+    return 0;
+  return Range.GetByteSize();
+}
+
 /// Everything about a function that a patch is built from, read before anything
 /// is written to the inferior.
 struct FunctionFacts {
@@ -296,9 +311,7 @@ llvm::Expected<FunctionFacts> ReadFunctionFacts(Target &Tgt,
   // The range the entry falls in rather than the function's whole extent, since
   // a function whose code is in several pieces is redirected at the piece its
   // entry is in.
-  AddressRange Range;
-  if (SC.function->GetRangeContainingLoadAddress(Entry, Tgt, Range))
-    Facts.EntrySize = Range.GetByteSize();
+  Facts.EntrySize = CodeSizeContaining(*SC.function, Resolved);
   return Facts;
 }
 
@@ -443,13 +456,10 @@ llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
                       "\" has no debug info describing it");
 
   Copy.Address = CopyFunction->GetAddress().GetLoadAddress(&Tgt);
-  AddressRange Range;
-  if (Copy.Address == LLDB_INVALID_ADDRESS ||
-      !CopyFunction->GetRangeContainingLoadAddress(Copy.Address, Tgt, Range) ||
-      Range.GetByteSize() == 0)
+  Copy.Size = CodeSizeContaining(*CopyFunction, CopyFunction->GetAddress());
+  if (Copy.Address == LLDB_INVALID_ADDRESS || Copy.Size == 0)
     return Refuse(PatchFailure::CompileFailed,
                   "the compiled copy's code has no address in the process");
-  Copy.Size = Range.GetByteSize();
   return Copy;
 }
 
@@ -859,17 +869,20 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   return llvm::Error::success();
 }
 
-llvm::Expected<lldb::break_id_t> FunctionPatchManager::RegisterTrapSite(
-    lldb::addr_t Trap, BreakpointHitCallback OnTrap, void *Baton) {
+llvm::Expected<lldb::break_id_t>
+FunctionPatchManager::RegisterTrapSite(lldb::addr_t Trap,
+                                       BreakpointHitCallback OnTrap,
+                                       const lldb::BatonSP &Baton) {
   Process *Proc = m_target.GetProcessSP().get();
   if (!Proc)
     return Refuse(PatchFailure::NoProcess);
 
-  // The site sits past the trap rather than on it, because that is where the
-  // stop arrives: `brk #0xf000` leaves pc after the trap, where `brk #0` leaves
-  // it on the trap.
+  // On the trap rather than past it. A `brk` raises a mach exception naming the
+  // trap's own address, and that address is what the stop is attributed by; pc
+  // has already moved past the trap by the time the stop arrives, so a site
+  // where pc points would never be the one looked for.
   Address SiteAddress;
-  if (!m_target.ResolveLoadAddress(Trap + kInstructionSize, SiteAddress))
+  if (!m_target.ResolveLoadAddress(Trap, SiteAddress))
     return Refuse(PatchFailure::CompileFailed,
                   "the compiled copy's trap is in no loaded section");
 

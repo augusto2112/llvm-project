@@ -283,6 +283,8 @@ public:
 
   void SetUseDIL(ExecutionContext *exe_ctx, bool b);
 
+  bool GetFastConditions(ExecutionContext *exe_ctx) const;
+
   void SetRequireHardwareBreakpoints(bool b);
 
   bool GetRequireHardwareBreakpoints() const;
@@ -1990,6 +1992,11 @@ public:
   /// The functions this target has had patched so that tracepoint work happens
   /// inside the process.
   FunctionPatchManager &GetFunctionPatchManager();
+
+  /// Compile into the process the condition of every breakpoint that asked for
+  /// that, which is normally every one of them: a condition is set before there
+  /// is a process to compile it into, so the ask outlives the refusal.
+  void CompileBreakpointConditionsIntoProcess();
 
   // Methods.
   lldb::SearchFilterSP

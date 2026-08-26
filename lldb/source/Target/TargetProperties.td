@@ -7,6 +7,9 @@ let Definition = "target_experimental", Path = "target.experimental" in {
   def UseDIL : Property<"use-DIL", "Boolean">,
     Global, DefaultTrue,
     Desc<"If true, use the DIL implementation for frame variable evaluation.">;
+  def FastConditions : Property<"fast-conditions", "Boolean">,
+    Global, DefaultFalse,
+    Desc<"If true, compile a breakpoint's condition into the process by recompiling the enclosing function, so a condition that does not hold costs no stop. The patched function is compiled without optimization, so its timing and in some cases its behaviour differ from the original.">;
 }
 
 let Definition = "target", Path = "target" in {

@@ -373,3 +373,37 @@ TEST(PatchSourceBuilderTest, TwoTagsDeclareDifferentNames) {
     EXPECT_EQ(std::string::npos, SourceTwo.find(Decl)) << Decl;
   }
 }
+
+// The generated source is compiled, not read, so nothing else notices a stray
+// brace until the compile fails with the whole patch already built.
+TEST(PatchSourceBuilderTest, BracesBalanceInEveryShapeOfInjection) {
+  auto Everything = Bare(5);
+  Everything.Condition = "acc > 1";
+  Everything.Captures = {"acc", "x"};
+  Everything.Gated = true;
+  Everything.SkipFirst = 2;
+
+  auto Recording = Bare(5);
+  Recording.Captures = {"acc"};
+  Recording.WantStop = false;
+
+  auto OnlyAHit = Bare(6);
+  OnlyAHit.OnlyHit = 3;
+
+  const std::vector<std::vector<PatchInjection>> Shapes = {
+      {},         {Bare(5)},    {Recording},
+      {OnlyAHit}, {Everything}, {Everything, OnlyAHit}};
+
+  for (const std::vector<PatchInjection> &Injections : Shapes) {
+    const std::string Source = BuildPatchSource(Request(Injections));
+    int Depth = 0;
+    for (char C : Source) {
+      if (C == '{')
+        ++Depth;
+      else if (C == '}')
+        --Depth;
+      ASSERT_GE(Depth, 0) << Source;
+    }
+    EXPECT_EQ(0, Depth) << Source;
+  }
+}

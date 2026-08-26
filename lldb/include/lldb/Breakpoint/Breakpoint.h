@@ -431,6 +431,20 @@ public:
   ///    Pass in an empty condition to clear the condition.
   void SetCondition(StopCondition condition);
 
+  /// Compile the condition of each of this breakpoint's locations into the
+  /// process, so that a hit whose condition does not hold costs no stop.
+  ///
+  /// Does nothing, and reports nothing, unless the target asked for it. See
+  /// BreakpointLocation::CompileConditionIntoProcess.
+  void CompileConditionsIntoProcess();
+
+  /// Whether any of this breakpoint's locations has had its condition compiled
+  /// into the process, so that its hits arrive from code the debugger compiled
+  /// rather than from the program's own.
+  bool HasConditionCompiledIntoProcess() const {
+    return m_condition_compiled_into_process;
+  }
+
   /// Return the breakpoint condition.
   const StopCondition &GetCondition() const;
 
@@ -709,6 +723,10 @@ private:
 
   std::string m_kind_description;
   bool m_resolve_indirect_symbols;
+
+  /// Set once a location has compiled this breakpoint's condition into the
+  /// process, and never cleared: compiled-in code stays in the program.
+  bool m_condition_compiled_into_process = false;
 
   /// Number of times this breakpoint has been hit. This is kept separately
   /// from the locations hit counts, since locations can go away when their

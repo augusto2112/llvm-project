@@ -284,6 +284,10 @@ void Target::CleanupProcess() {
   m_internal_breakpoint_list.ClearAllBreakpointSites();
   ResetBreakpointHitCounts();
   llvm::consumeError(m_process_sp->FlushDelayedBreakpoints());
+  // A patch is code in a process and a redirect into it. Neither outlives the
+  // process, so what described them is dropped with it rather than kept for a
+  // process that will not be running any of it.
+  m_function_patch_manager_up.reset();
   // Disable watchpoints just on the debugger side.
   std::unique_lock<std::recursive_mutex> lock;
   this->GetWatchpointList().GetListMutex(lock);
@@ -3167,6 +3171,17 @@ FunctionPatchManager &Target::GetFunctionPatchManager() {
   return *m_function_patch_manager_up;
 }
 
+void Target::CompileBreakpointConditionsIntoProcess() {
+  // Copied out first: compiling a condition in appends a module, which resolves
+  // breakpoints, which can add to the list being walked.
+  std::vector<BreakpointSP> breakpoints;
+  for (const BreakpointSP &bp_sp : m_breakpoint_list.Breakpoints())
+    breakpoints.push_back(bp_sp);
+
+  for (const BreakpointSP &bp_sp : breakpoints)
+    bp_sp->CompileConditionsIntoProcess();
+}
+
 Target::StopHookSP Target::CreateStopHook(StopHook::StopHookKind kind,
                                           bool internal) {
   user_id_t new_uid = (internal ? LLDB_INVALID_UID : ++m_stop_hook_next_id);
@@ -3719,6 +3734,12 @@ Status Target::Launch(ProcessLaunchInfo &launch_info, Stream *stream) {
                                              launch_info.GetHijackListener());
   m_process_sp->RestoreProcessEvents();
 
+  // Here rather than where the conditions were set: this is the first moment
+  // there is a process to compile one into, and the last before the program
+  // runs.
+  if (state == eStateStopped)
+    CompileBreakpointConditionsIntoProcess();
+
   if (rebroadcast_first_stop) {
     // We don't need to run the stop hooks by hand here, they will get
     // triggered when this rebroadcast event gets fetched.
@@ -3893,6 +3914,8 @@ Status Target::Attach(ProcessAttachInfo &attach_info, Stream *stream) {
           error = Status::FromErrorString(
               "process did not stop (no such process or permission problem?)");
         process_sp->Destroy(false);
+      } else {
+        CompileBreakpointConditionsIntoProcess();
       }
     }
   }
@@ -5228,6 +5251,11 @@ void TargetProperties::SetUseDIL(ExecutionContext *exe_ctx, bool b) {
       exp_property->GetValue()->GetAsProperties();
   if (exp_values)
     exp_values->SetPropertyAtIndex(ePropertyUseDIL, true, exe_ctx);
+}
+
+bool TargetProperties::GetFastConditions(ExecutionContext *exe_ctx) const {
+  return GetExperimentalPropertyValue(ePropertyFastConditions, exe_ctx)
+      .value_or(false);
 }
 
 ArchSpec TargetProperties::GetDefaultArchitecture() const {

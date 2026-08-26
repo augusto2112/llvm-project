@@ -77,7 +77,11 @@ struct PatchRequest {
   /// Runs when the site's trap fires, under the ordinary breakpoint callback
   /// contract.
   BreakpointHitCallback OnTrap = nullptr;
-  void *Baton = nullptr;
+
+  /// What \ref OnTrap is handed. A baton rather than a bare pointer because the
+  /// callback outlives the call that installed it by as long as the patch runs,
+  /// so whatever it needs has to be owned by something with that lifetime.
+  lldb::BatonSP Baton;
 };
 
 /// Patches functions so that a tracepoint's own work happens inside the
@@ -126,7 +130,7 @@ private:
   /// OnTrap. Returns that breakpoint's id.
   llvm::Expected<lldb::break_id_t>
   RegisterTrapSite(lldb::addr_t Trap, BreakpointHitCallback OnTrap,
-                   void *Baton);
+                   const lldb::BatonSP &Baton);
 
   Target &m_target;
   lldb::addr_t m_ring_address = LLDB_INVALID_ADDRESS;

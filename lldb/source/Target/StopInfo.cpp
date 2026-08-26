@@ -19,6 +19,7 @@
 #include "lldb/Expression/UserExpression.h"
 #include "lldb/Symbol/Block.h"
 #include "lldb/Target/Process.h"
+#include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/StopInfo.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
@@ -362,6 +363,7 @@ protected:
     if (!m_should_perform_action)
       return;
     m_should_perform_action = false;
+    SkipOverProgramTrapIfNeeded();
     bool all_stopping_locs_internal = true;
 
     ThreadSP thread_sp(m_thread_wp.lock());
@@ -716,6 +718,24 @@ protected:
   }
 
 private:
+  /// Moves pc past a trap that the program's own code contains.
+  ///
+  /// A breakpoint the debugger wrote is stepped over by taking its opcode down
+  /// and putting it back, which leaves pc free to sit on the trap until then. A
+  /// trap compiled into the program has no opcode to take down, so pc has to
+  /// move here or the trap runs again on the next resume, forever.
+  void SkipOverProgramTrapIfNeeded() {
+    BreakpointSiteSP bp_site_sp = GetBreakpointSiteSP();
+    if (!bp_site_sp || bp_site_sp->GetType() != BreakpointSite::eProgramTrap)
+      return;
+    ThreadSP thread_sp(m_thread_wp.lock());
+    if (!thread_sp)
+      return;
+    RegisterContextSP reg_ctx_sp(thread_sp->GetRegisterContext());
+    if (reg_ctx_sp && reg_ctx_sp->GetPC() == bp_site_sp->GetLoadAddress())
+      SkipOverTrapInstruction();
+  }
+
   BreakpointSiteSP GetBreakpointSiteSP() const {
     if (m_value == LLDB_INVALID_BREAK_ID)
       return {};
