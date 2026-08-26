@@ -30,6 +30,7 @@
 #include "lldb/Utility/Baton.h"
 #include "lldb/Utility/LLDBLog.h"
 #include "lldb/Utility/Log.h"
+#include "lldb/Utility/Policy.h"
 #include "lldb/Utility/StreamString.h"
 #include "lldb/ValueObject/ValueObject.h"
 
@@ -497,6 +498,18 @@ bool BreakpointLocation::ReportForwardedHit(StoppointCallbackContext *context) {
     return false;
 
   BumpHitCount();
+
+  // A hit that arrives while an expression is running is still this location's
+  // hit, but the actions that follow one must not run there: a callback or a
+  // condition that called the same function again would recurse. The ordinary
+  // path answers this by asking the process whether breakpoints are ignored
+  // inside expressions, and so does this one -- otherwise a call to a patched
+  // function is interrupted where the same call, with the condition evaluated at
+  // a stop, returns a value.
+  if (!PolicyStack::Get().Current().capabilities.can_run_breakpoint_actions) {
+    Process *process = GetTarget().GetProcessSP().get();
+    return process && !process->GetIgnoreBreakpointsInExpressions();
+  }
 
   if (!IgnoreCountShouldStop())
     return false;

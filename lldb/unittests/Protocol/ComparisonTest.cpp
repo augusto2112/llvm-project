@@ -564,10 +564,15 @@ TEST(ComparisonTest, ARunThatCouldNotBeMadeIsARowRatherThanAnError) {
 
 TEST(ComparisonTest, ARunWithNoResultIsNotInTheDenominatorOfAgreement) {
   // Agreement is decided against the runs that answered. Counting the run that
-  // could not be launched leaves every row one short of the total, so every row
-  // reports as a one-sided divergence and the whole of the surviving run's
-  // report comes back under `diverged` with `agreed` gone -- which is the
-  // opposite of the other runs still answering.
+  // could not be launched would leave every row one short of the total, so every
+  // row would report as a one-sided divergence and the whole of the surviving
+  // run's report would come back under `diverged` -- which is the opposite of
+  // the other runs still answering. That is what this rules out.
+  //
+  // Nothing comes back under `agreed` either, and for a different reason: with
+  // one run answering there is nothing for its rows to have agreed with. The two
+  // absences are not the same claim, and only the first one is about the
+  // denominator.
   std::vector<ComparedRun> Runs;
   Runs.push_back({"ok", MakeRun(Outcome::Exited, 2, {Tuple({"1"}), Tuple({"2"})}),
                   ""});
@@ -575,11 +580,21 @@ TEST(ComparisonTest, ARunWithNoResultIsNotInTheDenominatorOfAgreement) {
 
   const llvm::json::Value Out = CompareRuns(Runs);
   EXPECT_EQ(Out.getAsObject()->get("diverged"), nullptr) << Render(Out);
-  const llvm::json::Array *Agreed = Out.getAsObject()->getArray("agreed");
-  ASSERT_NE(Agreed, nullptr) << Render(Out);
-  EXPECT_EQ(Render(*Agreed),
-            R"(["outcome","ended","loop.resolved_locations","loop.hits",)"
-            R"("loop.emitted"])");
+  EXPECT_EQ(Out.getAsObject()->get("agreed"), nullptr) << Render(Out);
+
+  // And the run that did answer still answers: its row carries its outcome and
+  // its hits, which is the whole point of comparing against a run that failed.
+  const llvm::json::Array *Rows = Out.getAsObject()->getArray("runs");
+  ASSERT_NE(Rows, nullptr) << Render(Out);
+  ASSERT_EQ(Rows->size(), 2u) << Render(Out);
+  const llvm::json::Object *Answered = (*Rows)[0].getAsObject();
+  ASSERT_NE(Answered, nullptr) << Render(Out);
+  EXPECT_EQ(Answered->getString("label"), "ok");
+  EXPECT_EQ(Answered->getString("outcome"), "exited");
+  const llvm::json::Object *Missing = (*Rows)[1].getAsObject();
+  ASSERT_NE(Missing, nullptr) << Render(Out);
+  EXPECT_EQ(Missing->getString("label"), "missing");
+  EXPECT_NE(Missing->get("error"), nullptr) << Render(Out);
 }
 
 TEST(ComparisonTest, AnObservationOnlyOneRunResolvedIsADifference) {

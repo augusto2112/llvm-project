@@ -550,6 +550,46 @@ class FastConditionsTestCase(TestBase):
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_stepping_and_calling_work_at_a_compiled_in_stop(self):
+        """The ordinary things one does at a stop still work inside a copy.
+
+        A stop reported by a trap in the copy leaves the thread in code the
+        debugger compiled, which is where a step plan sets its own breakpoints and
+        where an expression that calls the patched function goes. Both were
+        reasoned about and neither was measured; a plan whose breakpoints never
+        fire, or a call that re-executes a trap it cannot step over, would hang
+        rather than fail.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        bp.SetCondition("seed == 2 && i == 1")
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        thread = process.GetSelectedThread()
+
+        # Calling the patched function from an expression enters the copy through
+        # the redirect, and its condition holds for these arguments -- so the call
+        # runs onto a trap that expression evaluation is meant to ignore.
+        value = thread.GetFrameAtIndex(0).EvaluateExpression("accumulate(2, 3)")
+        self.assertTrue(value.GetError().Success(), str(value.GetError()))
+        self.assertEqual(value.GetValueAsSigned(), 2 + 0 + 1 + 2)
+        # Counted, as the same call is with the condition evaluated at a stop:
+        # the hit happened, it is just not one the expression stops for.
+        self.assertEqual(bp.GetHitCount(), 2)
+
+        # And stepping out to the caller, which is the plan that sets breakpoints
+        # of its own in whichever body the frame is in.
+        self.runCmd("thread step-out")
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(
+            process.GetSelectedThread().GetFrameAtIndex(0).GetFunctionName(), "main"
+        )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_falls_back_without_the_setting(self):
         """With the setting off, nothing is patched and the condition still works.
 
