@@ -538,6 +538,21 @@ bool BreakpointLocation::ReportForwardedHit(StoppointCallbackContext *context) {
   if (GetBreakpoint().IsOneShot())
     GetTarget().RemoveBreakpointByID(GetBreakpoint().GetID());
 
+  // And named as an ordinary hit is named, for the same reason. The stop belongs
+  // to the internal breakpoint that carries the trap, and an internal
+  // breakpoint's stop reason is its kind -- so a program stopped here reported
+  // stopping for "in-process-condition", which is a fact about the debugger's
+  // machinery rather than the breakpoint the user set and can act on.
+  if (should_stop && thread_sp) {
+    if (lldb::StopInfoSP stop_info_sp = thread_sp->GetStopInfo()) {
+      StreamString strm;
+      strm.PutCString("breakpoint ");
+      BreakpointID::GetCanonicalReference(&strm, GetBreakpoint().GetID(),
+                                         GetID());
+      stop_info_sp->SetDescription(strm.GetData());
+    }
+  }
+
   return should_stop;
 }
 

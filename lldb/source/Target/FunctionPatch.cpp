@@ -977,6 +977,14 @@ void FunctionPatchManager::ForgetProcess() {
   m_dropped_captures.clear();
   m_site_slots.clear();
   m_counters.clear();
+
+  // Why the last run had nowhere to read its tail goes with the run. Kept, it
+  // would stop the next one from ever looking: the refusal is what makes
+  // EnsureExitDrainBreakpoint decline to ask again, and a process that loads a
+  // different set of libraries can perfectly well have an "exit" the last one
+  // did not. The breakpoint itself is not dropped -- breakpoints outlive
+  // processes, and that one is re-resolved for the next like any other.
+  m_tail_drain_refusal.clear();
 }
 
 llvm::ArrayRef<std::string>

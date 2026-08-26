@@ -107,30 +107,59 @@ class FastConditionsTestCase(TestBase):
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_an_ordinary_breakpoint_on_the_patched_line_still_fires(self):
-        """A plain breakpoint on the same line as a fast condition still works.
+        """A plain breakpoint sharing a line with a fast condition still works.
 
-        The patched copy's debug info points back at the original source, so
-        lldb re-resolves file:line breakpoints into it -- which puts an ordinary
-        breakpoint at very nearly the address the compiled-in trap is attributed
-        to. A site either causes a trap or attributes one, so the two cannot
-        share an address, and whichever loses must fail visibly rather than look
-        set while never firing.
+        Set before the launch and by file and line, so both breakpoints end up
+        with a location in the copy, on the same line, a few instructions apart:
+        the plain one where the line's first statement is and the trap where the
+        injected code put it. One fires on every pass and the other only when its
+        condition holds, in the same run, from the same copy.
+
+        This test used to be about a site collision between those two addresses,
+        which was measured not to happen -- the line's location and the trap are
+        148 bytes apart -- and used to set the plain breakpoint by source regex,
+        which makes the condition refuse outright and left it testing the
+        fallback path that another test already covers.
         """
         target = self.setup()
+        patched_line = self.find_line("total += i;")
         conditional = target.BreakpointCreateBySourceRegex(
             CONDITION_LINE, lldb.SBFileSpec("main.c")
         )
-        conditional.SetCondition("seed == 50000 && i == 1")
-        plain = target.BreakpointCreateBySourceRegex(
-            CONDITION_LINE, lldb.SBFileSpec("main.c")
-        )
+        conditional.SetCondition("seed == 3 && i == 1")
+        plain = target.BreakpointCreateByLocation("main.c", patched_line)
 
         process = target.LaunchSimple(None, None, self.get_process_working_directory())
         self.assertState(process.GetState(), lldb.eStateStopped)
-        # The unconditional breakpoint is hit on the very first call, long
+        # The plain breakpoint is hit on the very first pass of the line, long
         # before the condition could hold.
         self.assertEqual(plain.GetHitCount(), 1)
         self.assertEqual(conditional.GetHitCount(), 0)
+        self.expect(
+            "breakpoint list %d" % conditional.GetID(),
+            substrs=["Condition not compiled into the process"],
+            matching=False,
+        )
+
+        # And on to the hit whose condition holds, which arrives from the trap in
+        # the same copy the plain breakpoint is stopping in.
+        while conditional.GetHitCount() == 0:
+            self.assertState(process.GetState(), lldb.eStateStopped)
+            process.Continue()
+        self.assertEqual(
+            process.GetSelectedThread().GetFrameAtIndex(0).GetLineEntry().GetLine(),
+            patched_line,
+        )
+        self.assertEqual(
+            process.GetSelectedThread()
+            .GetFrameAtIndex(0)
+            .FindVariable("seed")
+            .GetValueAsSigned(),
+            3,
+        )
+        # Both were reported, and each counted only its own hits: the plain one
+        # once per pass of the line, the conditional one only when it held.
+        self.assertGreater(plain.GetHitCount(), 1)
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
@@ -587,6 +616,45 @@ class FastConditionsTestCase(TestBase):
         self.assertEqual(
             process.GetSelectedThread().GetFrameAtIndex(0).GetFunctionName(), "main"
         )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_relaunch_compiles_the_condition_in_again(self):
+        """Running the same target again patches afresh.
+
+        Everything a patch is made of belongs to one process: the copy, the
+        redirect into it, the addresses compiled into it, and each breakpoint's
+        record of having had its condition compiled in. A relaunch that kept any
+        of that would either believe it had a patch it does not have, or be
+        refused as a redefinition of the last run's copy -- which is what the
+        second run of this used to get, before the declaration a compile leaves in
+        the target was taken back out.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        bp.SetCondition("seed == 10 && i == 1")
+
+        for run in range(3):
+            process = target.LaunchSimple(
+                None, None, self.get_process_working_directory()
+            )
+            self.assertState(process.GetState(), lldb.eStateStopped, "run %d" % run)
+            frame = process.GetSelectedThread().GetFrameAtIndex(0)
+            self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 10)
+            self.assertEqual(bp.GetHitCount(), 1, "run %d" % run)
+            # Compiled in on every run, not just the first: the ten calls before
+            # the condition holds cost no stops.
+            self.assertLess(
+                process.GetStopID(True), STOPS_ALLOWANCE, "run %d" % run
+            )
+            self.expect(
+                "breakpoint list %d" % bp.GetID(),
+                substrs=["Condition not compiled into the process"],
+                matching=False,
+            )
+            process.Kill()
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
