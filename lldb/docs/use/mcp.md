@@ -481,7 +481,8 @@ the function on entry is what counts all of them.
 
 Each capture's own row states how many hits it came back with a value at. A
 capture that resolved as a path and never failed collapses to `"path x4012"`,
-`$return` to `"abi x120"`, and anything with more to say gets an object whose
+`$return` to `"abi x120"`, a capture the program recorded for itself to
+`"in_process x4012"`, and anything with more to say gets an object whose
 `evaluations` and `errors` give the same figure. The count is there because the
 alternative was to infer it: the row named the tier and nothing else, so "read at
 every hit" was the absence of an `errors` field — which is what a silently failing
@@ -493,6 +494,51 @@ word: a tracepoint that never fired is not a capture that could not be read.
 Events themselves live in the artifact, one JSON object per line, and the
 response reports its path and field names. The last few events are included
 inline only when the program ended badly, which is when they are wanted.
+
+#### What the program does for itself
+
+Stopping a program costs about a millisecond, and a tracepoint that stops at every
+hit is therefore bounded at a few hundred hits a second however little it does
+there. That is the ceiling on what a plan can watch, and `fast` — on by default —
+removes it by compiling the tracepoint's own work into the program: the observed
+function is recompiled from its own source with the condition and the captures
+injected into it, and its entry is redirected to the copy. A condition that does
+not hold then costs two instructions, and a captured value is written into a ring
+the debugger reads once per few thousand values rather than once per value.
+Measured on twenty thousand hits: the stopping path managed 222 a second, and the
+program recorded all twenty thousand in under a second.
+
+Each observation's `eval` says which it got — `"in-process"`, or `"stopped: "` and
+the reason. Every refusal falls back to stopping and none is silent, because a
+refusal costs speed and nothing else and a caller comparing hit counts between
+runs is comparing what each of them paid. `on: return`, a tracepoint that matched
+more than one place, a function whose source is not on disk or is newer than the
+binary, and anything the compiler rejects all fall back.
+
+`"in-process"` is not by itself the claim that nothing stopped: an observation
+whose condition is compiled in still stops at every hit the condition lets
+through, unless its captures went into the program too. Which of them did is on
+each capture, where the granularity belongs — `"in_process x4012"` means the value
+was copied out where the program held it, and that the hit cost nothing at all.
+Captures go in only when doing so removes the stop entirely, since while the
+debugger is standing in the frame it reads every capture there anyway. So a
+`backtrace`, an `only_hit` or a `$return` keeps the stop, and a capture the copy's
+own debug info says is not a scalar of eight bytes or fewer sends the whole
+observation back to stopping rather than being dropped from it: a hit reported with
+one of the values the caller asked for silently absent is worse than a slow one.
+
+A hit the program recorded rather than stopped for carries no `tid` and no `t_ms`
+on its event — nothing watched it happen, and the moment its record was read is
+shared by the thousands of hits read with it. Its values, its order and its counts
+are what a stop would have reported. The run also says once that it recompiled,
+because the program under test really is running unoptimized copies of those
+functions: slower than what it was built as, and where the original relied on what
+the optimizer did, not always the same code. `"fast": false` leaves the program
+exactly as it was built, at a stop per hit, which is what somebody measuring the
+program's own timing needs.
+
+The facility is arm64-only and tested on Darwin. Everywhere else every observation
+falls back, and says so.
 
 #### Writing a good plan
 

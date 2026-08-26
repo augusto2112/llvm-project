@@ -306,6 +306,47 @@ trap. A condition-only injection with no captures emits no drain trap.
 | `emit` modes other than `EveryHit` | Falls back |
 | `backtrace` | Falls back; a backtrace needs a stop |
 
+### Captures: settled during implementation
+
+Three things this design left to the implementation, resolved with the code in
+hand.
+
+**A record carries the hit it belongs to.** A hit's several captures are several
+records, and a value is only a value of something once it is known which hit it
+belongs to — that is what the tuple an emission mode compares is made of, and what
+orders two runs against each other. Two threads inside one site write their records
+interleaved, so grouping them by arrival, or by the capture index coming back round
+to zero, builds a hit out of one thread's first value and another's second. The
+site's own hit counter is already read atomically on the hot path for the skip
+guard, so the number is in hand; carrying it grows a record from 16 bytes to 24.
+
+**Captures go into the program only where that removes the stop.** While a site
+still traps at every hit its guards let through, the debugger is standing in the
+frame and reads every capture there — anything a record can carry and everything it
+cannot — so recording them as well would be the same values read twice, and
+correlating a record with the trap that followed it is not something two threads
+allow. `WantStop` is therefore false exactly when there is a capture to record and
+nothing at the hit needs a frame: no `backtrace`, no `only_hit`, no `$return`.
+
+It follows that a capture the copy's debug info refuses cannot merely be dropped
+from a site that does not stop — the recording was the only way that value would
+ever have left the program, so the whole injection is refused and the observation
+falls back. Task 10's per-capture rule stands for a site that does stop, where the
+value is read in the frame regardless.
+
+**A hit nothing stopped for carries no thread and no time.** Nothing watched it
+happen. The only moment available is the one its record was read at, which is
+shared by the thousands of hits read with it and would read as the program having
+arrived at all of them at once, so `tid` and `t_ms` are left off the event and the
+run says so once. `frame` is kept: it is the function that was recompiled.
+
+The report needed one word rather than a new field. `eval` widens from "the
+condition's mode" to "the tracepoint's mode", and is now reported for an
+observation that only reads values; each capture renders `in_process xN` beside
+`path xN` and `abi xN`. So the answer is readable at the granularity where it
+differs — `eval: in-process` says the work is in the program, and the captures say
+whether the stop went with it.
+
 ## Re-patching
 
 The requirement is that changing an already-changed function composes, with both
