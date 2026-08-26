@@ -29,19 +29,36 @@ static std::vector<uint8_t> MakeRing(uint64_t Capacity,
 }
 
 TEST(PatchControlBlockTest, RoundTripsARecord) {
-  PatchRecord Rec{7, 3, 0xDEADBEEFCAFEF00D};
+  PatchRecord Rec{7, 3, 4200, 0xDEADBEEFCAFEF00D};
   std::vector<uint8_t> Bytes(kPatchRecordSize, 0);
   EncodePatchRecord(Rec, Bytes);
   PatchRecord Back = DecodePatchRecord(Bytes);
   EXPECT_EQ(Rec.Site, Back.Site);
   EXPECT_EQ(Rec.Capture, Back.Capture);
+  EXPECT_EQ(Rec.Hit, Back.Hit);
   EXPECT_EQ(Rec.Value, Back.Value);
+}
+
+// The hit a record belongs to is what joins that hit's several captures back
+// together, so it has to survive the ring rather than be inferred from the order
+// records arrive in -- which two threads inside one site interleave.
+TEST(PatchControlBlockTest, KeepsEachRecordWithItsOwnHit) {
+  std::vector<PatchRecord> Written{
+      {1, 0, 1, 10}, {1, 0, 2, 30}, {1, 1, 1, 20}, {1, 1, 2, 40}};
+  auto Ring = MakeRing(8, Written);
+  PatchRingHeader Header{4, 0, 8, 6};
+  PatchDrain Drain = DrainPatchRing(Header, Ring);
+  ASSERT_EQ(4u, Drain.Records.size());
+  EXPECT_EQ(1u, Drain.Records[0].Hit);
+  EXPECT_EQ(2u, Drain.Records[1].Hit);
+  EXPECT_EQ(1u, Drain.Records[2].Hit);
+  EXPECT_EQ(2u, Drain.Records[3].Hit);
 }
 
 // The sizes are baked into the generated C source as literals, so a change here
 // without a matching change there would misalign every record.
 TEST(PatchControlBlockTest, HasTheDocumentedSizes) {
-  EXPECT_EQ(16u, kPatchRecordSize);
+  EXPECT_EQ(24u, kPatchRecordSize);
   EXPECT_EQ(32u, kPatchRingHeaderSize);
   EXPECT_EQ(24u, kPatchSiteSlotSize);
 }
@@ -56,7 +73,7 @@ TEST(PatchControlBlockTest, DrainsNothingFromAnUntouchedRing) {
 }
 
 TEST(PatchControlBlockTest, DrainsRecordsInWriteOrder) {
-  std::vector<PatchRecord> Written{{1, 0, 10}, {1, 1, 20}, {2, 0, 30}};
+  std::vector<PatchRecord> Written{{1, 0, 1, 10}, {1, 1, 1, 20}, {2, 0, 1, 30}};
   auto Ring = MakeRing(8, Written);
   PatchRingHeader Header{3, 0, 8, 6};
   PatchDrain Drain = DrainPatchRing(Header, Ring);
@@ -69,7 +86,7 @@ TEST(PatchControlBlockTest, DrainsRecordsInWriteOrder) {
 }
 
 TEST(PatchControlBlockTest, DrainsOnlyWhatIsNew) {
-  std::vector<PatchRecord> Written{{1, 0, 10}, {1, 0, 20}, {1, 0, 30}};
+  std::vector<PatchRecord> Written{{1, 0, 1, 10}, {1, 0, 2, 20}, {1, 0, 3, 30}};
   auto Ring = MakeRing(8, Written);
   PatchRingHeader Header{3, 1, 8, 6};
   PatchDrain Drain = DrainPatchRing(Header, Ring);
@@ -86,7 +103,7 @@ TEST(PatchControlBlockTest, DrainsOnlyWhatIsNew) {
 TEST(PatchControlBlockTest, ReportsWhatTheRingOverwrote) {
   std::vector<PatchRecord> Written;
   for (uint64_t I = 0; I < 10; ++I)
-    Written.push_back({1, 0, I});
+    Written.push_back({1, 0, I + 1, I});
   auto Ring = MakeRing(4, Written);
   PatchRingHeader Header{10, 0, 4, 3};
   PatchDrain Drain = DrainPatchRing(Header, Ring);
@@ -103,7 +120,7 @@ TEST(PatchControlBlockTest, ReportsWhatTheRingOverwrote) {
 TEST(PatchControlBlockTest, ReadsAcrossTheWrapPoint) {
   std::vector<PatchRecord> Written;
   for (uint64_t I = 0; I < 6; ++I)
-    Written.push_back({1, 0, I});
+    Written.push_back({1, 0, I + 1, I});
   auto Ring = MakeRing(4, Written);
   PatchRingHeader Header{6, 3, 4, 3};
   PatchDrain Drain = DrainPatchRing(Header, Ring);
@@ -118,7 +135,7 @@ TEST(PatchControlBlockTest, ReadsAcrossTheWrapPoint) {
 // A header claiming fewer records drained than written cannot be trusted to
 // index the ring, but it must not read out of bounds either.
 TEST(PatchControlBlockTest, ToleratesADrainedCountAheadOfSeq) {
-  auto Ring = MakeRing(4, {{1, 0, 10}});
+  auto Ring = MakeRing(4, {{1, 0, 1, 10}});
   PatchRingHeader Header{1, 5, 4, 3};
   PatchDrain Drain = DrainPatchRing(Header, Ring);
   EXPECT_TRUE(Drain.Records.empty());
@@ -135,7 +152,7 @@ TEST(PatchControlBlockTest, ToleratesAZeroCapacity) {
 // reason to walk off the end of the buffer.
 TEST(PatchControlBlockTest, ToleratesARingShorterThanCapacity) {
   PatchRingHeader Header{4, 0, 8, 6};
-  auto Ring = MakeRing(2, {{1, 0, 10}, {1, 0, 20}});
+  auto Ring = MakeRing(2, {{1, 0, 1, 10}, {1, 0, 2, 20}});
   PatchDrain Drain = DrainPatchRing(Header, Ring);
   // With Seq=4, Drained=0, Capacity=8, and only 2 records' worth of buffer:
   // Readable = min(4, 8) = 4. First = 0.

@@ -23,6 +23,18 @@ namespace lldb_private {
 struct PatchRecord {
   uint32_t Site = 0;
   uint32_t Capture = 0;
+
+  /// Which of the site's hits wrote this, as its own hit counter numbered that
+  /// hit. What joins a hit's several captures back together.
+  ///
+  /// Carried in the record rather than inferred from the order they arrive in,
+  /// because two threads inside one site interleave their records: a reader
+  /// grouping them by arrival, or by the capture index coming back round to
+  /// zero, would build a hit out of one thread's first value and another's
+  /// second. The number costs nothing to write -- the site's counter is already
+  /// read atomically on the hot path, for the skip guard.
+  uint64_t Hit = 0;
+
   uint64_t Value = 0;
 };
 
@@ -72,11 +84,11 @@ struct PatchDrain {
   uint64_t NewDrained = 0;
 };
 
-constexpr size_t kPatchRecordSize = 16;
+constexpr size_t kPatchRecordSize = 24;
 constexpr size_t kPatchRingHeaderSize = 32;
 constexpr size_t kPatchSiteSlotSize = 24;
 
-/// Records the ring holds by default: 64KB, which at three quarters full costs
+/// Records the ring holds by default: 96KB, which at three quarters full costs
 /// one stop per three thousand captured values instead of one per value.
 constexpr uint64_t kDefaultRingCapacity = 4096;
 

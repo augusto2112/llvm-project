@@ -331,6 +331,22 @@ TEST(PatchSourceBuilderTest, DeclaresTheRecordWriterBeforeTheBody) {
   EXPECT_LT(Helper, Fn);
 }
 
+// A hit's captures are several records, and which hit each belongs to is what
+// puts them back together. Left to be inferred from the order they arrive in,
+// two threads inside the site would have one thread's first value read as
+// belonging beside the other's second.
+TEST(PatchSourceBuilderTest, RecordsEachValueAgainstItsOwnHit) {
+  auto Inj = Bare(5);
+  Inj.SiteID = 7;
+  Inj.Captures = {"acc", "x"};
+  Inj.WantStop = false;
+  std::string Source = BuildPatchSource(Request({Inj}));
+  EXPECT_NE(std::string::npos,
+            Source.find("__lldb_rec(7, 0, __lldb_h_7, __lldb_v_7_0)"));
+  EXPECT_NE(std::string::npos,
+            Source.find("__lldb_rec(7, 1, __lldb_h_7, __lldb_v_7_1)"));
+}
+
 // The capacity is a literal so the writer indexes with a mask and never loads
 // it.
 TEST(PatchSourceBuilderTest, MasksTheRingIndexWithALiteralCapacity) {

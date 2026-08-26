@@ -53,9 +53,9 @@ std::string Preamble(const PatchSourceRequest &Request) {
   std::string Text;
   llvm::raw_string_ostream OS(Text);
   OS << "#line 1 \"<lldb patch preamble>\"\n";
-  OS << llvm::formatv(
-      "struct {0} {{ unsigned int site, cap; unsigned long long val; };\n",
-      RecT);
+  OS << llvm::formatv("struct {0} {{ unsigned int site, cap; unsigned long "
+                      "long hit, val; };\n",
+                      RecT);
 
   // The header's shape is a contract with the struct the debugger reads the
   // block with (PatchRingHeader in lldb/include/lldb/Target/PatchControlBlock.h,
@@ -75,10 +75,12 @@ std::string Preamble(const PatchSourceRequest &Request) {
   OS << llvm::formatv("#define {0} ((volatile struct {1} *){2:x+})\n",
                       HdrMacro, HdrT, Request.RingAddress);
   OS << llvm::formatv(
-      "static void {0}(unsigned k, unsigned c, unsigned long long v) {{ "
+      "static void {0}(unsigned k, unsigned c, unsigned long long h, "
+      "unsigned long long v) {{ "
       "unsigned long s = __atomic_fetch_add(&{1}->seq, 1, "
       "__ATOMIC_RELAXED); volatile struct {2} *r = "
-      "&{1}->ring[s & {3}]; r->site = k; r->cap = c; r->val = v; }\n",
+      "&{1}->ring[s & {3}]; r->site = k; r->cap = c; r->hit = h; r->val = v; "
+      "}\n",
       RecFn, HdrMacro, RecT,
       Request.RingCapacity ? Request.RingCapacity - 1 : 0);
   return Text;
@@ -138,7 +140,12 @@ std::string InjectionLine(llvm::StringRef Tag, const PatchInjection &Inj) {
     OS << llvm::formatv("unsigned long long {0} = 0; ", Value);
     OS << llvm::formatv("__builtin_memcpy(&{0}, &{1}, sizeof {1}); ", Value,
                         Local);
-    OS << llvm::formatv("{0}({1}, {2}, {3}); ", RecFn, Inj.SiteID, I, Value);
+    // The hit the site's own counter numbered this one travels with the value,
+    // because a value is only a value of something once it is known which hit
+    // it belongs to -- and the records of two threads inside this site arrive
+    // interleaved.
+    OS << llvm::formatv("{0}({1}, {2}, {3}, {4}); ", RecFn, Inj.SiteID, I, Hit,
+                        Value);
   }
 
   if (Inj.WantStop)

@@ -18,7 +18,8 @@ PatchRecord lldb_private::DecodePatchRecord(llvm::ArrayRef<uint8_t> Bytes) {
     return Rec;
   Rec.Site = llvm::support::endian::read32le(Bytes.data());
   Rec.Capture = llvm::support::endian::read32le(Bytes.data() + 4);
-  Rec.Value = llvm::support::endian::read64le(Bytes.data() + 8);
+  Rec.Hit = llvm::support::endian::read64le(Bytes.data() + 8);
+  Rec.Value = llvm::support::endian::read64le(Bytes.data() + 16);
   return Rec;
 }
 
@@ -28,7 +29,8 @@ void lldb_private::EncodePatchRecord(const PatchRecord &Rec,
     return;
   llvm::support::endian::write32le(Out.data(), Rec.Site);
   llvm::support::endian::write32le(Out.data() + 4, Rec.Capture);
-  llvm::support::endian::write64le(Out.data() + 8, Rec.Value);
+  llvm::support::endian::write64le(Out.data() + 8, Rec.Hit);
+  llvm::support::endian::write64le(Out.data() + 16, Rec.Value);
 }
 
 PatchDrain lldb_private::DrainPatchRing(const PatchRingHeader &Header,
