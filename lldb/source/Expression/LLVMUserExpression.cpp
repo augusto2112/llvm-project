@@ -64,6 +64,11 @@ LLVMUserExpression::~LLVMUserExpression() {
 lldb::ModuleSP LLVMUserExpression::TakeJITModule() {
   if (!m_execution_unit_sp)
     return nullptr;
+  // A parse that generated debug info has already built one and handed it to
+  // the target. Building a second would describe the same code twice, leaving
+  // two modules claiming the same addresses.
+  if (lldb::ModuleSP already_built = m_jit_module_wp.lock())
+    return already_built;
   lldb::ModuleSP jit_module_sp = m_execution_unit_sp->GetJITModule();
   if (jit_module_sp)
     m_jit_module_wp = jit_module_sp;

@@ -79,9 +79,12 @@ public:
   /// stopped inside it. Only useful for a top-level expression, whose code
   /// outlives the evaluation that produced it.
   ///
-  /// Takes rather than gets: the module is built on demand, so asking twice
-  /// would describe the same code twice. The caller owns the result, including
-  /// whether to append it to the target and whether to notify.
+  /// Takes rather than gets: the module is built on demand, and describing the
+  /// same code twice would leave two modules claiming the same addresses, so
+  /// asking again hands back the module already built. The caller owns the
+  /// result, including whether to append it to the target and whether to
+  /// notify -- but not its lifetime past this expression's, which takes the
+  /// module back out of the target's images.
   lldb::ModuleSP TakeJITModule();
 
 protected:
