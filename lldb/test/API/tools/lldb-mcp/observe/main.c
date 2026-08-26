@@ -142,6 +142,33 @@ int unwind_loop(void) {
    to report rather than one thread's sequence. */
 int shared_step(int n) { return n * 2; }
 
+/* Hit twenty thousand times, which is more than a stop per hit fits into any
+   ceiling a test can afford to wait for. That is the whole claim of recording a
+   capture in the program, and it cannot be made against a function hit
+   twenty-five times.
+
+   `bucket` is a parameter rather than a local because a tracepoint on a function
+   lands at its first statement, where a local declared by that statement is not
+   yet in scope. Two distinct values over the twenty thousand hits, so that an
+   emission mode collapses the event stream to two events while the aggregate
+   still counts every hit -- and the two counts are what says every value
+   arrived. Spread over several lines because the recording stands where a
+   statement stands. */
+int hot_step(int n, int bucket) {
+  int scaled = n * 2;
+  scaled += bucket;
+  return scaled;
+}
+
+void run_hot(void) {
+  int i;
+  long sum = 0;
+  for (i = 0; i < 20000; ++i)
+    sum += hot_step(i, i / 10000);
+  printf("hot=%ld\n", sum);
+  fflush(stdout);
+}
+
 /* Spread over several lines, because the work a tracepoint does in the program
    stands where a statement stands: a one-line function's only line is its
    declaration, which holds none, and a braceless loop body has room for one
@@ -150,14 +177,20 @@ int shared_step(int n) { return n * 2; }
 
    The parameter is what the conditions read, so that a condition which is never
    true and one which is true exactly once can both be written against the same
-   function. */
+   function.
+
+   `pair` is here to be captured and refused: the program records a captured
+   value by copying it into eight bytes, so a struct is a value it cannot record
+   and a capture of one has to be read at a stop. Without a subject there is
+   nothing to distinguish that refusal from a capture that simply worked. */
 int accumulate(int seed, int rounds) {
+  struct Inner pair = {seed, rounds};
   int total = seed;
   int i;
   for (i = 0; i < rounds; ++i) {
     total += i;
   }
-  return total;
+  return total + pair.a - seed;
 }
 
 /* The only caller that passes two rounds, so that restricting a condition on
@@ -218,6 +251,11 @@ int main(int argc, char **argv) {
      would only add hits nobody asked about. */
   if (strcmp(mode, "churn") == 0) {
     churn();
+    return 0;
+  }
+
+  if (strcmp(mode, "hot") == 0) {
+    run_hot();
     return 0;
   }
 

@@ -1845,12 +1845,13 @@ class ObserveTestCase(TestBase):
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
-    def test_captures_are_read_at_the_stops_a_condition_still_takes(self):
-        """A compiled-in condition reduces the stops without losing the values.
+    def test_a_condition_and_its_captures_both_go_into_the_program(self):
+        """A hit whose condition holds is recorded rather than stopped for.
 
         The hits the condition excluded cost nothing, and the one it let through
-        is read exactly as it would have been on the stopping path -- which is
-        what makes the two modes comparable rather than merely both cheap.
+        costs nothing either: its values were written where the program held them.
+        They are the values the stopping path reads, which is what makes the two
+        modes comparable rather than merely both cheap.
         """
         self.build()
 
@@ -1874,11 +1875,13 @@ class ObserveTestCase(TestBase):
         # main.c passes each of 0..19 once, so the seventh call is the only one.
         self.assertEqual(report["condition_true"], 1, str(report))
         self.assertEqual(report["emitted"], 1, str(report))
-        self.assertEqual(capture_reads(report["captures"]["seed"]), 1, str(report))
-        self.assertEqual(capture_reads(report["captures"]["rounds"]), 1, str(report))
+        for name in ("seed", "rounds"):
+            capture = report["captures"][name]
+            self.assertEqual(capture_tier(capture), "in_process", str(capture))
+            self.assertEqual(capture_reads(capture), 1, str(capture))
 
         # One distinct value apiece, so each collapses to text -- and the values
-        # are the ones the seventh call held, read at the stop the condition took.
+        # are the ones the seventh call held.
         values = document["aggregate"]["accumulate"]
         self.assertEqual(values["seed"], "7 x1", str(values))
         self.assertEqual(values["rounds"], "3 x1", str(values))
@@ -1978,3 +1981,271 @@ class ObserveTestCase(TestBase):
         self.assertEqual(report["condition_errors"], 25, str(report))
         failure = self.capture_failure(document, "valu == 7")
         self.assertEqual(failure["field"], "when", str(failure))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_hot_capture_costs_no_stop_per_hit(self):
+        """The claim the whole feature is for, made where it can be seen.
+
+        Twenty thousand hits under a five-second ceiling. A stop per hit does not
+        fit in five seconds -- one costs about a millisecond, so twenty thousand
+        cost twenty seconds -- so the run reaching the program's own end is the
+        claim, and every value arriving with it is that nothing was traded for
+        it. Written against a hot function because at twenty-five hits the two
+        modes are indistinguishable.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["hot"],
+                "timeout_seconds": 5,
+                "observe": [
+                    {"at": "hot_step", "capture": ["bucket"], "emit": "on_change"}
+                ],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["hot_step"]
+        self.assertEqual(report["eval"], "in-process", str(report))
+        self.assertEqual(report["hits"], 20000, str(report))
+
+        # Every one of them read, and by the program: the ring fills roughly six
+        # times over twenty thousand records, so the stops this cost are six
+        # rather than twenty thousand.
+        capture = report["captures"]["bucket"]
+        self.assertEqual(capture_tier(capture), "in_process", str(capture))
+        self.assertEqual(capture_reads(capture), 20000, str(capture))
+
+        # Ten thousand hits either side of the bucket boundary, which is every
+        # value accounted for rather than a sample of them.
+        values = document["aggregate"]["hot_step"]["bucket"]
+        self.assertEqual(values["values"], {"0": 10000, "1": 10000}, str(values))
+        # And one change between them, so the twenty thousand arrived in order.
+        self.assertEqual(report["emitted"], 2, str(report))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_captures_alone_are_recorded_without_stopping(self):
+        """A tracepoint that only reads values costs no stop at all.
+
+        This is the case the feature exists for and the one a condition cannot
+        help with: with nothing to be false, every hit was a stop, and a plan that
+        reads a value at a hot function paid for one at every one of them. The
+        values are the assertion -- the same ones a stop would have read, and the
+        word on each capture says the program recorded them itself.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "accumulate", "capture": ["seed", "rounds"]}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["accumulate"]
+        self.assertEqual(report["eval"], "in-process", str(report))
+        self.assertEqual(report["hits"], 25, str(report))
+        self.assertEqual(report["emitted"], 25, str(report))
+
+        # Read at all twenty-five, and by the program rather than at a stop.
+        for name in ("seed", "rounds"):
+            capture = report["captures"][name]
+            self.assertEqual(capture_tier(capture), "in_process", str(capture))
+            self.assertEqual(capture_reads(capture), 25, str(capture))
+
+        # main.c passes 0..19 with three rounds and 0..4 with two, which is the
+        # distribution a stop would have reported -- and the single transition
+        # from three rounds to two, at the twenty-first hit, is the hits having
+        # reached the report in the order the program took them.
+        values = document["aggregate"]["accumulate"]
+        self.assertEqual(values["rounds"]["values"], {"3": 20, "2": 5}, str(values))
+        self.assertEqual(
+            values["rounds"]["transitions"],
+            [{"count": 1, "first_seq": 21, "from": "3", "to": "2"}],
+            str(values),
+        )
+        self.assertEqual(values["seed"]["distinct"], 20, str(values))
+
+        # A hit nothing stopped for was never current anywhere, so it has no
+        # thread and no time of its own. Said once for the run rather than left
+        # to be discovered from the events.
+        notes = " ".join(document.get("notes", []))
+        self.assertIn("in_process", notes, notes)
+        self.assertIn("t_ms", notes, notes)
+        events = self.events(document)
+        self.assertEqual(len(events), 25, str(events[:3]))
+        self.assertNotIn("t_ms", events[0], str(events[0]))
+        self.assertNotIn("tid", events[0], str(events[0]))
+        # But the function is known: it is the one that was recompiled.
+        self.assertEqual(events[0]["frame"], "accumulate", str(events[0]))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_recorded_hit_keeps_each_captures_own_value(self):
+        """Two captures at one hit come back as that hit's pair, not as a shuffle.
+
+        Each value travels with the hit its own counter numbered, which is what
+        makes the pair a pair. `on_change` is the assertion: it compares one hit's
+        tuple against the previous hit's, so a run whose values had been joined
+        across hits would collapse differently -- and `accumulate`'s two arguments
+        move independently, the seed at every call and the rounds only twice.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "at": "accumulate",
+                        "capture": ["rounds", "seed"],
+                        "emit": "on_change",
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertEqual(report["eval"], "in-process", str(report))
+        self.assertEqual(report["hits"], 25, str(report))
+        # The seed changes at every call, so every hit is a change.
+        self.assertEqual(report["emitted"], 25, str(report))
+
+        # The pairs themselves: three rounds for the first twenty calls and two
+        # for the last five, each beside the seed that call was made with.
+        events = self.events(document)
+        self.assertEqual(len(events), 25, str(events[:3]))
+        for index, event in enumerate(events):
+            expected_rounds = 3 if index < 20 else 2
+            expected_seed = index if index < 20 else index - 20
+            self.assertEqual(
+                (event["values"]["rounds"]["value"], event["values"]["seed"]["value"]),
+                (str(expected_rounds), str(expected_seed)),
+                str(event),
+            )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_capture_that_needs_a_frame_keeps_its_stop_and_says_so(self):
+        """A backtrace is the stack the hit happened on, so the hit has to stop.
+
+        And with nothing else to compile in, the observation gets the stopping
+        path whole rather than half of each -- said as the reason, because the
+        difference is what the run cost.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"at": "accumulate", "capture": ["seed"], "backtrace": 3}
+                ],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertTrue(report["eval"].startswith("stopped:"), str(report))
+        self.assertIn("backtrace", report["eval"], str(report))
+        # The observation went on working, which is what makes this a fallback.
+        self.assertEqual(report["hits"], 25, str(report))
+        self.assertEqual(capture_reads(report["captures"]["seed"]), 25, str(report))
+        self.assertEqual(capture_tier(report["captures"]["seed"]), "path", str(report))
+        self.assertIn("frames", self.events(document)[0], str(report))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_capture_the_program_cannot_record_keeps_the_whole_stop(self):
+        """A value that does not fit a record is read at a stop, and so is its
+        neighbour.
+
+        Dropping the one that does not fit would report a hit with a value the
+        caller asked for silently missing, and reading the rest at the stop the
+        remaining one needs anyway costs nothing beyond what it already costs. So
+        the whole observation falls back, and says which value did it.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                # `pair` is a struct: a record carries eight bytes of scalar.
+                "observe": [{"at": "accumulate", "capture": ["seed", "pair"]}],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertTrue(report["eval"].startswith("stopped:"), str(report))
+        self.assertIn("pair", report["eval"], str(report))
+        # Both values still arrive, at a stop per hit.
+        self.assertEqual(report["hits"], 25, str(report))
+        for name in ("seed", "pair"):
+            capture = report["captures"][name]
+            self.assertNotEqual(capture_tier(capture), "in_process", str(capture))
+            self.assertEqual(capture_reads(capture), 25, str(capture))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_called_from_with_captures_keeps_the_stop_that_answers_it(self):
+        """A gate byte cannot say which thread is inside the gating function.
+
+        `called_from` means a frame of that function is below this hit on this
+        thread, and only a stop can answer that. While the hit still stops the
+        gate is an optimization on top of the real test; for a hit nobody sees it
+        would become the whole of it, and admit another thread's hits silently.
+        The count is the assertion -- five of the twenty-five calls are reached
+        through `accumulate_via`.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "at": "accumulate",
+                        "capture": ["seed"],
+                        "called_from": "accumulate_via",
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertTrue(report["eval"].startswith("stopped:"), str(report))
+        self.assertIn("called_from", report["eval"], str(report))
+        self.assertEqual(report["hits"], 5, str(report))
+        self.assertEqual(capture_reads(report["captures"]["seed"]), 5, str(report))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_fast_false_stops_for_captures_too(self):
+        """The escape hatch reaches the captures, not only the conditions."""
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "fast": False,
+                "timeout_seconds": 300,
+                "observe": [{"at": "accumulate", "capture": ["seed"]}],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertTrue(report["eval"].startswith("stopped"), str(report))
+        # The same answer, at a stop per hit.
+        self.assertEqual(report["hits"], 25, str(report))
+        self.assertEqual(capture_reads(report["captures"]["seed"]), 25, str(report))
+        self.assertEqual(capture_tier(report["captures"]["seed"]), "path", str(report))
+        self.assertIn("t_ms", self.events(document)[0], str(report))
