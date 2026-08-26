@@ -142,6 +142,28 @@ int unwind_loop(void) {
    to report rather than one thread's sequence. */
 int shared_step(int n) { return n * 2; }
 
+/* Spread over several lines, because the work a tracepoint does in the program
+   stands where a statement stands: a one-line function's only line is its
+   declaration, which holds none, and a braceless loop body has room for one
+   statement rather than several. Everything a compiled-in condition is tested
+   against is here.
+
+   The parameter is what the conditions read, so that a condition which is never
+   true and one which is true exactly once can both be written against the same
+   function. */
+int accumulate(int seed, int rounds) {
+  int total = seed;
+  int i;
+  for (i = 0; i < rounds; ++i) {
+    total += i;
+  }
+  return total;
+}
+
+/* The only caller that passes two rounds, so that restricting a condition on
+   accumulate to hits reached from here has something to exclude. */
+int accumulate_via(int seed) { return accumulate(seed, 2); }
+
 static void *worker(void *arg) {
   int base = *(int *)arg;
   int i;
@@ -254,6 +276,13 @@ int main(int argc, char **argv) {
   for (i = 0; i < 6; ++i)
     total += sometimes_null(i < 2 ? NULL : &o);
   total += recurse(4);
+
+  /* Twenty calls of three rounds and five of two, so that a condition on the
+     rounds separates the two callers. */
+  for (i = 0; i < 20; ++i)
+    total += accumulate(i, 3);
+  for (i = 0; i < 5; ++i)
+    total += accumulate_via(i);
 
   /* The description's example observes these two, so the run it describes has to
      reach them on the path a plan naming no mode takes. */

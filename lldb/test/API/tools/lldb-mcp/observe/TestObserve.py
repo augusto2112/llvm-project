@@ -1725,3 +1725,210 @@ class ObserveTestCase(TestBase):
         # A condition is never turned off: a run that stopped evaluating it would
         # be recording different hits rather than fewer.
         self.assertFalse(failure["disabled"], str(failure))
+
+    # A tracepoint's own work compiled into the program rather than done at a
+    # stop. The subject is `accumulate`, which is several lines long: the work
+    # stands where a statement stands, and a one-line function has nowhere to put
+    # it. Only arm64 has an entry trampoline to redirect with, and the fallback
+    # everywhere else is the stopping path these tests exist to distinguish from.
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_condition_runs_in_process_by_default(self):
+        """A plan's condition is compiled into the program unless refused.
+
+        The counts are the whole assertion: a condition that never holds takes no
+        stop at all, so the twenty-five hits reported here were counted by the
+        program and read back out of it rather than seen by the debugger.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "accumulate", "when": "seed > 1000"}],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        report = document["plan_report"]["accumulate"]
+        self.assertEqual(report["eval"], "in-process", str(report))
+        # main.c calls it twenty times directly and five times through
+        # accumulate_via.
+        self.assertEqual(report["hits"], 25, str(report))
+        self.assertEqual(report["condition_true"], 0, str(report))
+        self.assertEqual(report["condition_errors"], 0, str(report))
+        # Nothing was spent evaluating it at a stop, because nothing stopped.
+        self.assertEqual(report["condition_ms"], 0.0, str(report))
+        self.assertEqual(report["emitted"], 0, str(report))
+
+        # The program really is running an unoptimized copy of the function, and
+        # that is a property of the run rather than of the observation.
+        notes = " ".join(document.get("notes", []))
+        self.assertIn("accumulate", notes, notes)
+        self.assertIn("without optimization", notes, notes)
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_fast_false_uses_the_stopping_path(self):
+        """The escape hatch removes the variable for anyone who needs it.
+
+        A patched function is a recompile, so somebody measuring the program's own
+        timing has to be able to ask for the program as it was built.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "fast": False,
+                "timeout_seconds": 300,
+                "observe": [{"at": "accumulate", "when": "seed > 1000"}],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertTrue(report["eval"].startswith("stopped"), str(report))
+        # The same answer, at a stop per hit.
+        self.assertEqual(report["hits"], 25, str(report))
+        self.assertEqual(report["condition_true"], 0, str(report))
+        self.assertEqual(report["condition_errors"], 0, str(report))
+        # Nothing was recompiled, so nothing says anything was.
+        notes = " ".join(document.get("notes", []))
+        self.assertNotIn("without optimization", notes, notes)
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_captures_are_read_at_the_stops_a_condition_still_takes(self):
+        """A compiled-in condition reduces the stops without losing the values.
+
+        The hits the condition excluded cost nothing, and the one it let through
+        is read exactly as it would have been on the stopping path -- which is
+        what makes the two modes comparable rather than merely both cheap.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "at": "accumulate",
+                        "when": "seed == 7",
+                        "capture": ["seed", "rounds"],
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertEqual(report["eval"], "in-process", str(report))
+        self.assertEqual(report["hits"], 25, str(report))
+        # main.c passes each of 0..19 once, so the seventh call is the only one.
+        self.assertEqual(report["condition_true"], 1, str(report))
+        self.assertEqual(report["emitted"], 1, str(report))
+        self.assertEqual(capture_reads(report["captures"]["seed"]), 1, str(report))
+        self.assertEqual(capture_reads(report["captures"]["rounds"]), 1, str(report))
+
+        # One distinct value apiece, so each collapses to text -- and the values
+        # are the ones the seventh call held, read at the stop the condition took.
+        values = document["aggregate"]["accumulate"]
+        self.assertEqual(values["seed"], "7 x1", str(values))
+        self.assertEqual(values["rounds"], "3 x1", str(values))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_gated_condition_is_opened_and_closed_in_the_program(self):
+        """A gate the debugger opens reaches the code compiled into the program.
+
+        Without it the gate would be a breakpoint nobody arms any more: the trap
+        is in the copy, and disabling a breakpoint does not reach it. The hit
+        count is the assertion -- twenty calls happen with the gate shut.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "at": "accumulate",
+                        "when": "rounds == 2",
+                        "called_from": "accumulate_via",
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertEqual(report["eval"], "in-process", str(report))
+        # Only the five calls reached through accumulate_via are this
+        # observation's hits; the twenty direct ones happen with the gate shut.
+        self.assertEqual(report["hits"], 5, str(report))
+        self.assertEqual(report["condition_true"], 5, str(report))
+        self.assertEqual(report["emitted"], 5, str(report))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_on_return_falls_back_and_says_so(self):
+        """A refusal names itself rather than being silent.
+
+        Which mode an observation got has to be readable, because a caller
+        comparing hit counts between runs is comparing what each of them paid.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {
+                        "at": "accumulate",
+                        "on": "return",
+                        "when": "1 == 2",
+                        "capture": ["$return"],
+                    }
+                ],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertTrue(report["eval"].startswith("stopped:"), str(report))
+        self.assertIn("returns", report["eval"], str(report))
+        # The observation went on working, which is what makes the fallback a
+        # fallback rather than a failure.
+        self.assertEqual(report["hits"], 25, str(report))
+        self.assertEqual(report["condition_true"], 0, str(report))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_condition_that_cannot_be_compiled_says_why(self):
+        """A condition the compiler rejected falls back with the diagnostic.
+
+        The condition still works -- it is evaluated at a stop, once per hit --
+        and the cost of that is the whole reason the reason has to be readable.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "accumulate", "when": "valu == 7"}],
+            }
+        )
+
+        report = document["plan_report"]["accumulate"]
+        self.assertTrue(report["eval"].startswith("stopped:"), str(report))
+        self.assertIn("did not compile", report["eval"], str(report))
+        # And the compiler's own words for it, which are the actionable half.
+        self.assertIn("valu", report["eval"], str(report))
+        # Evaluated at a stop instead, and it fails there too -- which is a
+        # different report, and one that was already being made.
+        self.assertEqual(report["hits"], 25, str(report))
+        self.assertEqual(report["condition_errors"], 25, str(report))
+        failure = self.capture_failure(document, "valu == 7")
+        self.assertEqual(failure["field"], "when", str(failure))
