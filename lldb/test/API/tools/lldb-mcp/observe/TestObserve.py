@@ -9,6 +9,7 @@ import shutil
 import socket
 import tempfile
 
+import lldb
 from lldbsuite.test.decorators import *
 from lldbsuite.test.lldbtest import *
 
@@ -234,6 +235,36 @@ class ObserveTestCase(TestBase):
         path = document["artifact"]["path"]
         with open(path, "r") as stream:
             return [json.loads(line) for line in stream.read().splitlines() if line]
+
+    def test_a_run_releases_everything_it_allocated(self):
+        """A finished run leaves the debugger as it found it.
+
+        The engine runs in a debugger it does not own, so a target it fails to
+        release outlives the call and takes every module the program loaded with
+        it -- around eighty for a trivial binary here, and again for every
+        subsequent call. Asserted directly rather than left to the suite's
+        teardown check, because that check reports a number without saying which
+        of the things a run allocates was kept.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [{"at": "classify_token", "capture": ["depth"]}],
+            }
+        )
+        self.assertEqual(document["outcome"], "exited", str(document))
+
+        # The target the run made is gone from the list it was added to.
+        self.assertEqual(self.dbg.GetNumTargets(), 0)
+
+        # And released, not merely unlisted. A target still holding a reference
+        # to itself keeps its modules out of reach of the collector, so the count
+        # after collecting is what distinguishes the two.
+        lldb.SBModule.GarbageCollectAllocatedModules()
+        self.assertEqual(lldb.SBModule.GetNumberAllocatedModules(), 0)
 
     def test_empty_plan_is_crash_triage(self):
         """A plan with no observations reports how the program died."""

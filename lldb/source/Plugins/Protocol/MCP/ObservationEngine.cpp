@@ -3773,6 +3773,18 @@ void ObservationEngine::Teardown() {
     if (P->IsAlive())
       P->Destroy(/*force_kill=*/true);
   m_debugger.GetTargetList().DeleteTarget(m_target);
+
+  // Taking the target off the list is not enough to release it, and dropping
+  // the last reference below will not either: a target that has run holds
+  // strong references back to itself -- the search filter it shares between
+  // breakpoints is one, and each breakpoint keeps a copy of one -- so the last
+  // reference is never the last. Destroy is what breaks them, which is why
+  // every other way of removing a target pairs the two, and why Debugger::Clear
+  // does the same for the targets still on the list at shutdown. A target
+  // removed early is out of that loop's reach, so it has to be destroyed here
+  // or it, its process and every module it loaded stay allocated for as long as
+  // the debugger does.
+  m_target->Destroy();
   m_target.reset();
 
   // The stderr file has been read into the response by now, so nothing outlives
