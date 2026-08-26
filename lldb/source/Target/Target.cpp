@@ -9,6 +9,7 @@
 #include "lldb/Target/Target.h"
 #include "lldb/Breakpoint/Breakpoint.h"
 #include "lldb/Breakpoint/BreakpointIDList.h"
+#include "lldb/Breakpoint/BreakpointLocation.h"
 #include "lldb/Breakpoint/BreakpointPrecondition.h"
 #include "lldb/Breakpoint/BreakpointResolver.h"
 #include "lldb/Breakpoint/BreakpointResolverAddress.h"
@@ -3223,6 +3224,80 @@ void Target::DrainPatchRecords() {
   if (llvm::Error error = m_function_patch_manager_up->CollectRecords())
     LLDB_LOG_ERROR(GetLog(LLDBLog::Breakpoints), std::move(error),
                    "recorded values could not be read at this stop: {0}");
+}
+
+void Target::ReportBreakpointsStrandedByRedirects() {
+  // Asked only of a target that has redirected something, which is what makes
+  // the symbol lookup below worth doing.
+  if (!m_function_patch_manager_up || !m_function_patch_manager_up->HasPatches())
+    return;
+
+  // Whether the body this address is in is one a redirect has stopped reaching.
+  // Asked of the function containing the address rather than of the address
+  // itself, because the redirect is written at the entry and what it makes
+  // unreachable is every piece of the body behind it.
+  auto in_redirected_body = [this](Address &addr) -> Function * {
+    Function *function = addr.CalculateSymbolContextFunction();
+    if (!function)
+      return nullptr;
+    const lldb::addr_t entry = function->GetAddress().GetLoadAddress(this);
+    return m_function_patch_manager_up->IsPatched(entry) ? function : nullptr;
+  };
+
+  for (const BreakpointSP &bp_sp : m_breakpoint_list.Breakpoints()) {
+    // Said once. The answer cannot change back: nothing puts a redirected entry
+    // back while the process it was written into is running.
+    if (!bp_sp->GetWhyItCanNoLongerBeHit().empty())
+      continue;
+
+    // The breakpoint a redirect was written for. Its locations in the original
+    // body are unreachable by design, and the trap in the copy is what reports
+    // its hits, so it is the one breakpoint for which this is not a finding.
+    if (bp_sp->HitsComeFromCompiledCode())
+      continue;
+
+    Function *stranded_in = nullptr;
+    bool has_a_location_that_can_be_hit = false;
+    // Facade locations stand for code rather than sitting at any, so the real
+    // locations are the ones that could have stopped being reached.
+    const size_t num_locations = bp_sp->GetNumLocations(/*use_facade=*/false);
+    for (size_t i = 0; i < num_locations; ++i) {
+      lldb::BreakpointLocationSP loc_sp =
+          bp_sp->GetLocationAtIndex(i, /*use_facade=*/false);
+      if (!loc_sp || !loc_sp->IsEnabled())
+        continue;
+      if (Function *redirected = in_redirected_body(loc_sp->GetAddress()))
+        stranded_in = redirected;
+      else
+        has_a_location_that_can_be_hit = true;
+    }
+
+    // A breakpoint with no locations at all is pending rather than stranded, and
+    // one with a location outside every redirected body still fires there.
+    if (!stranded_in || has_a_location_that_can_be_hit)
+      continue;
+
+    std::string reason =
+        llvm::formatv(
+            "each of its locations is in the body of \"{0}\", whose entry the "
+            "debugger has redirected to a recompiled copy carrying a "
+            "compiled-in breakpoint condition, and none of them is in that "
+            "copy. A breakpoint set by file and line resolves into the copy as "
+            "well; the resolver this one uses does not. The redirect lasts for "
+            "the rest of the run.",
+            stranded_in->GetName())
+            .str();
+
+    // Said when it becomes true rather than left to be looked up. Nobody has a
+    // reason to look into a breakpoint that reads as resolved, which is exactly
+    // how this one reads.
+    Debugger::ReportWarning(
+        llvm::formatv("breakpoint {0} can no longer be hit: {1}",
+                      bp_sp->GetID(), reason)
+            .str(),
+        GetDebugger().GetID());
+    bp_sp->SetWhyItCanNoLongerBeHit(std::move(reason));
+  }
 }
 
 Target::StopHookSP Target::CreateStopHook(StopHook::StopHookKind kind,

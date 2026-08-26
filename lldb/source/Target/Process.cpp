@@ -4058,6 +4058,10 @@ bool Process::ShouldBroadcastEvent(Event *event_ptr) {
     // that happens for any reason, since a ring the debugger never empties
     // overwrites what it holds and the process cannot be read while it runs.
     GetTarget().DrainPatchRecords();
+    // And a breakpoint that a function redirected to a copy has left with nowhere
+    // to fire is said to have nowhere to fire, at the first stop where all of its
+    // locations are known.
+    GetTarget().ReportBreakpointsStrandedByRedirects();
     if (ProcessEventData::GetInterruptedFromEvent(event_ptr)) {
       LLDB_LOGF(log,
                 "Process::ShouldBroadcastEvent (%p) stopped due to an "

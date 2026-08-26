@@ -41,6 +41,13 @@ class FastConditionsTestCase(TestBase):
         with open(os.path.join(self.getSourceDir(), "main.c")) as f:
             return f.readlines()[line - 1]
 
+    def find_line(self, text):
+        with open(os.path.join(self.getSourceDir(), "main.c")) as f:
+            for number, line in enumerate(f.readlines(), start=1):
+                if text in line:
+                    return number
+        self.fail("no line of main.c holds %r" % text)
+
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_false_condition_never_stops(self):
@@ -249,6 +256,110 @@ class FastConditionsTestCase(TestBase):
         frame = process.GetSelectedThread().GetFrameAtIndex(0)
         self.assertEqual(frame.FindVariable("seed").GetValueAsSigned(), 20)
         self.assertEqual(second.GetHitCount(), 1)
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_breakpoint_set_after_the_patch_still_fires(self):
+        """A breakpoint set on a patched function after the fact still fires.
+
+        The copy's line table names the original source, so a breakpoint that
+        resolves by file and line resolves into the copy as well and gets a
+        location there. That location is what fires: the one in the original body
+        never traps again, since the entry no longer reaches it.
+        """
+        target = self.setup()
+        fast = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        fast.SetCondition("seed == 50000 && i == 1")
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(fast.GetHitCount(), 1, "the function is patched by now")
+
+        # The line the condition is on, which is the one whose address is nearest
+        # the trap the copy contains, and another line of the same body.
+        patched_line = self.find_line("total += i;")
+        same = target.BreakpointCreateByLocation("main.c", patched_line)
+        other = target.BreakpointCreateByLocation(
+            "main.c", self.find_line("return total;")
+        )
+
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(same.GetHitCount(), 1, "the patched line still stops")
+        self.assertEqual(
+            process.GetSelectedThread().GetFrameAtIndex(0).GetLineEntry().GetLine(),
+            patched_line,
+        )
+
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(other.GetHitCount(), 1, "another line of it stops too")
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_breakpoint_that_can_no_longer_be_hit_says_so(self):
+        """A breakpoint a redirect has stranded says that it cannot be hit.
+
+        A source-regex resolver searches the text of a compile unit's primary
+        file, which for the copy is the generated source the regex was never
+        written against, so it only ever finds the original body -- which the
+        redirect has stopped reaching. Set before the patch, such a breakpoint
+        makes the condition refuse. Set afterwards there is nothing left to
+        refuse, so the only thing that can be done about it is to say so: a
+        breakpoint that reads as resolved and never fires is the one outcome this
+        may not produce quietly.
+        """
+        target = self.setup()
+        fast = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        # Holds once per call and not on the first two, which is what puts the
+        # program inside the copy when it stops: the redirect is written at a stop
+        # taken during the first call, whose remaining passes run in the original
+        # body because that is where the thread already is.
+        fast.SetCondition("seed >= 2 && i == 1")
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+
+        stranded = target.BreakpointCreateBySourceRegex(
+            SECOND_CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        self.assertEqual(stranded.GetNumLocations(), 1, "it resolved")
+        process.Continue()
+
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(fast.GetHitCount(), 2, "the stop is the next hit of the condition")
+        self.expect(
+            "breakpoint list %d" % stranded.GetID(),
+            substrs=[
+                'Cannot be hit: each of its locations is in the body of "accumulate"'
+            ],
+        )
+        self.assertEqual(stranded.GetHitCount(), 0, "and indeed it was not hit")
+        # Not said of the breakpoint whose condition the redirect was written for,
+        # whose hits arrive from the copy's trap instead.
+        self.expect(
+            "breakpoint list %d" % fast.GetID(),
+            substrs=["Cannot be hit"],
+            matching=False,
+        )
+
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.expect(
+            "breakpoint list %d" % stranded.GetID(),
+            substrs=[
+                'Cannot be hit: each of its locations is in the body of "accumulate"'
+            ],
+        )
+        self.assertEqual(stranded.GetHitCount(), 0, "and indeed it was not hit")
+        # Not said of the breakpoint whose condition the redirect was written for,
+        # whose hits arrive from the copy's trap instead.
+        self.expect(
+            "breakpoint list %d" % fast.GetID(),
+            substrs=["Cannot be hit"],
+            matching=False,
+        )
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))

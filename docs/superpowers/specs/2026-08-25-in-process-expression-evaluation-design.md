@@ -490,6 +490,14 @@ than one that admits them.
 - **In-flight calls are not patched.** A call already on the stack runs the old
   body to completion. This matches the stated constraint that patching happens
   from outside the function.
+- **A breakpoint set after the patch survives only if it resolves by file and
+  line.** Measured: such a breakpoint gets a second location inside the copy and
+  fires there, on the patched line as well as on any other line of the body. A
+  source-regex resolver searches the compile unit's primary file, which for the
+  copy is the generated source, so it only ever finds the original body — which
+  the redirect has stopped reaching. Before the patch such a breakpoint makes the
+  condition refuse; afterwards there is nothing left to refuse, so it is reported
+  as unable to be hit instead, once, when it becomes true.
 - **arm64e is untested.** `br x16` needs no signing, but a BTI landing-pad
   requirement at the target would fault. The prototype restricts itself to
   arm64.

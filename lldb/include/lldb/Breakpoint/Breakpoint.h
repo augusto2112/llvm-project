@@ -471,6 +471,21 @@ public:
   /// only one thing to report.
   std::string GetWhyConditionIsNotCompiledIntoProcess() const;
 
+  /// Why no location of this breakpoint can be hit any longer, when every one of
+  /// them is in the body of a function whose entry the debugger has redirected to
+  /// a recompiled copy that none of them is in; empty when that is not so.
+  ///
+  /// A breakpoint in that state reads as resolved and never fires, which is the
+  /// one outcome compiling code into a process may not produce quietly.
+  llvm::StringRef GetWhyItCanNoLongerBeHit() const {
+    return m_cannot_be_hit_reason;
+  }
+
+  /// Records that it cannot, which is also what keeps it from being said twice.
+  void SetWhyItCanNoLongerBeHit(std::string reason) {
+    m_cannot_be_hit_reason = std::move(reason);
+  }
+
   /// Drop what this breakpoint remembers about having had its condition
   /// compiled into a process, so that a later process is patched afresh.
   void ForgetConditionsCompiledIntoProcess();
@@ -758,6 +773,11 @@ private:
   /// process. Cleared only when that process goes away, since the code it
   /// describes goes with it.
   bool m_condition_compiled_into_process = false;
+
+  /// Why this breakpoint can no longer be hit, said once. Kept here rather than
+  /// on a location because it is about all of them at once: a location that has
+  /// stopped being reachable is only a finding if no other one is.
+  std::string m_cannot_be_hit_reason;
 
   /// Number of times this breakpoint has been hit. This is kept separately
   /// from the locations hit counts, since locations can go away when their

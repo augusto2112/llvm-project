@@ -215,6 +215,10 @@ public:
   /// Whether the function entered at \p Entry has been redirected.
   bool IsPatched(lldb::addr_t Entry) const;
 
+  /// Whether any function has been redirected at all, which is what makes asking
+  /// about one worth the symbol lookup it costs.
+  bool HasPatches() const { return !m_functions.empty(); }
+
 private:
   struct PatchedFunction;
 

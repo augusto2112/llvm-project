@@ -496,6 +496,9 @@ void Breakpoint::CompileConditionsIntoProcess() {
 
 void Breakpoint::ForgetConditionsCompiledIntoProcess() {
   m_condition_compiled_into_process = false;
+  // Including that it could not be hit, which was a fact about one process's
+  // redirects: a fresh process starts out running the code it was built as.
+  m_cannot_be_hit_reason.clear();
   const size_t num_locations = m_locations.GetSize();
   for (size_t i = 0; i < num_locations; ++i)
     m_locations.GetByIndex(i)->ForgetConditionCompiledIntoProcess();
@@ -1050,6 +1053,15 @@ void Breakpoint::GetDescriptionForType(Stream *s, lldb::DescriptionLevel level,
     s->Format("Condition not compiled into the process: {0}\n", why);
   };
 
+  // Printed for the breakpoint rather than for any location, because what it says
+  // is that none of them can be hit: a breakpoint in that state reads as resolved
+  // and never fires, so the only trace of it is what says so here.
+  auto describe_cannot_be_hit = [&]() {
+    if (GetWhyItCanNoLongerBeHit().empty())
+      return;
+    s->Format("Cannot be hit: {0}\n", GetWhyItCanNoLongerBeHit());
+  };
+
   switch (level) {
   case lldb::eDescriptionLevelBrief:
   case lldb::eDescriptionLevelFull:
@@ -1068,8 +1080,10 @@ void Breakpoint::GetDescriptionForType(Stream *s, lldb::DescriptionLevel level,
 
     m_options.GetDescription(s, level);
 
-    if (level != lldb::eDescriptionLevelBrief)
+    if (level != lldb::eDescriptionLevelBrief) {
       describe_condition_not_compiled();
+      describe_cannot_be_hit();
+    }
 
     if (m_precondition_sp)
       m_precondition_sp->GetDescription(*s, level);
@@ -1113,6 +1127,7 @@ void Breakpoint::GetDescriptionForType(Stream *s, lldb::DescriptionLevel level,
     // s->Indent();
     m_options.GetDescription(s, level);
     describe_condition_not_compiled();
+    describe_cannot_be_hit();
     break;
 
   default:

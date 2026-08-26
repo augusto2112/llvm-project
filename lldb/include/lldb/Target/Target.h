@@ -2008,6 +2008,21 @@ public:
   /// read before it wraps is gone.
   void DrainPatchRecords();
 
+  /// Say of any breakpoint that a redirected function has left unable to fire
+  /// that it cannot fire, once.
+  ///
+  /// Redirecting a function's entry to a recompiled copy stops its original body
+  /// from being reached. A breakpoint located there survives that only if it also
+  /// has a location in the copy, which the copy's line table gives it when it
+  /// resolves by file and line and not otherwise. One that does not reads as
+  /// resolved and never fires again -- which is the outcome this whole facility
+  /// exists to avoid producing quietly.
+  ///
+  /// Called at every stop rather than when a function is patched: the breakpoint
+  /// may be set afterwards, and its locations are only all known once the module
+  /// describing the copy has been announced.
+  void ReportBreakpointsStrandedByRedirects();
+
   /// Whether the process is being held still, so that reading or writing its
   /// memory means anything.
   ///
