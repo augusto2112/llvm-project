@@ -663,7 +663,13 @@ bool Thread::SetupToStepOverBreakpointIfNeeded(RunDirection direction) {
       // If we stopped at a breakpoint instruction/BreakpointSite location
       // without hitting it, and we're still at that same address on
       // resuming, then we want to hit the BreakpointSite when we resume.
-      if (bp_site_sp && m_stopped_at_unexecuted_bp != thread_pc) {
+      // A trap the program contains has already been executed by the time the
+      // stop arrives -- the kernel leaves pc past it -- so the instruction at
+      // pc is an ordinary one. Stepping over it would skip a real instruction.
+      const bool is_program_trap =
+          bp_site_sp && bp_site_sp->GetType() == BreakpointSite::eProgramTrap;
+      if (bp_site_sp && !is_program_trap &&
+          m_stopped_at_unexecuted_bp != thread_pc) {
         // Note, don't assume there's a ThreadPlanStepOverBreakpoint, the
         // target may not require anything special to step over a breakpoint.
 

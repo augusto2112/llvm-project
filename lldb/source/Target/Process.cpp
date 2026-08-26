@@ -1807,6 +1807,33 @@ Process::CreateBreakpointSite(const BreakpointLocationSP &constituent,
   return LLDB_INVALID_BREAK_ID;
 }
 
+lldb::break_id_t
+Process::CreateProgramTrapSite(const BreakpointLocationSP &constituent,
+                               addr_t addr) {
+  if (addr == LLDB_INVALID_ADDRESS)
+    return LLDB_INVALID_BREAK_ID;
+
+  if (BreakpointSiteSP bp_site_sp =
+          m_breakpoint_site_list.FindByAddress(addr)) {
+    bp_site_sp->AddConstituent(constituent);
+    constituent->SetBreakpointSite(bp_site_sp);
+    return bp_site_sp->GetID();
+  }
+
+  BreakpointSiteSP bp_site_sp(
+      new BreakpointSite(constituent, addr, /*use_hardware=*/false));
+  bp_site_sp->SetType(BreakpointSite::eProgramTrap);
+
+  // Enabled without being installed. The trap is in the program's own text, so
+  // there is no action that would make it fire and none that would stop it;
+  // saying the site is enabled is what lets a stop at its address be
+  // attributed to it.
+  bp_site_sp->SetEnabled(true);
+
+  constituent->SetBreakpointSite(bp_site_sp);
+  return m_breakpoint_site_list.Add(bp_site_sp);
+}
+
 void Process::RemoveConstituentFromBreakpointSite(
     lldb::user_id_t constituent_id, lldb::user_id_t constituent_loc_id,
     BreakpointSiteSP &bp_site_sp) {

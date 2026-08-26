@@ -2350,6 +2350,16 @@ public:
   lldb::break_id_t CreateBreakpointSite(const lldb::BreakpointLocationSP &owner,
                                         bool use_hardware);
 
+  /// Registers a site at \p addr for a trap the program's own code contains.
+  ///
+  /// Unlike \ref CreateBreakpointSite, the address is given rather than taken
+  /// from \p constituent: the trap is wherever the compiler put it, which is
+  /// not where the location that owns it resolved. Nothing is written to the
+  /// inferior, because the trap is already there.
+  lldb::break_id_t
+  CreateProgramTrapSite(const lldb::BreakpointLocationSP &constituent,
+                        lldb::addr_t addr);
+
   Status DisableBreakpointSiteByID(lldb::user_id_t break_id);
 
   Status EnableBreakpointSiteByID(lldb::user_id_t break_id);

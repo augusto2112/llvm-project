@@ -40,9 +40,15 @@ public:
                // m_saved_opcode
                // and m_trap_opcode contain the saved and written opcode.
     eHardware, // Breakpoint site is set as a hardware breakpoint
-    eExternal  // Breakpoint site is managed by an external debug nub or
+    eExternal, // Breakpoint site is managed by an external debug nub or
                // debug interface where memory reads transparently will not
                // display any breakpoint opcodes.
+    eProgramTrap // The trap is already in the program's own code, so there is
+                 // nothing to write and nothing to restore. The site exists to
+                 // attribute a trap the program raised, not to cause one:
+                 // registering a site that wrote its own trap here would fire
+                 // on every pass over the address rather than only when the
+                 // program's trap executed.
   };
 
   typedef lldb::break_id_t SiteID;

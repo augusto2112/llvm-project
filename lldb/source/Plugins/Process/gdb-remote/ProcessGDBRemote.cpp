@@ -3535,6 +3535,10 @@ llvm::Error ProcessGDBRemote::DoDisableBreakpointSite(BreakpointSite &bp_site) {
                                             bp_op_size, GetInterruptTimeout()))
       return llvm::createStringError("unknown error");
     break;
+  case BreakpointSite::eProgramTrap:
+    // Nothing was ever sent to the remote for this site, so there is nothing
+    // to undo on that side.
+    break;
   }
   SetBreakpointSiteEnabled(bp_site, false);
   return llvm::Error::success();
@@ -6857,6 +6861,7 @@ GetStoppointType(BreakpointSite &site, bool insert,
   case BreakpointSite::eHardware:
     return eBreakpointHardware;
   case BreakpointSite::eSoftware:
+  case BreakpointSite::eProgramTrap:
     return std::nullopt;
   }
   llvm_unreachable("unhandled BreakpointSite type");
