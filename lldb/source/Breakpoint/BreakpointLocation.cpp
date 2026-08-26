@@ -337,6 +337,21 @@ BreakpointLocation::InstallInProcessCondition(llvm::StringRef condition_text) {
       GetTarget().GetFunctionPatchManager().Install(request);
   if (!site_id) {
     m_owner.m_condition_compiled_into_process = was_compiled_in;
+    // A refusal ordinarily costs speed and nothing else: the condition goes
+    // back to being evaluated at this location's own stop. Not when the
+    // function is already redirected to a copy compiled without this condition,
+    // since the original body this location sits in is no longer reached.
+    // Reporting only why the compile failed would understate that.
+    if (GetTarget().GetFunctionPatchManager().IsPatched(
+            request.FunctionEntry)) {
+      // Trimmed because a compiler diagnostic arrives with its own trailing
+      // newline, and what follows is the same sentence.
+      std::string why = llvm::toString(site_id.takeError());
+      return llvm::createStringError(
+          llvm::StringRef(why).rtrim() +
+          "; the function is already redirected to a copy compiled without it, "
+          "so this location is no longer reached");
+    }
     return site_id.takeError();
   }
 

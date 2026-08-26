@@ -1005,6 +1005,22 @@ void Breakpoint::GetDescriptionForType(Stream *s, lldb::DescriptionLevel level,
     GetFilterDescription(s);
   }
 
+  // Printed where the condition is, because it is about the condition: it says
+  // the condition is being evaluated at every stop after all, which is a cost
+  // the caller asked to be rid of and has no other way to learn it still pays.
+  // Offered at every level that describes the condition, since somebody looking
+  // into why one is slow is as likely to have asked for the verbose dump.
+  auto describe_condition_not_compiled = [&]() {
+    if (GetWhyConditionIsNotCompiledIntoProcess().empty())
+      return;
+    // A condition on the breakpoint has printed its own line just above; one
+    // set on a location has not.
+    if (!m_options.GetCondition())
+      s->EOL();
+    s->Format("Condition not compiled into the process: {0}\n",
+              GetWhyConditionIsNotCompiledIntoProcess());
+  };
+
   switch (level) {
   case lldb::eDescriptionLevelBrief:
   case lldb::eDescriptionLevelFull:
@@ -1023,19 +1039,8 @@ void Breakpoint::GetDescriptionForType(Stream *s, lldb::DescriptionLevel level,
 
     m_options.GetDescription(s, level);
 
-    // Printed where the condition is, because it is about the condition: it
-    // says the condition is being evaluated at every stop after all, which is a
-    // cost the caller asked to be rid of and has no other way to learn it still
-    // pays.
-    if (level != lldb::eDescriptionLevelBrief &&
-        !GetWhyConditionIsNotCompiledIntoProcess().empty()) {
-      // A condition on the breakpoint has printed its own line just above; one
-      // set on a location has not.
-      if (!m_options.GetCondition())
-        s->EOL();
-      s->Format("Condition not compiled into the process: {0}\n",
-                GetWhyConditionIsNotCompiledIntoProcess());
-    }
+    if (level != lldb::eDescriptionLevelBrief)
+      describe_condition_not_compiled();
 
     if (m_precondition_sp)
       m_precondition_sp->GetDescription(*s, level);
@@ -1078,6 +1083,7 @@ void Breakpoint::GetDescriptionForType(Stream *s, lldb::DescriptionLevel level,
     s->EOL();
     // s->Indent();
     m_options.GetDescription(s, level);
+    describe_condition_not_compiled();
     break;
 
   default:
