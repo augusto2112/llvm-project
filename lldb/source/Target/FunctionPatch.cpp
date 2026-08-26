@@ -865,11 +865,10 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
   // readable and there are none to read for a site that was refused.
   m_site_slots[SiteID] = *Slot;
 
-  // A site that records is the only kind whose values could still be sitting in
-  // the ring when the program leaves, so it is the only kind that needs the
-  // stop on the way out.
-  if (!Request.Captures.empty())
-    EnsureExitDrainBreakpoint();
+  // Every site's counters, like every record in the ring, are only readable
+  // while the process holding them is there, and a run whose condition never
+  // held takes no other stop at which they could be read.
+  EnsureExitDrainBreakpoint();
   return SiteID;
 }
 
@@ -1016,8 +1015,9 @@ void FunctionPatchManager::EnsureExitDrainBreakpoint() {
   // lost is the tail of a short run, and a caller told nothing about it would
   // read a run whose values never arrived as a run that recorded none.
   m_tail_drain_refusal =
-      "neither \"exit\" nor \"_exit\" resolved, so a run too short to fill the "
-      "record ring takes no stop at which its recorded values could be read";
+      "neither \"exit\" nor \"_exit\" resolved, so a run that takes no other "
+      "stop reaches its end with its recorded values and its hit counts still "
+      "inside the program";
   LLDB_LOG(GetLog(LLDBLog::Breakpoints), "{0}", m_tail_drain_refusal);
 }
 

@@ -179,9 +179,9 @@ public:
   /// empty when nothing stands in their way.
   ///
   /// A run that never fills the ring never raises a drain trap, so its records
-  /// are read at the stop the exit path takes. When no exit symbol could be
-  /// found there is no such stop, and a caller told nothing would read the
-  /// missing tail as a run that recorded nothing.
+  /// and its hit counts are read at the stop the exit path takes. When no exit
+  /// symbol could be found there is no such stop, and a caller told nothing
+  /// would read the missing tail as a run that recorded nothing.
   llvm::StringRef GetTailDrainRefusal() const { return m_tail_drain_refusal; }
 
   /// Why a capture of \p SiteID was dropped, one string per dropped capture.
@@ -241,8 +241,9 @@ private:
 
   /// Sets the internal breakpoint whose stop the tail of a run is read at.
   ///
-  /// A run too short to fill the ring never raises a drain trap, so without a
-  /// stop on the way out its records are never read at all.
+  /// A run that takes no stop of its own never reads what its patches recorded,
+  /// so without a stop on the way out neither its values nor its hit counts
+  /// leave the program at all.
   void EnsureExitDrainBreakpoint();
 
   /// Registers the site that attributes the trap the compiled copy contains at
