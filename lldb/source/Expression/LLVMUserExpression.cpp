@@ -61,6 +61,15 @@ LLVMUserExpression::~LLVMUserExpression() {
   }
 }
 
+lldb::ModuleSP LLVMUserExpression::TakeJITModule() {
+  if (!m_execution_unit_sp)
+    return nullptr;
+  lldb::ModuleSP jit_module_sp = m_execution_unit_sp->GetJITModule();
+  if (jit_module_sp)
+    m_jit_module_wp = jit_module_sp;
+  return jit_module_sp;
+}
+
 lldb::ExpressionResults
 LLVMUserExpression::DoExecute(DiagnosticManager &diagnostic_manager,
                               ExecutionContext &exe_ctx,

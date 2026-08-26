@@ -71,6 +71,19 @@ public:
   /// translation unit.
   const char *Text() override { return m_transformed_text.c_str(); }
 
+  /// Builds a module describing this expression's JIT'd code, so its symbols
+  /// and line table become visible to the rest of lldb.
+  ///
+  /// Nothing does this for a user expression otherwise, which is why code
+  /// compiled with debug info still reports no function and no line when
+  /// stopped inside it. Only useful for a top-level expression, whose code
+  /// outlives the evaluation that produced it.
+  ///
+  /// Takes rather than gets: the module is built on demand, so asking twice
+  /// would describe the same code twice. The caller owns the result, including
+  /// whether to append it to the target and whether to notify.
+  lldb::ModuleSP TakeJITModule();
+
 protected:
   lldb::ExpressionResults
   DoExecute(DiagnosticManager &diagnostic_manager, ExecutionContext &exe_ctx,
