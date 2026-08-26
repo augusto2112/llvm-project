@@ -25,6 +25,7 @@ lldb_private::EncodeEntryTrampoline(lldb::addr_t Target) {
   std::array<uint8_t, kEntryTrampolineSize> Bytes = {};
   llvm::support::endian::write32le(Bytes.data(), kLdrX16Literal);
   llvm::support::endian::write32le(Bytes.data() + 4, kBrX16);
-  llvm::support::endian::write64le(Bytes.data() + 8, Target);
+  llvm::support::endian::write64le(Bytes.data() + kEntryTrampolineTargetOffset,
+                                   Target);
   return Bytes;
 }

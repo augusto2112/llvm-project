@@ -22,6 +22,15 @@ namespace lldb_private {
 /// outside itself would need an allocation whose lifetime nothing owns.
 constexpr size_t kEntryTrampolineSize = 16;
 
+/// Where within the trampoline the address it branches to is held.
+///
+/// Re-pointing a trampoline already reachable in the program's text writes
+/// these eight bytes and nothing else. They are eight-byte aligned inside an
+/// aligned entry, so a thread running the two instructions above them reads
+/// either the old target or the new one and never a mixture of the two, which
+/// rewriting the whole trampoline could not promise.
+constexpr size_t kEntryTrampolineTargetOffset = 8;
+
 /// Encodes an arm64 branch to \p Target, to be written over a function's
 /// entry.
 ///

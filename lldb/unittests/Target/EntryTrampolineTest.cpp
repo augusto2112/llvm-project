@@ -30,6 +30,23 @@ TEST(EntryTrampolineTest, EmbedsTargetLittleEndian) {
   EXPECT_EQ(0, std::memcmp(Bytes.data() + 8, Expected, 8));
 }
 
+// Re-pointing a trampoline that is already installed writes only the literal,
+// at this offset, so the offset has to name the same bytes the whole encoding
+// puts the target in. The two disagreeing would leave the redirect branching to
+// half of one address and half of another.
+TEST(EntryTrampolineTest, TargetOffsetNamesTheLiteral) {
+  auto Before = EncodeEntryTrampoline(0x1111111111111111);
+  auto After = EncodeEntryTrampoline(0x2222222222222222);
+  EXPECT_EQ(0, std::memcmp(Before.data(), After.data(),
+                           kEntryTrampolineTargetOffset));
+  EXPECT_EQ(kEntryTrampolineSize - kEntryTrampolineTargetOffset,
+            sizeof(uint64_t));
+  auto Repointed = Before;
+  std::memcpy(Repointed.data() + kEntryTrampolineTargetOffset,
+              After.data() + kEntryTrampolineTargetOffset, sizeof(uint64_t));
+  EXPECT_EQ(After, Repointed);
+}
+
 // The literal is loaded from eight bytes past the `ldr`, so the two
 // instructions and the literal must total exactly the patched width. A
 // different size would mean the `ldr` reads the wrong bytes.
