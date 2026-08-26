@@ -9,6 +9,7 @@
 #include "lldb/Target/FunctionPatch.h"
 #include "gtest/gtest.h"
 #include <chrono>
+#include <cstring>
 
 using namespace lldb_private;
 using llvm::sys::TimePoint;
@@ -61,4 +62,46 @@ TEST(FunctionPatchTest, NamesEveryFailure) {
     EXPECT_FALSE(ToString(Reason).empty());
     EXPECT_NE("unknown", ToString(Reason));
   }
+}
+
+TEST(FunctionPatchTest, ReadsANarrowCaptureWithoutItsPadding) {
+  // A one-byte capture arrives zero-extended into eight. Reading all eight
+  // would report seven bytes of padding as part of the value.
+  auto Bytes = CaptureValueBytes(0xFF, 1, lldb::eByteOrderLittle);
+  ASSERT_EQ(1u, Bytes.size());
+  EXPECT_EQ(0xFF, Bytes[0]);
+}
+
+TEST(FunctionPatchTest, ReadsAFourByteCaptureWithoutTheHighHalf) {
+  auto Bytes = CaptureValueBytes(0x00000000AABBCCDD, 4, lldb::eByteOrderLittle);
+  ASSERT_EQ(4u, Bytes.size());
+  EXPECT_EQ(0xDD, Bytes[0]);
+  EXPECT_EQ(0xAA, Bytes[3]);
+}
+
+// A double reaches the record through a memcpy rather than a cast, so its bits
+// are the bits the program held. They have to survive the trip back too.
+TEST(FunctionPatchTest, RoundTripsADoublesBits) {
+  const double Original = -1.5e-300;
+  uint64_t Raw = 0;
+  std::memcpy(&Raw, &Original, sizeof Raw);
+  auto Bytes = CaptureValueBytes(Raw, sizeof(double), lldb::eByteOrderLittle);
+  ASSERT_EQ(8u, Bytes.size());
+  double Back = 0;
+  std::memcpy(&Back, Bytes.data(), sizeof Back);
+  EXPECT_EQ(Original, Back);
+}
+
+TEST(FunctionPatchTest, OrdersBytesForABigEndianReader) {
+  auto Bytes = CaptureValueBytes(0x0000000000ABCDEF, 4, lldb::eByteOrderBig);
+  ASSERT_EQ(4u, Bytes.size());
+  EXPECT_EQ(0x00, Bytes[0]);
+  EXPECT_EQ(0xEF, Bytes[3]);
+}
+
+// A type wider than the field cannot have fitted through it, so clamping is
+// what keeps a bad type from reading past the record.
+TEST(FunctionPatchTest, ClampsAWidthWiderThanTheField) {
+  auto Bytes = CaptureValueBytes(~0ull, 16, lldb::eByteOrderLittle);
+  EXPECT_EQ(8u, Bytes.size());
 }

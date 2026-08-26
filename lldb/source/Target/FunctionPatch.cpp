@@ -190,6 +190,20 @@ bool lldb_private::SourceSkewExceedsNoise(llvm::sys::TimePoint<> Source,
   return Source - Binary >= kMinSourceSkew;
 }
 
+llvm::SmallVector<uint8_t, 8>
+lldb_private::CaptureValueBytes(uint64_t Value, size_t ByteSize,
+                                lldb::ByteOrder Order) {
+  // Clamped rather than trusted. A type wider than the field cannot have fitted
+  // through it, so a width that says otherwise would only read past the record.
+  const size_t Width = std::min<size_t>(ByteSize, sizeof(uint64_t));
+  llvm::SmallVector<uint8_t, 8> Bytes(Width, 0);
+  for (size_t I = 0; I < Width; ++I) {
+    const uint8_t Byte = static_cast<uint8_t>(Value >> (8 * I));
+    Bytes[Order == lldb::eByteOrderBig ? Width - 1 - I : I] = Byte;
+  }
+  return Bytes;
+}
+
 namespace {
 
 /// Builds the error a refusal returns.

@@ -16,8 +16,11 @@
 #include "lldb/lldb-forward.h"
 #include "lldb/lldb-types.h"
 #include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/Chrono.h"
 #include "llvm/Support/Error.h"
+#include <cstddef>
+#include <cstdint>
 #include <memory>
 #include <optional>
 #include <string>
@@ -59,6 +62,15 @@ llvm::StringRef ToString(PatchFailure Reason);
 /// is a comparison that cannot be made rather than a finding.
 bool SourceSkewExceedsNoise(llvm::sys::TimePoint<> Source,
                             llvm::sys::TimePoint<> Binary);
+
+/// The bytes of a recorded capture, at the width its type says it has.
+///
+/// The inferior copies a value into a fixed eight-byte field, so a narrower
+/// scalar arrives zero-extended. Reading all eight bytes back would report the
+/// padding beside a `char` as part of its value, and a byte order that differed
+/// from the inferior's would reorder every multi-byte scalar.
+llvm::SmallVector<uint8_t, 8> CaptureValueBytes(uint64_t Value, size_t ByteSize,
+                                                lldb::ByteOrder Order);
 
 /// One injection to install, in the caller's terms.
 struct PatchRequest {
