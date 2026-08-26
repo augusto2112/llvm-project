@@ -9,6 +9,7 @@
 #include "lldb/Target/EntryTrampoline.h"
 #include "gtest/gtest.h"
 #include <cstring>
+#include <tuple>
 
 using namespace lldb_private;
 
@@ -39,8 +40,6 @@ TEST(EntryTrampolineTest, TargetOffsetNamesTheLiteral) {
   auto After = EncodeEntryTrampoline(0x2222222222222222);
   EXPECT_EQ(0, std::memcmp(Before.data(), After.data(),
                            kEntryTrampolineTargetOffset));
-  EXPECT_EQ(kEntryTrampolineSize - kEntryTrampolineTargetOffset,
-            sizeof(uint64_t));
   auto Repointed = Before;
   std::memcpy(Repointed.data() + kEntryTrampolineTargetOffset,
               After.data() + kEntryTrampolineTargetOffset, sizeof(uint64_t));
@@ -50,11 +49,20 @@ TEST(EntryTrampolineTest, TargetOffsetNamesTheLiteral) {
 // The literal is loaded from eight bytes past the `ldr`, so the two
 // instructions and the literal must total exactly the patched width. A
 // different size would mean the `ldr` reads the wrong bytes.
-TEST(EntryTrampolineTest, IsSixteenBytes) {
-  EXPECT_EQ(16u, kEntryTrampolineSize);
-  auto Bytes = EncodeEntryTrampoline(0);
-  EXPECT_EQ(16u, Bytes.size());
-}
+//
+// Asserted at compile time because that is when it is decided: the encoder
+// returns a fixed-size array, so a runtime check of its size can only agree with
+// its own type.
+static_assert(kEntryTrampolineSize == 16,
+              "two arm64 instructions and an eight-byte literal");
+static_assert(std::tuple_size_v<decltype(EncodeEntryTrampoline(0))> ==
+                  kEntryTrampolineSize,
+              "the encoder fills exactly the width that is written over the "
+              "function's entry");
+static_assert(kEntryTrampolineTargetOffset + sizeof(uint64_t) ==
+                  kEntryTrampolineSize,
+              "the literal is the last eight bytes, and the `ldr` reads it "
+              "eight bytes past itself");
 
 // A target of zero is still encoded rather than rejected: rejecting it here
 // would put the check in the wrong place, since the caller knows whether an
