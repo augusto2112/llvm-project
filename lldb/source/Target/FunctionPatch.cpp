@@ -7,28 +7,41 @@
 //===----------------------------------------------------------------------===//
 
 #include "lldb/Target/FunctionPatch.h"
+#include "lldb/Breakpoint/Breakpoint.h"
+#include "lldb/Breakpoint/BreakpointLocation.h"
 #include "lldb/Breakpoint/BreakpointSite.h"
 #include "lldb/Core/Address.h"
 #include "lldb/Core/AddressRange.h"
 #include "lldb/Core/Module.h"
+#include "lldb/Core/ModuleList.h"
 #include "lldb/Core/SourceManager.h"
+#include "lldb/Expression/DiagnosticManager.h"
+#include "lldb/Expression/LLVMUserExpression.h"
+#include "lldb/Expression/UserExpression.h"
 #include "lldb/Host/FileSystem.h"
+#include "lldb/Symbol/CompilerDeclContext.h"
 #include "lldb/Symbol/Function.h"
 #include "lldb/Symbol/SymbolContext.h"
 #include "lldb/Target/EntryTrampoline.h"
+#include "lldb/Target/ExecutionContext.h"
 #include "lldb/Target/Process.h"
 #include "lldb/Target/RegisterContext.h"
 #include "lldb/Target/Target.h"
 #include "lldb/Target/Thread.h"
 #include "lldb/Target/ThreadList.h"
+#include "lldb/Utility/ConstString.h"
 #include "lldb/Utility/State.h"
 #include "lldb/Utility/SupportFile.h"
+#include "llvm/Support/Casting.h"
 #include "llvm/Support/Endian.h"
 #include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <array>
 #include <chrono>
 #include <cstddef>
+#include <cstdint>
+#include <utility>
+#include <vector>
 
 using namespace lldb_private;
 
@@ -41,6 +54,16 @@ constexpr std::chrono::seconds kMinSourceSkew{2};
 /// Bytes each pool of site slots takes. One page holds enough slots that the
 /// ordinary handful of sites costs a single allocation.
 constexpr size_t kSlotPoolPageSize = 4096;
+
+/// Bytes one arm64 instruction occupies. Every one of them is this wide, which
+/// is what lets the copy's traps be found by reading its bytes at this stride
+/// rather than by driving a disassembler.
+constexpr lldb::addr_t kInstructionSize = 4;
+
+/// The arm64 encoding of `brk #0xf000`, which is what `__builtin_debugtrap()`
+/// in the generated source compiles to. Read back out of the compiled copy
+/// because nothing else records where the compiler put it.
+constexpr uint32_t kDebugTrapOpcode = 0xD43E0000;
 
 // The blocks written below are read by the generated source's own declarations
 // of them, so their shape is a contract rather than this file's choice of
@@ -67,6 +90,10 @@ struct FunctionPatchManager::PatchedFunction {
   /// under.
   lldb::addr_t Entry = LLDB_INVALID_ADDRESS;
 
+  /// The name the copy is found under in the module compiled from the copy's
+  /// source. The copy keeps the original's name, so this is the original's.
+  ConstString Name;
+
   /// The function's own source, taken once. Every recompile starts here rather
   /// than from the last copy, so injections never stack.
   FunctionBodyText Body;
@@ -78,6 +105,10 @@ struct FunctionPatchManager::PatchedFunction {
 
   llvm::DenseMap<uint32_t, PatchSiteCallback> Callbacks;
 
+  /// The internal breakpoints that carry each site's callback, one per trap the
+  /// copies compiled for that site contain.
+  llvm::DenseMap<uint32_t, std::vector<lldb::break_id_t>> SiteBreakpoints;
+
   /// The instructions the redirect replaced, so the entry can be put back.
   std::array<uint8_t, kEntryTrampolineSize> OriginalBytes = {};
 
@@ -87,9 +118,18 @@ struct FunctionPatchManager::PatchedFunction {
 
   lldb::ModuleSP CurrentModule;
 
+  /// The expression the current copy's code belongs to. Held because dropping
+  /// it takes \ref CurrentModule back out of the target's images, which is what
+  /// describes the copy to the rest of lldb.
+  lldb::UserExpressionSP CurrentExpression;
+
   /// Copies a later recompile replaced. Held rather than dropped, because a
   /// thread already inside one of them returns through it.
   std::vector<lldb::ModuleSP> RetiredModules;
+
+  /// The expressions those copies belong to, held for the same reason and for
+  /// as long.
+  std::vector<lldb::UserExpressionSP> RetiredExpressions;
 };
 
 } // namespace lldb_private
@@ -116,7 +156,7 @@ llvm::StringRef lldb_private::ToString(PatchFailure Reason) {
   case PatchFailure::ThreadInPatchRange:
     return "a thread is stopped inside the bytes the redirect would overwrite";
   case PatchFailure::BreakpointInPatchRange:
-    return "a breakpoint sits inside the bytes the redirect would overwrite";
+    return "a breakpoint already occupies bytes the patch needs";
   case PatchFailure::CompileFailed:
     return "the recompiled function did not compile";
   case PatchFailure::CaptureNotScalar:
@@ -185,6 +225,10 @@ struct FunctionFacts {
   FunctionBodyText Body;
   std::string SourcePath;
 
+  /// The function's own name, which the copy compiled from its source will
+  /// carry too, and is therefore how the copy is found.
+  ConstString Name;
+
   /// Bytes in the range the entry falls in, which is the range a redirect
   /// overwrites. Zero when no range could be found, which refuses the patch.
   lldb::addr_t EntrySize = 0;
@@ -220,6 +264,7 @@ llvm::Expected<FunctionFacts> ReadFunctionFacts(Target &Tgt,
                       "\" could not be read");
 
   FunctionFacts Facts;
+  Facts.Name = SC.function->GetName();
   // The path the source manager resolved to, not the one debug info recorded: a
   // remapped tree is the copy that was actually read, and the copy's `#line`
   // has to name a file whoever reads the report can open.
@@ -286,9 +331,179 @@ llvm::Error CheckPatchRangeIsFree(Process &Proc, lldb::addr_t Entry) {
       Overlaps = true;
   });
   if (Overlaps)
-    return Refuse(PatchFailure::BreakpointInPatchRange);
+    return Refuse(PatchFailure::BreakpointInPatchRange,
+                  "inside the bytes the redirect would overwrite");
 
   return llvm::Error::success();
+}
+
+/// One compiled copy of a patched function.
+struct CompiledCopy {
+  /// The expression the copy's code belongs to. Kept for as long as the copy is
+  /// reachable, because letting go of it takes \ref Module back out of the
+  /// target's images.
+  lldb::UserExpressionSP Expression;
+
+  /// What describes the copy to the rest of lldb: its line table is what makes
+  /// a stop inside the copy report a line of the original file.
+  lldb::ModuleSP Module;
+
+  lldb::addr_t Address = LLDB_INVALID_ADDRESS;
+
+  /// Bytes of code the copy occupies, which bounds the search for its traps.
+  lldb::addr_t Size = 0;
+};
+
+/// Compiles \p Source into the inferior and finds the definition of \p Name it
+/// contains.
+///
+/// Nothing is appended to the target and nothing is written over the original,
+/// so a failure here leaves the program running exactly the code it was.
+llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
+                                         ConstString Name) {
+  lldb::ProcessSP Proc = Tgt.GetProcessSP();
+  if (!Proc)
+    return Refuse(PatchFailure::NoProcess);
+
+  EvaluateExpressionOptions Options;
+  // The source is a definition rather than something to evaluate: nothing runs
+  // now, and the code it compiles to outlives the call that compiled it.
+  Options.SetExecutionPolicy(eExecutionPolicyTopLevel);
+  // Not optional. The `#line` directives in the generated source only reach a
+  // line table if one is emitted at all, and that line table is the whole
+  // reason a stop inside the copy can name the original file and line.
+  Options.SetGenerateDebugInfo(true);
+  Options.SetLanguage(lldb::eLanguageTypeC99);
+  Options.SetIgnoreBreakpoints(true);
+  Options.SetTryAllThreads(false);
+  Options.SetUnwindOnError(true);
+
+  // The process rather than a frame: a definition is parsed in no frame's
+  // scope, and offering one would only let whatever the program is stopped in
+  // take part in resolving the names in the body.
+  ExecutionContext ExeCtx;
+  Proc->CalculateExecutionContext(ExeCtx);
+
+  // Whatever this reports is not the verdict: asking for C is answered with a
+  // note that C++ was used instead, alongside a perfectly usable expression.
+  Status Unused;
+  lldb::UserExpressionSP Expr(Tgt.GetUserExpressionForLanguage(
+      Source, /*prefix=*/"", SourceLanguage(lldb::eLanguageTypeC99),
+      Expression::eResultTypeAny, Options, /*ctx_obj=*/nullptr, Unused));
+  if (!Expr)
+    return Refuse(PatchFailure::CompileFailed,
+                  llvm::Twine("no expression parser for the patched copy: ") +
+                      Unused.AsCString());
+
+  // Parsed rather than evaluated, and the parse is the whole of it: a top-level
+  // expression's code is JIT'd into the inferior by the parse and never run, so
+  // there is no result to wait for. Parsing here rather than through
+  // Target::EvaluateExpression is what keeps the expression object, since the
+  // module describing the copy lives exactly as long as it does.
+  DiagnosticManager Diagnostics;
+  if (!Expr->Parse(Diagnostics, ExeCtx, eExecutionPolicyTopLevel,
+                   /*keep_result_in_memory=*/true,
+                   /*generate_debug_info=*/true))
+    return Refuse(PatchFailure::CompileFailed, Diagnostics.GetString());
+
+  auto *JITExpr = llvm::dyn_cast<LLVMUserExpression>(Expr.get());
+  if (!JITExpr)
+    return Refuse(
+        PatchFailure::CompileFailed,
+        "the expression parser produced no JIT'd code to redirect to");
+
+  CompiledCopy Copy;
+  Copy.Expression = Expr;
+  Copy.Module = JITExpr->TakeJITModule();
+  if (!Copy.Module)
+    return Refuse(PatchFailure::CompileFailed,
+                  "nothing describes the compiled copy's code");
+
+  // Looked up inside the one module rather than by evaluating `&name`: the copy
+  // carries the original's name on purpose, so that a stop inside it names the
+  // function the caller knows -- which is also what makes a lookup across the
+  // whole target ambiguous the moment a copy exists.
+  SymbolContextList Matches;
+  ModuleFunctionSearchOptions SearchOptions;
+  Copy.Module->FindFunctions(Name, CompilerDeclContext(),
+                             lldb::eFunctionNameTypeFull |
+                                 lldb::eFunctionNameTypeBase,
+                             SearchOptions, Matches);
+  if (Matches.GetSize() != 1)
+    return Refuse(PatchFailure::CompileFailed,
+                  llvm::Twine("the compiled copy holds ") +
+                      llvm::Twine(Matches.GetSize()) + " definitions of \"" +
+                      Name.GetStringRef() + "\" where it should hold one");
+
+  Function *CopyFunction = Matches[0].function;
+  if (!CopyFunction)
+    return Refuse(PatchFailure::CompileFailed,
+                  llvm::Twine("the compiled copy's \"") + Name.GetStringRef() +
+                      "\" has no debug info describing it");
+
+  Copy.Address = CopyFunction->GetAddress().GetLoadAddress(&Tgt);
+  AddressRange Range;
+  if (Copy.Address == LLDB_INVALID_ADDRESS ||
+      !CopyFunction->GetRangeContainingLoadAddress(Copy.Address, Tgt, Range) ||
+      Range.GetByteSize() == 0)
+    return Refuse(PatchFailure::CompileFailed,
+                  "the compiled copy's code has no address in the process");
+  Copy.Size = Range.GetByteSize();
+  return Copy;
+}
+
+/// Every `brk #0xf000` in the \p Size bytes at \p Begin, in address order.
+///
+/// Read at instruction alignment rather than byte by byte. A stride of one
+/// could match the tail of one instruction against the head of the next and
+/// report a trap that is not in the program at all; every arm64 instruction is
+/// four bytes, so a stride of four sees each of them exactly once.
+llvm::Expected<std::vector<lldb::addr_t>>
+FindDebugTraps(Process &Proc, lldb::addr_t Begin, lldb::addr_t Size) {
+  std::vector<uint8_t> Code(Size);
+  Status ReadError;
+  if (Proc.ReadMemory(Begin, Code.data(), Code.size(), ReadError) !=
+      Code.size())
+    return Refuse(PatchFailure::InferiorAccessFailed,
+                  llvm::Twine("the compiled copy could not be read back: ") +
+                      ReadError.AsCString());
+
+  std::vector<lldb::addr_t> Traps;
+  for (size_t Offset = 0; Offset + kInstructionSize <= Code.size();
+       Offset += kInstructionSize)
+    if (llvm::support::endian::read32le(Code.data() + Offset) ==
+        kDebugTrapOpcode)
+      Traps.push_back(Begin + Offset);
+  return Traps;
+}
+
+/// The injections in the order the builder emits their code.
+///
+/// By line, and stably so that two on one line keep the order they were
+/// installed in. This has to agree with \ref BuildPatchSource, because the
+/// traps read back out of the copy are matched to injections by position: an
+/// order that disagreed would credit one site with another's hits.
+std::vector<const PatchInjection *>
+InEmissionOrder(llvm::ArrayRef<PatchInjection> Injections) {
+  std::vector<const PatchInjection *> Ordered;
+  Ordered.reserve(Injections.size());
+  for (const PatchInjection &Inj : Injections)
+    Ordered.push_back(&Inj);
+  std::stable_sort(Ordered.begin(), Ordered.end(),
+                   [](const PatchInjection *A, const PatchInjection *B) {
+                     return A->Line < B->Line;
+                   });
+  return Ordered;
+}
+
+/// How many traps the builder emits for \p Inj.
+///
+/// A stop trap only when the site wants a stop, and a drain trap only when it
+/// records something. So the count is known before the copy is read, which is
+/// what makes a copy holding a different number a disagreement rather than a
+/// discovery.
+size_t TrapsEmittedFor(const PatchInjection &Inj) {
+  return (Inj.WantStop ? 1 : 0) + (Inj.Captures.empty() ? 0 : 1);
 }
 
 } // namespace
@@ -329,6 +544,7 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
 
     Fresh = std::make_unique<PatchedFunction>();
     Fresh->Entry = Entry;
+    Fresh->Name = Facts->Name;
     Fresh->Body = std::move(Facts->Body);
     Fresh->SourcePath = std::move(Facts->SourcePath);
 
@@ -500,6 +716,189 @@ llvm::Expected<lldb::addr_t> FunctionPatchManager::AllocateSiteSlot() {
 }
 
 llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
-  // Compiling the copy and pointing the entry at it is not wired up yet.
+  Process *Proc = m_target.GetProcessSP().get();
+  if (!Proc)
+    return Refuse(PatchFailure::NoProcess);
+
+  const uint32_t FirstLine = Fn.Body.FirstLine;
+  const size_t LineCount = Fn.Body.LineStarts.size();
+  const uint32_t LastLine =
+      LineCount ? FirstLine + static_cast<uint32_t>(LineCount) - 1 : FirstLine;
+
+  // The builder emits nothing for a line outside the body, since the
+  // declaration line and the closing brace are not statements. Saying so is
+  // better than installing a site whose code was never emitted and which could
+  // therefore never fire.
+  for (const PatchInjection &Inj : Fn.Injections)
+    if (Inj.Line <= FirstLine || Inj.Line >= LastLine)
+      return Refuse(PatchFailure::Unsupported,
+                    llvm::Twine("line ") + llvm::Twine(Inj.Line) +
+                        " holds no statement of the function's body, which "
+                        "spans lines " +
+                        llvm::Twine(FirstLine) + " to " +
+                        llvm::Twine(LastLine));
+
+  // Built from the original body every time rather than from the last copy,
+  // which is what makes a second injection compose with the first instead of
+  // patching a patch.
+  PatchSourceRequest Request;
+  Request.Body = Fn.Body;
+  Request.SourcePath = Fn.SourcePath;
+  Request.RingAddress = m_ring_address;
+  Request.RingCapacity = kDefaultRingCapacity;
+  Request.Injections = Fn.Injections;
+
+  llvm::Expected<CompiledCopy> Copy =
+      CompileCopy(m_target, BuildPatchSource(Request), Fn.Name);
+  if (!Copy)
+    return Copy.takeError();
+
+  llvm::Expected<std::vector<lldb::addr_t>> Traps =
+      FindDebugTraps(*Proc, Copy->Address, Copy->Size);
+  if (!Traps)
+    return Traps.takeError();
+
+  const std::vector<const PatchInjection *> Ordered =
+      InEmissionOrder(Fn.Injections);
+  size_t TrapsExpected = 0;
+  for (const PatchInjection *Inj : Ordered)
+    TrapsExpected += TrapsEmittedFor(*Inj);
+  if (Traps->size() != TrapsExpected)
+    // Not a refusal. The source this read back is the source this built, so a
+    // disagreement is between two halves of one implementation rather than
+    // something about the program being patched -- and assigning the traps
+    // anyway would credit hits to whichever site the miscount shifted them
+    // onto.
+    return llvm::createStringError(
+        llvm::inconvertibleErrorCode(),
+        "the compiled copy holds %zu traps where its source emitted %zu",
+        Traps->size(), TrapsExpected);
+
+  // Registered before the module is announced, so that a `file:line` breakpoint
+  // re-resolving into the copy finds these addresses already claimed by sites
+  // that install nothing. Announcing first would let such a breakpoint write
+  // its own trap over the instruction after ours, which would then stop on
+  // every pass rather than only when the program's own trap executed.
+  std::vector<std::pair<uint32_t, lldb::break_id_t>> Registered;
+  auto DropRegistered = [&]() {
+    for (const auto &[SiteID, BreakID] : Registered)
+      m_target.RemoveBreakpointByID(BreakID);
+  };
+  size_t Next = 0;
+  for (const PatchInjection *Inj : Ordered) {
+    const PatchSiteCallback Callback = Fn.Callbacks.lookup(Inj->SiteID);
+    // Within one injection the stop trap precedes the drain trap, which is the
+    // order the builder writes them in. Only the stop trap carries the site's
+    // callback: a drain is the debugger's own errand rather than a hit the
+    // caller asked to hear about.
+    if (Inj->WantStop) {
+      llvm::Expected<lldb::break_id_t> BreakID =
+          RegisterTrapSite((*Traps)[Next++], Callback.OnTrap, Callback.Baton);
+      if (!BreakID) {
+        DropRegistered();
+        return BreakID.takeError();
+      }
+      Registered.emplace_back(Inj->SiteID, *BreakID);
+    }
+    if (!Inj->Captures.empty()) {
+      llvm::Expected<lldb::break_id_t> BreakID =
+          RegisterTrapSite((*Traps)[Next++], nullptr, nullptr);
+      if (!BreakID) {
+        DropRegistered();
+        return BreakID.takeError();
+      }
+      Registered.emplace_back(Inj->SiteID, *BreakID);
+    }
+  }
+
+  // Notified, not merely appended. Notification is what makes lldb re-resolve
+  // `file:line` breakpoints into the copy, which is how a stop inside the copy
+  // reports the file and line of the original rather than nothing at all. The
+  // parse appended the module already, having generated debug info, but said
+  // nothing about it.
+  ModuleList JustTheCopy;
+  JustTheCopy.Append(Copy->Module);
+  m_target.GetImages().AppendIfNeeded(Copy->Module, /*notify=*/false);
+  m_target.ModulesDidLoad(JustTheCopy);
+
+  // Written last, and only now that the copy's address is known: until this
+  // lands the copy is unreachable, so every refusal above leaves the program
+  // running the code it was already running.
+  const std::array<uint8_t, kEntryTrampolineSize> Trampoline =
+      EncodeEntryTrampoline(Copy->Address);
+  Status WriteError;
+  if (Proc->WriteMemory(Fn.Entry, Trampoline.data(), Trampoline.size(),
+                        WriteError) != Trampoline.size()) {
+    DropRegistered();
+    return Refuse(PatchFailure::InferiorAccessFailed,
+                  llvm::Twine("the redirect could not be written over the "
+                              "function's entry: ") +
+                      WriteError.AsCString());
+  }
+
+  for (const auto &[SiteID, BreakID] : Registered)
+    Fn.SiteBreakpoints[SiteID].push_back(BreakID);
+
+  // The copy this one replaces is retired rather than freed: a thread already
+  // inside it returns through it, and the expression that owns its code is what
+  // keeps the module describing it in the target's images.
+  if (Fn.CurrentModule)
+    Fn.RetiredModules.push_back(std::move(Fn.CurrentModule));
+  if (Fn.CurrentExpression)
+    Fn.RetiredExpressions.push_back(std::move(Fn.CurrentExpression));
+  Fn.CurrentModule = std::move(Copy->Module);
+  Fn.CurrentExpression = std::move(Copy->Expression);
+  Fn.CopyAddress = Copy->Address;
   return llvm::Error::success();
+}
+
+llvm::Expected<lldb::break_id_t> FunctionPatchManager::RegisterTrapSite(
+    lldb::addr_t Trap, BreakpointHitCallback OnTrap, void *Baton) {
+  Process *Proc = m_target.GetProcessSP().get();
+  if (!Proc)
+    return Refuse(PatchFailure::NoProcess);
+
+  // The site sits past the trap rather than on it, because that is where the
+  // stop arrives: `brk #0xf000` leaves pc after the trap, where `brk #0` leaves
+  // it on the trap.
+  Address SiteAddress;
+  if (!m_target.ResolveLoadAddress(Trap + kInstructionSize, SiteAddress))
+    return Refuse(PatchFailure::CompileFailed,
+                  "the compiled copy's trap is in no loaded section");
+
+  // A site is attributed through a breakpoint location, and the caller passed a
+  // callback rather than a location, so each trap is given an internal
+  // breakpoint of its own to carry that callback.
+  lldb::BreakpointSP Bp = m_target.CreateBreakpoint(SiteAddress,
+                                                    /*internal=*/true,
+                                                    /*hardware=*/false);
+  lldb::BreakpointLocationSP Loc = Bp ? Bp->GetLocationAtIndex(0) : nullptr;
+  if (!Loc) {
+    if (Bp)
+      m_target.RemoveBreakpointByID(Bp->GetID());
+    return Refuse(PatchFailure::CompileFailed,
+                  "no breakpoint location could be made for the copy's trap");
+  }
+  Bp->SetBreakpointKind("in-process-condition");
+
+  // Resolving that location installed a trap of its own here, which would fire
+  // on every pass rather than only when the program's trap executed -- pc
+  // reaches this address whenever a guard branched past the trap, too. Taking
+  // it down leaves the instruction the compiler put here intact, and the
+  // program-trap site that replaces it installs nothing at all.
+  Bp->SetEnabled(false);
+  if (Proc->CreateProgramTrapSite(Loc, SiteAddress.GetLoadAddress(&m_target)) ==
+      LLDB_INVALID_BREAK_ID) {
+    m_target.RemoveBreakpointByID(Bp->GetID());
+    return Refuse(PatchFailure::BreakpointInPatchRange,
+                  "at the address the copy's trap reports at");
+  }
+  // Enabled again with the site already in place, so nothing is written: an
+  // enabled location is what lets the stop be attributed and the callback run.
+  Bp->SetEnabled(true);
+
+  if (OnTrap)
+    Bp->SetCallback(OnTrap, Baton, /*is_synchronous=*/false);
+
+  return Bp->GetID();
 }

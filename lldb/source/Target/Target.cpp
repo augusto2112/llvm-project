@@ -49,6 +49,7 @@
 #include "lldb/Symbol/Symbol.h"
 #include "lldb/Target/ABI.h"
 #include "lldb/Target/ExecutionContext.h"
+#include "lldb/Target/FunctionPatch.h"
 #include "lldb/Target/Language.h"
 #include "lldb/Target/LanguageRuntime.h"
 #include "lldb/Target/Process.h"
@@ -3158,6 +3159,12 @@ SourceManager &Target::GetSourceManager() {
   if (!m_source_manager_up)
     m_source_manager_up = std::make_unique<SourceManager>(shared_from_this());
   return *m_source_manager_up;
+}
+
+FunctionPatchManager &Target::GetFunctionPatchManager() {
+  if (!m_function_patch_manager_up)
+    m_function_patch_manager_up = std::make_unique<FunctionPatchManager>(*this);
+  return *m_function_patch_manager_up;
 }
 
 Target::StopHookSP Target::CreateStopHook(StopHook::StopHookKind kind,

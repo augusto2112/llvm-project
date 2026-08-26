@@ -121,6 +121,13 @@ private:
   /// result.
   llvm::Error Recompile(PatchedFunction &Fn);
 
+  /// Registers the site that attributes the trap the compiled copy contains at
+  /// \p Trap, and gives it an internal breakpoint of its own to carry \p
+  /// OnTrap. Returns that breakpoint's id.
+  llvm::Expected<lldb::break_id_t>
+  RegisterTrapSite(lldb::addr_t Trap, BreakpointHitCallback OnTrap,
+                   void *Baton);
+
   Target &m_target;
   lldb::addr_t m_ring_address = LLDB_INVALID_ADDRESS;
   lldb::addr_t m_slot_pool = LLDB_INVALID_ADDRESS;

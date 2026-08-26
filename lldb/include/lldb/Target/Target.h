@@ -50,6 +50,8 @@
 
 namespace lldb_private {
 
+class FunctionPatchManager;
+
 OptionEnumValues GetDynamicValueTypes();
 
 enum InlineStrategy {
@@ -1985,6 +1987,10 @@ public:
 
   SourceManager &GetSourceManager();
 
+  /// The functions this target has had patched so that tracepoint work happens
+  /// inside the process.
+  FunctionPatchManager &GetFunctionPatchManager();
+
   // Methods.
   lldb::SearchFilterSP
   GetSearchFilterForModule(const FileSpec *containingModule);
@@ -2135,6 +2141,10 @@ protected:
   REPLMap m_repl_map;
 
   lldb::SourceManagerUP m_source_manager_up;
+
+  /// Created on first use, since a target that patches nothing should pay for
+  /// nothing.
+  std::unique_ptr<FunctionPatchManager> m_function_patch_manager_up;
 
   typedef std::map<lldb::user_id_t, StopHookSP> StopHookCollection;
   StopHookCollection m_stop_hooks;
