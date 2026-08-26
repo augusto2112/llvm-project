@@ -494,6 +494,14 @@ void Breakpoint::CompileConditionsIntoProcess() {
     loc_sp->CompileConditionIntoProcess();
 }
 
+void Breakpoint::ForgetConditionsCompiledIntoProcess() {
+  m_condition_compiled_into_process = false;
+  m_condition_not_compiled_reason.clear();
+  const size_t num_locations = m_locations.GetSize();
+  for (size_t i = 0; i < num_locations; ++i)
+    m_locations.GetByIndex(i)->ForgetConditionCompiledIntoProcess();
+}
+
 const StopCondition &Breakpoint::GetCondition() const {
   return m_options.GetCondition();
 }

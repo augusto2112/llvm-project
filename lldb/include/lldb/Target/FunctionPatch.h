@@ -106,6 +106,14 @@ public:
   /// Drops one injection and recompiles what remains.
   llvm::Error Remove(uint32_t SiteID);
 
+  /// Forgets every patch, for a process that is gone: the copies, the redirects
+  /// into them, and the inferior addresses they were compiled around.
+  ///
+  /// Not the tag sequence. The declarations a compile leaves behind belong to
+  /// the target rather than to the process, so a tag reused after a relaunch
+  /// would redefine the last run's.
+  void ForgetProcess();
+
   /// Opens or closes a gated site.
   void SetGate(uint32_t SiteID, bool Open);
 

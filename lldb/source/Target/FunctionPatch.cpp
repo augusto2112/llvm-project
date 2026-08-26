@@ -637,6 +637,18 @@ void FunctionPatchManager::SetGate(uint32_t SiteID, bool Open) {
   // not yet implemented
 }
 
+void FunctionPatchManager::ForgetProcess() {
+  // Dropping a patched function releases the expression its copy's code belongs
+  // to, which is what takes the module describing that copy back out of the
+  // target's images.
+  m_functions.clear();
+  m_site_to_function.clear();
+  m_ring_address = LLDB_INVALID_ADDRESS;
+  m_slot_pool = LLDB_INVALID_ADDRESS;
+  m_slots_used_in_page = 0;
+  m_next_site_id = 1;
+}
+
 bool FunctionPatchManager::IsPatched(lldb::addr_t Entry) const {
   return m_functions.find(Entry) != m_functions.end();
 }

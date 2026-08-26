@@ -292,6 +292,11 @@ void BreakpointLocation::CompileConditionIntoProcess() {
            m_owner.m_condition_not_compiled_reason);
 }
 
+void BreakpointLocation::ForgetConditionCompiledIntoProcess() {
+  m_in_process_site_id.reset();
+  m_in_process_condition_attempted = false;
+}
+
 llvm::Error
 BreakpointLocation::InstallInProcessCondition(llvm::StringRef condition_text) {
   if (IsFacade())

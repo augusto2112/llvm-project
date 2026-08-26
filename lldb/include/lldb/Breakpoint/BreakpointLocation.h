@@ -370,6 +370,10 @@ private:
   /// registers a site for the trap the copy now contains.
   llvm::Error InstallInProcessCondition(llvm::StringRef condition_text);
 
+  /// Drop what this location remembers about having compiled its condition into
+  /// a process, so that a later process is patched afresh.
+  void ForgetConditionCompiledIntoProcess();
+
   /// Credits this location with a hit the compiled-in condition trapped for.
   ///
   /// The trap fires in code the debugger compiled, so the stop is attributed to

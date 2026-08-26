@@ -457,6 +457,10 @@ public:
     return m_condition_not_compiled_reason;
   }
 
+  /// Drop what this breakpoint remembers about having had its condition
+  /// compiled into a process, so that a later process is patched afresh.
+  void ForgetConditionsCompiledIntoProcess();
+
   /// Return the breakpoint condition.
   const StopCondition &GetCondition() const;
 
@@ -737,7 +741,8 @@ private:
   bool m_resolve_indirect_symbols;
 
   /// Set once a location has compiled this breakpoint's condition into the
-  /// process, and never cleared: compiled-in code stays in the program.
+  /// process. Cleared only when that process goes away, since the code it
+  /// describes goes with it.
   bool m_condition_compiled_into_process = false;
 
   /// The last reason a location gave for not compiling this breakpoint's

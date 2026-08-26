@@ -287,8 +287,13 @@ void Target::CleanupProcess() {
   llvm::consumeError(m_process_sp->FlushDelayedBreakpoints());
   // A patch is code in a process and a redirect into it. Neither outlives the
   // process, so what described them is dropped with it rather than kept for a
-  // process that will not be running any of it.
-  m_function_patch_manager_up.reset();
+  // process that will not be running any of it -- including each breakpoint's
+  // record of having had its condition compiled in, which would otherwise leave
+  // the next process believing it already had a patch it does not have.
+  if (m_function_patch_manager_up)
+    m_function_patch_manager_up->ForgetProcess();
+  for (const BreakpointSP &bp_sp : m_breakpoint_list.Breakpoints())
+    bp_sp->ForgetConditionsCompiledIntoProcess();
   // Disable watchpoints just on the debugger side.
   std::unique_lock<std::recursive_mutex> lock;
   this->GetWatchpointList().GetListMutex(lock);
