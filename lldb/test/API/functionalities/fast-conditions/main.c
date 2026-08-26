@@ -38,7 +38,7 @@ int countdown(int n) {
   return rest + n;
 }
 
-int main(void) {
+int main(int argc, char **argv) {
   long sum = 0;
   for (int k = 0; k < 100000; k++)
     sum += accumulate(k, 3);
@@ -47,5 +47,14 @@ int main(void) {
   for (int k = 0; k < 200; k++)
     sum += countdown(k % 8);
   printf("sum=%ld\n", sum);
+  // Somewhere a test can read once the debugger has let go of this process,
+  // which is how a run that finished is told from one a trap killed.
+  if (argc > 1) {
+    FILE *done = fopen(argv[1], "w");
+    if (done) {
+      fprintf(done, "sum=%ld\n", sum);
+      fclose(done);
+    }
+  }
   return 0;
 }

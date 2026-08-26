@@ -213,6 +213,25 @@ public:
   /// be reachable on its own too.
   llvm::ArrayRef<std::string> GetDroppedCaptures(uint32_t SiteID) const;
 
+  /// Takes what has been compiled into the program back out of it, as far as a
+  /// program that is about to run unwatched allows.
+  ///
+  /// For a process the debugger is about to detach from. A trap the program's own
+  /// code contains raises a signal with nothing there to answer it, which kills
+  /// the program -- measured: an inferior detached from with a compiled-in
+  /// condition still in it died of SIGTRAP on the next hit that condition held
+  /// for. So every trap in every copy is written over with a `nop`, and each
+  /// redirected entry is put back so that the program runs the code it was built
+  /// as.
+  ///
+  /// Returns the functions whose entry could not be put back, which is any whose
+  /// trampoline a thread is parked inside. Those go on running a copy -- one with
+  /// no traps left in it, so the program survives -- and that is worth saying,
+  /// since the copy is compiled without optimization and reads a control block
+  /// the debugger allocated.
+  llvm::Expected<std::vector<ConstString>> WithdrawFromProcess();
+
+  ///
   /// Forgets every patch, for a process that is gone: the copies, the redirects
   /// into them, and the inferior addresses they were compiled around.
   ///

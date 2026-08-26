@@ -81,6 +81,11 @@ constexpr lldb::addr_t kInstructionSize = 4;
 /// because nothing else records where the compiler put it.
 constexpr uint32_t kDebugTrapOpcode = 0xD43E0000;
 
+/// The arm64 encoding of `nop`, which is what a trap becomes when the debugger
+/// stops watching the program: the guard around it still runs, and falls through
+/// to the code that followed the trap.
+constexpr uint32_t kNopOpcode = 0xD503201F;
+
 /// Records the debugger holds for a caller that has not asked for them yet.
 ///
 /// Bounded for the same reason the ring in the inferior is: a hot site whose
@@ -1012,6 +1017,80 @@ void FunctionPatchManager::SetGate(uint32_t SiteID, bool Open) {
   LLDB_LOG(GetLog(LLDBLog::Breakpoints),
            "site {0}'s gate could not be {1}: {2}", SiteID,
            Open ? "opened" : "closed", WriteError.AsCString());
+}
+
+llvm::Expected<std::vector<ConstString>>
+FunctionPatchManager::WithdrawFromProcess() {
+  std::vector<ConstString> StillRedirected;
+  if (m_functions.empty())
+    return StillRedirected;
+
+  Process *Proc = m_target.GetProcessSP().get();
+  if (!Proc)
+    return Refuse(PatchFailure::NoProcess);
+
+  std::string Failures;
+  auto Note = [&Failures](const llvm::Twine &What) {
+    if (!Failures.empty())
+      Failures += "; ";
+    Failures += What.str();
+  };
+
+  for (const auto &[Entry, Fn] : m_functions) {
+    // The traps first. Until they are gone the copy cannot be run unwatched, and
+    // a thread parked inside one is exactly the case the entry cannot be put
+    // back for -- so the order matters for the only function where the two
+    // outcomes differ.
+    //
+    // Every copy, not only the current one: a thread inside a retired copy runs
+    // that copy's traps too.
+    for (const auto *Sites : {&Fn->SiteBreakpoints, &Fn->RetiredSites}) {
+      for (const auto &[SiteID, BreakIDs] : *Sites) {
+        for (lldb::break_id_t BreakID : BreakIDs) {
+          lldb::BreakpointSP Bp = m_target.GetBreakpointByID(BreakID);
+          lldb::BreakpointLocationSP Loc =
+              Bp ? Bp->GetLocationAtIndex(0) : nullptr;
+          if (!Loc)
+            continue;
+          const lldb::addr_t Trap = Loc->GetLoadAddress();
+          if (Trap == LLDB_INVALID_ADDRESS)
+            continue;
+
+          uint8_t Nop[kInstructionSize] = {};
+          llvm::support::endian::write32le(Nop, kNopOpcode);
+          Status WriteError;
+          if (Proc->WriteMemory(Trap, Nop, sizeof(Nop), WriteError) !=
+              sizeof(Nop))
+            Note(llvm::Twine("a trap in the copy of \"") +
+                 Fn->Name.GetStringRef() + "\" could not be written over: " +
+                 WriteError.AsCString());
+        }
+      }
+    }
+
+    // And then the entry, so that the next call runs the code the program was
+    // built as rather than a copy of it. All sixteen bytes, which is why it is
+    // refused for a thread parked in them: a thread resuming mid-trampoline
+    // would branch through half of one redirect and half of another.
+    if (llvm::Error Err = CheckPatchRangeIsFree(*Proc, Entry)) {
+      llvm::consumeError(std::move(Err));
+      StillRedirected.push_back(Fn->Name);
+      continue;
+    }
+
+    Status WriteError;
+    if (Proc->WriteMemory(Entry, Fn->OriginalBytes.data(),
+                          Fn->OriginalBytes.size(),
+                          WriteError) != Fn->OriginalBytes.size()) {
+      Note(llvm::Twine("the entry of \"") + Fn->Name.GetStringRef() +
+           "\" could not be put back: " + WriteError.AsCString());
+      StillRedirected.push_back(Fn->Name);
+    }
+  }
+
+  if (!Failures.empty())
+    return Refuse(PatchFailure::InferiorAccessFailed, Failures);
+  return StillRedirected;
 }
 
 void FunctionPatchManager::ForgetProcess() {

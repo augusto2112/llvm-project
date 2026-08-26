@@ -3226,6 +3226,50 @@ void Target::DrainPatchRecords() {
                    "recorded values could not be read at this stop: {0}");
 }
 
+void Target::WithdrawPatchesFromProcess() {
+  if (!m_function_patch_manager_up ||
+      !m_function_patch_manager_up->HasPatches())
+    return;
+
+  llvm::Expected<std::vector<ConstString>> still_redirected =
+      m_function_patch_manager_up->WithdrawFromProcess();
+  if (!still_redirected) {
+    // Warned rather than logged: what the program does next is not what it was
+    // built to do, and the only moment anyone can be told is this one.
+    Debugger::ReportWarning(
+        llvm::formatv("code the debugger compiled into the process could not be "
+                      "taken back out of it, so the program may raise a trap "
+                      "with nothing there to answer it: {0}",
+                      llvm::toString(still_redirected.takeError()))
+            .str(),
+        GetDebugger().GetID());
+    return;
+  }
+
+  if (still_redirected->empty())
+    return;
+
+  std::string names;
+  for (ConstString name : *still_redirected) {
+    if (!names.empty())
+      names += ", ";
+    names += name.GetStringRef();
+  }
+  // A thread was parked in the bytes the redirect occupies, so putting the
+  // original entry back would have left it branching through half of one and
+  // half of the other. The copy it goes on running has had its traps taken out,
+  // so the program survives; what it does not do is run the code it was built
+  // as.
+  Debugger::ReportWarning(
+      llvm::formatv("{0} left running a recompiled copy of itself, because a "
+                    "thread is parked in the bytes that redirect to it. The copy "
+                    "carries no traps, but it is compiled without optimization "
+                    "and reads memory the debugger allocated.",
+                    names)
+          .str(),
+      GetDebugger().GetID());
+}
+
 void Target::ReportBreakpointsStrandedByRedirects() {
   // Asked only of a target that has redirected something, which is what makes
   // the symbol lookup below worth doing.

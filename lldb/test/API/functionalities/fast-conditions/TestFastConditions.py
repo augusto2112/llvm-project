@@ -4,6 +4,7 @@ not hold costs no stop.
 """
 
 import os
+import time
 
 import lldb
 from lldbsuite.test.decorators import *
@@ -751,6 +752,50 @@ class FastConditionsTestCase(TestBase):
             6,
         )
         self.assertEqual(bp.GetHitCount(), 2)
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_detaching_leaves_the_program_able_to_run(self):
+        """Detaching takes the compiled-in traps back out of the program.
+
+        A trap in the program's own code raises a signal, and once the debugger
+        has detached there is nothing there to answer it: the program dies.
+        Measured before this was fixed -- the inferior took SIGTRAP on the first
+        hit whose condition held after the detach and never reached its exit.
+
+        So the traps are written over with `nop` and each redirected entry is put
+        back on the way out of a detach. The condition here holds once per call
+        with a hundred thousand calls to go, so a trap left behind is a program
+        that dies immediately rather than one that might get away with it.
+        """
+        target = self.setup()
+        bp = target.BreakpointCreateBySourceRegex(
+            CONDITION_LINE, lldb.SBFileSpec("main.c")
+        )
+        bp.SetCondition("i == 1")
+
+        finished = self.getBuildArtifact("finished.txt")
+        if os.path.exists(finished):
+            os.remove(finished)
+        process = target.LaunchSimple(
+            [finished], None, self.get_process_working_directory()
+        )
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(bp.GetHitCount(), 1, "the condition is compiled in by now")
+
+        self.assertSuccess(process.Detach())
+        # Written by the program itself, after every remaining call to the
+        # function whose entry the debugger redirected.
+        deadline = time.time() + 30
+        while not os.path.exists(finished) and time.time() < deadline:
+            time.sleep(0.1)
+        self.assertTrue(
+            os.path.exists(finished),
+            "the detached program ran to its end rather than being killed by a "
+            "trap the debugger left in it",
+        )
+        with open(finished) as f:
+            self.assertIn("sum=", f.read())
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))

@@ -2008,6 +2008,14 @@ public:
   /// read before it wraps is gone.
   void DrainPatchRecords();
 
+  /// Take code the debugger compiled into the process back out of it, for a
+  /// process the debugger is about to stop watching.
+  ///
+  /// A trap in that code raises a signal with nothing there to answer it, which
+  /// kills the program. Called on the way out of a detach; a process being killed
+  /// needs nothing, since there is no program left to run the code.
+  void WithdrawPatchesFromProcess();
+
   /// Say of any breakpoint that a redirected function has left unable to fire
   /// that it cannot fire, once.
   ///

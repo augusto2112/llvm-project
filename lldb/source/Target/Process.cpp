@@ -3827,6 +3827,11 @@ Status Process::Detach(bool keep_stopped) {
     }
 
     m_thread_list.DiscardThreadPlans();
+    // Code the debugger compiled into the program comes back out before the
+    // debugger stops watching it: a trap in that code raises a signal with
+    // nothing there to answer it, which kills the program. Ahead of the
+    // breakpoint sites, because this reads the sites to find the traps.
+    GetTarget().WithdrawPatchesFromProcess();
     DisableAllBreakpointSites();
     if (auto error = FlushDelayedBreakpoints())
       LLDB_LOG_ERROR(
