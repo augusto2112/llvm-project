@@ -1,0 +1,192 @@
+//===-- PatchSourceBuilder.cpp --------------------------------------------===//
+//
+// Part of the LLVM Project, under the Apache License v2.0 with LLVM Exceptions.
+// See https://llvm.org/LICENSE.txt for license information.
+// SPDX-License-Identifier: Apache-2.0 WITH LLVM-exception
+//
+//===----------------------------------------------------------------------===//
+
+#include "lldb/Target/PatchSourceBuilder.h"
+#include "llvm/ADT/StringExtras.h"
+#include "llvm/Support/FormatVariadic.h"
+#include "llvm/Support/raw_ostream.h"
+#include <algorithm>
+
+using namespace lldb_private;
+
+std::string lldb_private::CaptureLocalName(uint32_t SiteID, uint32_t Capture) {
+  return llvm::formatv("__lldb_cap_{0}_{1}", SiteID, Capture).str();
+}
+
+namespace {
+
+/// The declarations every patch needs, ahead of the body.
+///
+/// Attributed to a file of its own so that none of it claims a line of the
+/// program's source, which would make a stop in the preamble report a line the
+/// user could read but that says nothing.
+std::string Preamble(const PatchSourceRequest &Request) {
+  std::string Text;
+  llvm::raw_string_ostream OS(Text);
+  OS << "#line 1 \"<lldb patch preamble>\"\n";
+  OS << "struct __lldb_rec_t { unsigned int site, cap; unsigned long long "
+        "val; };\n";
+
+  // Check if any injection has captures to determine if high_water is needed.
+  bool HasCaptures = false;
+  for (const PatchInjection &Inj : Request.Injections) {
+    if (!Inj.Captures.empty()) {
+      HasCaptures = true;
+      break;
+    }
+  }
+
+  if (HasCaptures)
+    OS << "struct __lldb_hdr_t { unsigned long seq, drained, capacity, "
+          "high_water; struct __lldb_rec_t ring[]; };\n";
+  else
+    OS << "struct __lldb_hdr_t { unsigned long seq, drained; struct "
+          "__lldb_rec_t ring[]; };\n";
+
+  OS << "struct __lldb_site_t { unsigned long hits, cond_true; unsigned char "
+        "gate; };\n";
+  OS << llvm::formatv("#define __LLDB_HDR ((volatile struct __lldb_hdr_t "
+                      "*){0:x+})\n",
+                      Request.RingAddress);
+  OS << llvm::formatv(
+      "static void __lldb_rec(unsigned k, unsigned c, unsigned long long v) {{ "
+      "unsigned long s = __atomic_fetch_add(&__LLDB_HDR->seq, 1, "
+      "__ATOMIC_RELAXED); volatile struct __lldb_rec_t *r = "
+      "&__LLDB_HDR->ring[s & {0}]; r->site = k; r->cap = c; r->val = v; }}\n",
+      Request.RingCapacity ? Request.RingCapacity - 1 : 0);
+  return Text;
+}
+
+/// One injection, as a single physical line.
+std::string InjectionLine(const PatchInjection &Inj) {
+  std::string Text;
+  llvm::raw_string_ostream OS(Text);
+
+  const std::string Slot =
+      llvm::formatv("((volatile struct __lldb_site_t *){0:x+})", Inj.SlotAddress)
+          .str();
+  const std::string Hit = llvm::formatv("__lldb_h_{0}", Inj.SiteID).str();
+
+  if (Inj.Gated)
+    OS << llvm::formatv("if ({0}->gate) {{ ", Slot);
+
+  OS << llvm::formatv(
+      "unsigned long {0} = __atomic_add_fetch(&{1}->hits, 1, "
+      "__ATOMIC_RELAXED); ",
+      Hit, Slot);
+  OS << llvm::formatv("(void){0}; ", Hit);
+
+  // A guard is emitted only when there is something to compare against, so a
+  // site that records every hit does not pay for a branch that is always taken.
+  std::string Guard;
+  if (Inj.OnlyHit)
+    Guard = llvm::formatv("{0} == {1}", Hit, *Inj.OnlyHit).str();
+  else if (Inj.SkipFirst)
+    Guard = llvm::formatv("{0} > {1}", Hit, Inj.SkipFirst).str();
+  if (!Guard.empty())
+    OS << llvm::formatv("if ({0}) {{ ", Guard);
+
+  if (Inj.Condition)
+    OS << llvm::formatv("if ({0}) {{ ", *Inj.Condition);
+
+  if (Inj.Condition)
+    OS << llvm::formatv("__atomic_add_fetch(&{0}->cond_true, 1, "
+                        "__ATOMIC_RELAXED); ",
+                        Slot);
+
+  for (uint32_t I = 0; I < Inj.Captures.size(); ++I) {
+    const std::string Local = CaptureLocalName(Inj.SiteID, I);
+    const std::string Value =
+        llvm::formatv("__lldb_v_{0}_{1}", Inj.SiteID, I).str();
+    // A memcpy rather than a cast, because a cast converts and a double's bits
+    // would not survive it. The width comes from the value itself, so every
+    // scalar is handled by the same line.
+    OS << llvm::formatv("__typeof__({0}) {1} = ({0}); ", Inj.Captures[I],
+                        Local);
+    OS << llvm::formatv("unsigned long long {0} = 0; ", Value);
+    OS << llvm::formatv("__builtin_memcpy(&{0}, &{1}, sizeof {1}); ", Value,
+                        Local);
+    OS << llvm::formatv("__lldb_rec({0}, {1}, {2}); ", Inj.SiteID, I, Value);
+  }
+
+  if (Inj.WantStop)
+    OS << "__builtin_debugtrap(); ";
+
+  if (Inj.Condition)
+    OS << "} ";
+  if (!Guard.empty())
+    OS << "} ";
+
+  // Nothing is recorded without captures, so nothing can fill the ring, and
+  // asking whether it is full would be two loads per hit for an answer that
+  // cannot change.
+  if (!Inj.Captures.empty())
+    OS << "if (__LLDB_HDR->seq - __LLDB_HDR->drained >= "
+          "__LLDB_HDR->high_water) __builtin_debugtrap(); ";
+
+  if (Inj.Gated)
+    OS << "}";
+
+  return llvm::StringRef(Text).rtrim().str();
+}
+
+} // namespace
+
+std::string lldb_private::BuildPatchSource(const PatchSourceRequest &Request) {
+  std::string Text;
+  llvm::raw_string_ostream OS(Text);
+  OS << Preamble(Request);
+
+  const uint32_t FirstLine = Request.Body.FirstLine;
+  const size_t LineCount = Request.Body.LineStarts.size();
+  const uint32_t LastLine =
+      LineCount ? FirstLine + static_cast<uint32_t>(LineCount) - 1 : FirstLine;
+
+  // Emitted in line order rather than arrival order, because the body is
+  // spliced by reading forwards once.
+  std::vector<const PatchInjection *> Ordered;
+  for (const PatchInjection &Inj : Request.Injections) {
+    // The declaration line and the closing brace are not statements. An
+    // injection there is dropped rather than moved, since moving it would
+    // report hits for a line nobody named.
+    if (Inj.Line <= FirstLine || Inj.Line >= LastLine)
+      continue;
+    Ordered.push_back(&Inj);
+  }
+  std::stable_sort(Ordered.begin(), Ordered.end(),
+                   [](const PatchInjection *A, const PatchInjection *B) {
+                     return A->Line < B->Line;
+                   });
+
+  OS << llvm::formatv("#line {0} \"{1}\"\n", FirstLine, Request.SourcePath);
+
+  size_t Next = 0;
+  for (size_t Index = 0; Index < LineCount; ++Index) {
+    const uint32_t Line = FirstLine + static_cast<uint32_t>(Index);
+
+    while (Next < Ordered.size() && Ordered[Next]->Line == Line) {
+      OS << llvm::formatv("#line {0} \"{1}\"\n", Line, Request.SourcePath);
+      OS << InjectionLine(*Ordered[Next]) << "\n";
+      ++Next;
+    }
+
+    // A directive is only needed where an injection has just moved the
+    // compiler's idea of the current line.
+    if (Next && Ordered[Next - 1]->Line == Line)
+      OS << llvm::formatv("#line {0} \"{1}\"\n", Line, Request.SourcePath);
+
+    const size_t Start = Request.Body.LineStarts[Index];
+    const size_t End = Index + 1 < LineCount ? Request.Body.LineStarts[Index + 1]
+                                             : Request.Body.Text.size();
+    OS << llvm::StringRef(Request.Body.Text).slice(Start, End);
+  }
+
+  if (!llvm::StringRef(Text).ends_with("\n"))
+    OS << "\n";
+  return Text;
+}

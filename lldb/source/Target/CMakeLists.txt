@@ -35,6 +35,7 @@ add_lldb_library(lldbTarget
   OperatingSystem.cpp
   PathMappingList.cpp
   PatchControlBlock.cpp
+  PatchSourceBuilder.cpp
   Platform.cpp
   Process.cpp
   ProcessIOHandler.cpp

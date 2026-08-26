@@ -12,6 +12,7 @@ add_lldb_unittest(TargetTests
   ModuleCacheTest.cpp
   PathMappingListTest.cpp
   PatchControlBlockTest.cpp
+  PatchSourceBuilderTest.cpp
   RegisterTypeBuilderClangTest.cpp
   RemoteAwarePlatformTest.cpp
   ScratchTypeSystemTest.cpp
