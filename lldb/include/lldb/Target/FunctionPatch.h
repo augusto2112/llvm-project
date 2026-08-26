@@ -41,6 +41,7 @@ enum class PatchFailure {
   EntryTooSmall,
   ThreadInPatchRange,
   BreakpointInPatchRange,
+  BreakpointInRedirectedBody,
   CompileFailed,
   CaptureNotScalar,
   Unsupported,

@@ -53,6 +53,7 @@ TEST(FunctionPatchTest, NamesEveryFailure) {
                               PatchFailure::EntryTooSmall,
                               PatchFailure::ThreadInPatchRange,
                               PatchFailure::BreakpointInPatchRange,
+                              PatchFailure::BreakpointInRedirectedBody,
                               PatchFailure::CompileFailed,
                               PatchFailure::CaptureNotScalar,
                               PatchFailure::Unsupported};

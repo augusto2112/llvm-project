@@ -8,7 +8,9 @@
 
 #include "lldb/Target/FunctionPatch.h"
 #include "lldb/Breakpoint/Breakpoint.h"
+#include "lldb/Breakpoint/BreakpointList.h"
 #include "lldb/Breakpoint/BreakpointLocation.h"
+#include "lldb/Breakpoint/BreakpointResolver.h"
 #include "lldb/Breakpoint/BreakpointSite.h"
 #include "lldb/Core/Address.h"
 #include "lldb/Core/AddressRange.h"
@@ -167,6 +169,9 @@ llvm::StringRef lldb_private::ToString(PatchFailure Reason) {
     return "a thread is stopped inside the bytes the redirect would overwrite";
   case PatchFailure::BreakpointInPatchRange:
     return "a breakpoint already occupies bytes the patch needs";
+  case PatchFailure::BreakpointInRedirectedBody:
+    return "a breakpoint in the function would stop firing once its entry is "
+           "redirected to a copy";
   case PatchFailure::CompileFailed:
     return "the recompiled function did not compile";
   case PatchFailure::CaptureNotScalar:
@@ -358,6 +363,82 @@ llvm::Error CheckPatchRangeIsFree(Process &Proc, lldb::addr_t Entry) {
                   "inside the bytes the redirect would overwrite");
 
   return llvm::Error::success();
+}
+
+/// Whether the function entered at \p Entry can have its body made unreachable
+/// without a breakpoint quietly going with it.
+///
+/// A redirected entry means the original body never runs again, so a breakpoint
+/// location in that body never traps again. Announcing the copy re-resolves
+/// breakpoints into it, but only a resolver that goes by file and line finds
+/// it: the copy's line table names the original source, while the compile
+/// unit's primary file -- which is the only text a source-regex resolver
+/// searches -- is the generated source the copy was compiled from. Every other
+/// resolver is treated as not finding the copy, since being wrong that way
+/// costs a patch and being wrong the other way costs somebody's breakpoint.
+///
+/// A refusal here leaves the expression to be evaluated at a stop, which is
+/// slower and says so. Installing anyway would leave a breakpoint that reads as
+/// resolved and never fires again, which nothing says at all.
+llvm::Error CheckNoBreakpointNeedsTheOriginalBody(Target &Tgt,
+                                                  lldb::addr_t Entry) {
+  std::string Orphaned;
+  size_t Count = 0;
+
+  // Internal breakpoints as well as the user's. One of those standing for a
+  // thread plan's next step would fail the same way, and a step that never
+  // arrives is no easier to explain than a breakpoint that never fires.
+  for (bool Internal : {false, true}) {
+    for (const lldb::BreakpointSP &Bp :
+         Tgt.GetBreakpointList(Internal).Breakpoints()) {
+      lldb::BreakpointResolverSP Resolver = Bp->GetResolver();
+      if (Resolver && Resolver->getResolverID() ==
+                          BreakpointResolver::ResolverTy::FileLineResolver)
+        continue;
+
+      // Facade locations stand for code rather than sitting at any, so the real
+      // locations are the ones that could stop trapping.
+      const size_t Locations = Bp->GetNumLocations(/*use_facade=*/false);
+      for (size_t I = 0; I < Locations; ++I) {
+        lldb::BreakpointLocationSP Loc =
+            Bp->GetLocationAtIndex(I, /*use_facade=*/false);
+        if (!Loc || !Loc->IsEnabled())
+          continue;
+
+        // A location carrying a condition is one this same mechanism is asked
+        // about at every stop: it either gets an injection in the copy or
+        // records why it could not. Accounted for either way, so losing its own
+        // trap is not silent.
+        if (Loc->GetCondition())
+          continue;
+
+        // Asked of the location's own function rather than of an address range,
+        // so that a function whose code is in several pieces is answered for
+        // all of them -- every piece is reached through the entry that is about
+        // to stop being reached.
+        Function *Enclosing =
+            Loc->GetAddress().CalculateSymbolContextFunction();
+        if (!Enclosing || Enclosing->GetAddress().GetLoadAddress(&Tgt) != Entry)
+          continue;
+
+        if (Count++)
+          Orphaned += ", ";
+        Orphaned += std::to_string(Bp->GetID());
+        Orphaned += ".";
+        Orphaned += std::to_string(Loc->GetID());
+      }
+    }
+  }
+
+  if (!Count)
+    return llvm::Error::success();
+
+  // Named, because the only way past this refusal is to take the breakpoint
+  // that stands in the way off the function, and a reason that does not say
+  // which breakpoint that is cannot be acted on.
+  return Refuse(PatchFailure::BreakpointInRedirectedBody,
+                llvm::Twine(Count == 1 ? "breakpoint " : "breakpoints ") +
+                    Orphaned);
 }
 
 /// One compiled copy of a patched function.
@@ -618,6 +699,14 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
   // recompile writes the redirect again over the same bytes.
   if (llvm::Error Err = CheckPatchRangeIsFree(*Proc, Entry))
     return std::move(Err);
+
+  // Only while the entry still reaches the original body. Once it reaches a
+  // copy instead, the body has already stopped being run, and a refusal now
+  // would neither have caused that nor undo it.
+  if (Fn->CopyAddress == LLDB_INVALID_ADDRESS)
+    if (llvm::Error Err =
+            CheckNoBreakpointNeedsTheOriginalBody(m_target, Entry))
+      return std::move(Err);
 
   if (llvm::Error Err = EnsureRingBlock())
     return std::move(Err);
