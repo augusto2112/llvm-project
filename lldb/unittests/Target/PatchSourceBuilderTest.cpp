@@ -245,6 +245,53 @@ TEST(PatchSourceBuilderTest, NamesEachCaptureLocalDistinctly) {
   EXPECT_EQ("__lldb_cap_1_1", CaptureLocalName("", 1, 1));
 }
 
+// A frame of a patched function is still the program's frame, so a caller
+// reading it must not be shown the injection's own working locals -- nor offered
+// one as a name that could be captured, since the next recompile renames it.
+// Which needs the names the builder emits to be recognisable, so this asserts
+// that every one of them is.
+TEST(PatchSourceBuilderTest, EveryNameItEmitsIsRecognisableAsItsOwn) {
+  auto Inj = Bare(5);
+  Inj.Condition = "acc > 1";
+  Inj.Captures = {"acc"};
+  Inj.Gated = true;
+  PatchSourceRequest Req = Request({Inj});
+  Req.Tag = "7";
+
+  // Every identifier the generated source declares, which is every one that is
+  // followed by whitespace-and-an-equals or an opening parenthesis after a type.
+  // Taken from the emitted text rather than listed here, so that a name added to
+  // the builder without the prefix fails this rather than going unnoticed.
+  const std::string Source = BuildPatchSource(Req);
+  size_t Found = 0;
+  for (llvm::StringRef Rest = Source; !Rest.empty();) {
+    const size_t At = Rest.find("__lldb");
+    if (At == llvm::StringRef::npos)
+      break;
+    Rest = Rest.substr(At);
+    const size_t End = Rest.find_first_not_of(
+        "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_");
+    const llvm::StringRef Name = Rest.take_front(End);
+    EXPECT_TRUE(IsInjectedName(Name)) << Name;
+    ++Found;
+    Rest = Rest.substr(Name.size());
+  }
+  EXPECT_GT(Found, 0u) << "the builder emitted no names of its own";
+  // And `__LLDB_HDR`, which the preamble spells in capitals.
+  EXPECT_TRUE(IsInjectedName("__LLDB_HDR_7")) << Source;
+}
+
+TEST(PatchSourceBuilderTest, TellsTheProgramsOwnNamesFromTheInjectionsOwn) {
+  EXPECT_TRUE(IsInjectedName("__lldb_h_1_0"));
+  EXPECT_TRUE(IsInjectedName("__lldb_cap_2_1"));
+  EXPECT_TRUE(IsInjectedName(CaptureLocalName("3", 4, 5)));
+  // The program's, including a name that only looks like one of the debugger's.
+  EXPECT_FALSE(IsInjectedName("total"));
+  EXPECT_FALSE(IsInjectedName("__lldb"));
+  EXPECT_FALSE(IsInjectedName("my__lldb_h_1"));
+  EXPECT_FALSE(IsInjectedName(""));
+}
+
 TEST(PatchSourceBuilderTest, TrapsWhenTheSiteWantsAStop) {
   auto Inj = Bare(5);
   Inj.Condition = "acc > 1";

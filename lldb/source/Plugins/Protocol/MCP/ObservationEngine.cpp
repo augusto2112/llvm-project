@@ -2240,7 +2240,8 @@ CaptureCandidates ObservationEngine::CandidatesFor(StringRef Expr,
       return {};
     for (size_t I = 0, E = Vars->GetSize(); I != E; ++I)
       if (lldb::VariableSP Var = Vars->GetVariableAtIndex(I))
-        if (StringRef Name = Var->GetName().GetStringRef(); !Name.empty())
+        if (StringRef Name = Var->GetName().GetStringRef();
+            !Name.empty() && !IsInjectedName(Name))
           InScope.push_back(Name.str());
     break;
   }
@@ -4024,8 +4025,6 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
   if (VariableList *Locals = Frame->GetVariableList(
           /*get_file_globals=*/false, /*include_synthetic_vars=*/true,
           /*error_ptr=*/nullptr)) {
-    const size_t Count = std::min(Locals->GetSize(), MaxTerminalLocals);
-
     // Read and ranked before anything is rendered, because the order the budget
     // is spent in decides which locals the response holds. See \ref
     // TerminalLocalRank.
@@ -4035,18 +4034,39 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
       unsigned Rank = 0;
     };
     std::vector<Local> Ordered;
-    Ordered.reserve(Count);
-    for (size_t I = 0; I < Count; ++I) {
+    Ordered.reserve(std::min(Locals->GetSize(), MaxTerminalLocals));
+    // Names the injected code introduced, counted so that the marker below does
+    // not report them as locals of the program that went unread. A caller told
+    // that something was withheld raises a budget, and this is not what any
+    // budget was spent on.
+    size_t Injected = 0;
+    // The bound counts the locals that are going to be reported rather than the
+    // ones walked to find them, so a frame carrying names nothing can be told to
+    // do anything with does not spend the bound on them.
+    for (size_t I = 0, E = Locals->GetSize();
+         I < E && Ordered.size() < MaxTerminalLocals; ++I) {
       lldb::VariableSP Var = Locals->GetVariableAtIndex(I);
       if (!Var)
         continue;
+      // Asked of the variable rather than of the value, so that a name this
+      // skips costs no call into the inferior to read what it holds.
+      //
+      // A local with no name cannot be named in a capture either, so reporting
+      // it costs a reader an entry keyed on the empty string and offers nothing
+      // to do with it. Nor can one the injected code introduced: a frame of a
+      // patched function is still the program's frame, and these are the
+      // debugger's own working locals standing in it.
+      const llvm::StringRef Declared = Var->GetName().GetStringRef();
+      if (Declared.empty())
+        continue;
+      if (IsInjectedName(Declared)) {
+        ++Injected;
+        continue;
+      }
       lldb::ValueObjectSP Value = Frame->GetValueObjectForFrameVariable(
           Var, lldb::eDynamicCanRunTarget);
       if (!Value)
         continue;
-      // A local with no name cannot be named in a capture either, so reporting
-      // it costs a reader an entry keyed on the empty string and offers nothing
-      // to do with it.
       const llvm::StringRef Name = Value->GetName().GetStringRef();
       if (Name.empty())
         continue;
@@ -4106,7 +4126,7 @@ void ObservationEngine::CollectTerminalEvent(Outcome Result) {
     // names are in the order the budget would have reached them, so the ones
     // nearest to having been shown are the ones named.
     if (std::string Note = ElidedLocals(
-            Starved, Locals->GetSize() - Rendered - Starved.size());
+            Starved, Locals->GetSize() - Injected - Rendered - Starved.size());
         !Note.empty())
       Terminal.Locals["_elided"] = std::move(Note);
   }

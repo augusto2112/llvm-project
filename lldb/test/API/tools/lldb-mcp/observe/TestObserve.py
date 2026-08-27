@@ -1825,6 +1825,62 @@ class ObserveTestCase(TestBase):
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_a_patched_frame_reports_only_the_programs_own_locals(self):
+        """A frame of a patched function is still the program's frame.
+
+        The code compiled into a function declares working locals of its own --
+        the hit counter every injection opens with, and one per capture -- and
+        they stand in the frame beside the program's. Measured: with nothing
+        filtering them, a terminal event inside a patched function reported
+        `__lldb_h_1_0` to the caller as one of the locals the program had, and
+        counted it again in the note saying how many were not read. Neither is
+        something a caller can act on: the name is the debugger's, and the next
+        recompile gives it a different one.
+
+        The tracepoint goes inside the spin loop rather than at the function,
+        because the condition has to name something -- a constant one folds away
+        before it reaches the copy, leaving no trap for the site to attribute.
+        """
+        self.build()
+        # The body of the endless loop, where the loop counter is in scope.
+        body = line_number("main.c", "for (volatile long i") + 1
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "args": ["spin"],
+                "timeout_seconds": 6,
+                "observe": [
+                    {
+                        "label": "spinning",
+                        "at": "main.c:%d" % body,
+                        "when": "i > 100000000000",
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "timed_out", str(document))
+        report = document["plan_report"]["spinning"]
+        self.assertEqual(report["eval"], "in-process", str(report))
+
+        # The ceiling stopped the program inside the copy, which is what puts the
+        # injection's own locals in the frame the terminal event reports.
+        terminal = document["terminal"]
+        self.assertEqual(terminal["function"], "spin", str(terminal))
+        locals_reported = terminal["locals"]
+        self.assertIn("i", locals_reported, str(locals_reported))
+        for name in locals_reported:
+            self.assertFalse(
+                name.lower().startswith("__lldb"),
+                "%r is the debugger's own: %s" % (name, locals_reported),
+            )
+        # And nothing says a local was withheld, because none was: the one that is
+        # missing was never the program's to report.
+        self.assertNotIn("_elided", locals_reported, str(locals_reported))
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_a_condition_runs_in_process_by_default(self):
         """A plan's condition is compiled into the program unless refused.
 

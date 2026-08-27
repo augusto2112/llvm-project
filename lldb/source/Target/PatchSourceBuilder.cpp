@@ -16,6 +16,12 @@ using namespace lldb_private;
 
 namespace {
 
+/// The prefixes every name the builder emits begins with, and lldb's own
+/// throughout the expression machinery. Two spellings because the preamble's
+/// macros are in capitals, as macros are.
+constexpr llvm::StringLiteral kInjectedPrefixes[] = {
+    llvm::StringLiteral("__lldb_"), llvm::StringLiteral("__LLDB_")};
+
 /// \p Name, with \p Tag appended if it is not empty.
 ///
 /// Every name the preamble declares goes through this, so that a non-empty tag
@@ -33,6 +39,12 @@ std::string lldb_private::CaptureLocalName(llvm::StringRef Tag,
                                            uint32_t SiteID, uint32_t Capture) {
   return Tagged(Tag,
                llvm::formatv("__lldb_cap_{0}_{1}", SiteID, Capture).str());
+}
+
+bool lldb_private::IsInjectedName(llvm::StringRef Name) {
+  return llvm::any_of(kInjectedPrefixes, [Name](llvm::StringRef Prefix) {
+    return Name.starts_with(Prefix);
+  });
 }
 
 namespace {

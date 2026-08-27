@@ -87,6 +87,16 @@ struct PatchSourceRequest {
 std::string CaptureLocalName(llvm::StringRef Tag, uint32_t SiteID,
                              uint32_t Capture);
 
+/// Whether \p Name is one the injected code introduced rather than one the
+/// program declared.
+///
+/// Every name the builder emits carries an `__lldb_` prefix, in either case,
+/// which is lldb's own throughout the expression machinery. A frame of a patched
+/// function is still the program's frame, so the injection's own locals are not
+/// part of what is there to be read -- and offering one as a name that could be
+/// captured offers something the next recompile renames.
+bool IsInjectedName(llvm::StringRef Name);
+
 /// Writes the top-level C source for one patched function.
 ///
 /// An injection whose line falls outside the body is dropped rather than
