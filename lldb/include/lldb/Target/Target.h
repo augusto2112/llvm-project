@@ -2207,6 +2207,11 @@ protected:
   /// nothing.
   std::unique_ptr<FunctionPatchManager> m_function_patch_manager_up;
 
+  /// Whether a pass over the breakpoints compiling their conditions in is
+  /// already running, since compiling one can reach a stop that would start
+  /// another.
+  bool m_compiling_breakpoint_conditions = false;
+
   typedef std::map<lldb::user_id_t, StopHookSP> StopHookCollection;
   StopHookCollection m_stop_hooks;
   lldb::user_id_t m_stop_hook_next_id;

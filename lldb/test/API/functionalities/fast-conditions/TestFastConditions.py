@@ -278,6 +278,57 @@ class FastConditionsTestCase(TestBase):
 
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_two_conditions_in_one_function_by_file_and_line(self):
+        """Two conditions compose whichever resolver found them.
+
+        The same property as the test above, asserted for breakpoints set by file
+        and line. Which matters because those resolve into the copy as well, so
+        installing the first gives the second a location it did not have -- and
+        announcing the copy, which is what does that, is where a stop can be taken
+        in the middle of a compile. A second pass over the breakpoints started
+        there installed the second condition while the first was still compiling,
+        and each of the two then published a copy carrying only its own injection.
+        Whichever wrote its redirect last won, so one of the two breakpoints never
+        fired again.
+        """
+        target = self.setup()
+        first = target.BreakpointCreateByLocation(
+            "main.c", self.find_line("total += i;")
+        )
+        first.SetCondition("seed == 10 && i == 1")
+        second = target.BreakpointCreateByLocation(
+            "main.c", self.find_line("return total;")
+        )
+        second.SetCondition("seed == 20")
+
+        process = target.LaunchSimple(None, None, self.get_process_working_directory())
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(
+            process.GetSelectedThread().GetFrameAtIndex(0)
+            .FindVariable("seed")
+            .GetValueAsSigned(),
+            10,
+        )
+
+        process.Continue()
+        self.assertState(process.GetState(), lldb.eStateStopped)
+        self.assertEqual(
+            process.GetSelectedThread().GetFrameAtIndex(0)
+            .FindVariable("seed")
+            .GetValueAsSigned(),
+            20,
+            "the second condition is in the same copy as the first",
+        )
+        self.assertEqual(first.GetHitCount(), 1)
+        self.assertEqual(second.GetHitCount(), 1)
+        # And both in the program, rather than one of them having fallen back to a
+        # stop per hit -- which for these two would be two hundred thousand.
+        self.assertLess(
+            process.GetStopID(True), STOPS_ALLOWANCE, "the run paid for no hits"
+        )
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_removing_one_condition_leaves_the_other(self):
         """Dropping one injection recompiles what remains."""
         target = self.setup()

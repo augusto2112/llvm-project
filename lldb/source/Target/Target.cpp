@@ -3206,6 +3206,18 @@ void Target::CompileBreakpointConditionsIntoProcess() {
   if (!GetFastConditions(&exe_ctx) || !CanCompileCodeIntoProcess())
     return;
 
+  // One pass at a time. Compiling a condition in announces a module, and
+  // announcing one can reach a stop of its own -- which is another pass over the
+  // same breakpoints, started while this one is half way through installing. The
+  // pass already running walks every breakpoint, so the nested one has nothing
+  // to add and everything to trip over.
+  if (m_compiling_breakpoint_conditions)
+    return;
+  m_compiling_breakpoint_conditions = true;
+  auto done = llvm::scope_exit([this] {
+    m_compiling_breakpoint_conditions = false;
+  });
+
   // Copied out first: compiling a condition in appends a module, which resolves
   // breakpoints, which can add to the list being walked.
   std::vector<BreakpointSP> breakpoints;

@@ -132,6 +132,16 @@ struct FunctionPatchManager::PatchedFunction {
 
   std::vector<PatchInjection> Injections;
 
+  /// Bumped whenever \ref Injections changes.
+  ///
+  /// What a compile checks it against on the way out. Compiling announces a
+  /// module, and announcing one can reach a stop at which another injection is
+  /// installed in this same function -- so an injection list read before a
+  /// compile is not necessarily the list that is live after it, and a copy
+  /// published from the older list would overwrite the redirect the newer one
+  /// wrote.
+  uint64_t Generation = 0;
+
   llvm::DenseMap<uint32_t, PatchSiteCallback> Callbacks;
 
   /// The internal breakpoints that carry each live site's callback, one per
@@ -356,7 +366,13 @@ llvm::Expected<FunctionFacts> ReadFunctionFacts(Target &Tgt,
               ExtractReason = Err.reason();
             }))
       return std::move(Leftover);
-    return Refuse(ClassifyBodyFailure(ExtractReason), ToString(ExtractReason));
+    // The detail only where it says something the reason does not. A static
+    // local is one thing and this file's prose for it already says it, where
+    // "the body could not be located" has two ways of being true.
+    const PatchFailure Reason = ClassifyBodyFailure(ExtractReason);
+    if (Reason == PatchFailure::BodyNotFound)
+      return Refuse(Reason, ToString(ExtractReason));
+    return Refuse(Reason);
   }
   Facts.Body = std::move(*Body);
 
@@ -551,6 +567,26 @@ void ForgetCopyDeclaration(Target &Tgt, ConstString Name) {
     State->ForgetPersistentDecl(Name);
 }
 
+/// What a failed parse has to say for itself, as a refusal reads it.
+///
+/// Errors and warnings only. The parser also reports which language it used, at
+/// info severity, and for a copy that answer is always the same and never the
+/// reason anything failed -- carried alongside the errors it reads as the cause
+/// of them. Everything is kept when there is nothing else, since a refusal that
+/// says nothing is worse than one that says the wrong thing.
+std::string WhyTheParseFailed(DiagnosticManager &Diagnostics) {
+  std::string Text;
+  for (const std::unique_ptr<Diagnostic> &Diag : Diagnostics.Diagnostics()) {
+    if (Diag->GetSeverity() != lldb::eSeverityError &&
+        Diag->GetSeverity() != lldb::eSeverityWarning)
+      continue;
+    if (!Text.empty())
+      Text += "\n";
+    Text += Diag->GetMessage();
+  }
+  return Text.empty() ? Diagnostics.GetString() : Text;
+}
+
 /// Compiles \p Source into the inferior and finds the definition of \p Name it
 /// contains.
 ///
@@ -570,7 +606,16 @@ llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
   // line table if one is emitted at all, and that line table is the whole
   // reason a stop inside the copy can name the original file and line.
   Options.SetGenerateDebugInfo(true);
-  Options.SetLanguage(lldb::eLanguageTypeC99);
+  // C++, said outright rather than asked for as C. The expression parser has no
+  // pure-C mode -- it needs C++ to capture values, and answers a request for C
+  // by enabling C++ and noting that it did -- so a body that is valid C but not
+  // valid C++ was never going to compile here. Asking for C only put that note at
+  // the front of every diagnostic a refusal carries, where it reads as the reason
+  // the copy was refused rather than as an aside.
+  //
+  // The prototype is exercised against C++, so the standard is named rather than
+  // left to whatever the parser would default to.
+  Options.SetLanguage(lldb::eLanguageTypeC_plus_plus_17);
   Options.SetIgnoreBreakpoints(true);
   Options.SetTryAllThreads(false);
   Options.SetUnwindOnError(true);
@@ -581,11 +626,9 @@ llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
   ExecutionContext ExeCtx;
   Proc->CalculateExecutionContext(ExeCtx);
 
-  // Whatever this reports is not the verdict: asking for C is answered with a
-  // note that C++ was used instead, alongside a perfectly usable expression.
   Status Unused;
   lldb::UserExpressionSP Expr(Tgt.GetUserExpressionForLanguage(
-      Source, /*prefix=*/"", SourceLanguage(lldb::eLanguageTypeC99),
+      Source, /*prefix=*/"", SourceLanguage(lldb::eLanguageTypeC_plus_plus_17),
       Expression::eResultTypeAny, Options, /*ctx_obj=*/nullptr, Unused));
   if (!Expr)
     return Refuse(PatchFailure::CompileFailed,
@@ -607,7 +650,7 @@ llvm::Expected<CompiledCopy> CompileCopy(Target &Tgt, llvm::StringRef Source,
   ForgetCopyDeclaration(Tgt, Name);
 
   if (!Parsed)
-    return Refuse(PatchFailure::CompileFailed, Diagnostics.GetString());
+    return Refuse(PatchFailure::CompileFailed, WhyTheParseFailed(Diagnostics));
 
   auto *JITExpr = llvm::dyn_cast<LLVMUserExpression>(Expr.get());
   if (!JITExpr)
@@ -934,20 +977,39 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
   Injection.Gated = Request.Gated;
   Injection.WantStop = Request.WantStop;
   Fn->Injections.push_back(std::move(Injection));
+  ++Fn->Generation;
   Fn->Callbacks[SiteID] = PatchSiteCallback{Request.OnTrap, Request.Baton};
+
+  // Entered into the map before the compile rather than after it. Compiling
+  // announces a module, and announcing one can reach a stop at which another
+  // injection is installed in this same function; an install that could not see
+  // this one would read the function's injections as empty and build a second
+  // record of it from the original source, and whichever of the two committed
+  // last would replace the other's.
+  const bool Inserted = Fresh != nullptr;
+  if (Fresh)
+    m_functions[Entry] = std::move(Fresh);
 
   if (llvm::Error Err = Recompile(*Fn)) {
     // A compile that failed installed nothing, so the site it was for must not
     // be remembered as live in a function still running its previous copy.
-    Fn->Injections.pop_back();
+    // Erased by name rather than popped, since an install nested inside this
+    // one's compile may have appended after it.
+    llvm::erase_if(Fn->Injections, [SiteID](const PatchInjection &Inj) {
+      return Inj.SiteID == SiteID;
+    });
+    ++Fn->Generation;
     Fn->Callbacks.erase(SiteID);
     m_captures.erase(SiteID);
     m_dropped_captures.erase(SiteID);
+    // And the function's own record goes only if this install is what put it
+    // there and nothing else has made it worth keeping.
+    if (Inserted && Fn->Injections.empty() &&
+        Fn->CopyAddress == LLDB_INVALID_ADDRESS)
+      m_functions.erase(Entry);
     return std::move(Err);
   }
 
-  if (Fresh)
-    m_functions[Entry] = std::move(Fresh);
   m_site_to_function[SiteID] = Entry;
   // Recorded once the site is live, because this is what makes its counters
   // readable and there are none to read for a site that was refused.
@@ -993,8 +1055,10 @@ llvm::Error FunctionPatchManager::Remove(uint32_t SiteID) {
   const size_t Index = Doomed - Fn.Injections.begin();
   PatchInjection Saved = std::move(*Doomed);
   Fn.Injections.erase(Doomed);
+  ++Fn.Generation;
   if (llvm::Error Err = Recompile(Fn)) {
     Fn.Injections.insert(Fn.Injections.begin() + Index, std::move(Saved));
+    ++Fn.Generation;
     return Err;
   }
 
@@ -1215,7 +1279,14 @@ void FunctionPatchManager::EnsureExitDrainBreakpoint() {
 }
 
 bool FunctionPatchManager::IsPatched(lldb::addr_t Entry) const {
-  return m_functions.find(Entry) != m_functions.end();
+  // Redirected, not merely known about. A function is entered into the map
+  // before its first copy is compiled, so that an install nested inside that
+  // compile composes with it rather than starting a second record of the same
+  // function -- which leaves a window in which the map holds a function whose
+  // entry still reaches its own body.
+  auto It = m_functions.find(Entry);
+  return It != m_functions.end() &&
+         It->second->CopyAddress != LLDB_INVALID_ADDRESS;
 }
 
 llvm::Error FunctionPatchManager::EnsureRingBlock() {
@@ -1356,6 +1427,8 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
   });
 
   while (!Copy) {
+    const uint64_t CompiledFrom = Fn.Generation;
+
     PatchSourceRequest Request;
     Request.Body = Fn.Body;
     Request.SourcePath = Fn.SourcePath;
@@ -1379,6 +1452,17 @@ llvm::Error FunctionPatchManager::Recompile(PatchedFunction &Fn) {
     }();
     if (!Compiled)
       return Compiled.takeError();
+
+    // Compiled from a list that is no longer the live one. Announcing a module
+    // is part of compiling, and announcing one can reach a stop at which another
+    // injection is installed in this same function -- whose own compile has by
+    // now published a copy carrying both. Publishing this one would point the
+    // program back at the older set and lose the other injection, so it is
+    // discarded and the whole thing done again from what is live.
+    if (Fn.Generation != CompiledFrom) {
+      DiscardCopy(m_target, *Compiled);
+      continue;
+    }
 
     // A copy that records something it should not is discarded here rather than
     // installed: nothing points at it yet, so letting go of it leaves the
