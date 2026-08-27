@@ -3139,6 +3139,19 @@ void ObservationEngine::CompileTracepointsIntoProcess() {
   FunctionPatchManager &Patches = m_target->GetFunctionPatchManager();
   std::vector<std::string> Recompiled;
 
+  // Decided for every tracepoint before any of them is compiled, so that several
+  // tracepoints in one function cost one compile of it rather than one each. A
+  // compile runs clang over the whole body and JITs the result into the program,
+  // and each one retires a copy the target keeps for its own lifetime.
+  struct Pending {
+    ObservationSite *Site;
+    PatchRequest Request;
+    bool Records;
+    std::string FunctionName;
+    bool WasEnabled;
+  };
+  std::vector<Pending> Wanted;
+
   for (std::unique_ptr<ObservationSite> &Owned : m_sites) {
     ObservationSite &Site = *Owned;
     ObservationReport &Report = m_result.Observations[Site.Index];
@@ -3235,18 +3248,35 @@ void ObservationEngine::CompileTracepointsIntoProcess() {
     const bool WasEnabled = Site.Breakpoint->IsEnabled();
     Site.Breakpoint->SetEnabled(false);
 
-    Expected<uint32_t> Installed = Patches.Install(Request);
-    if (!Installed) {
+    Wanted.push_back(Pending{&Site, std::move(Request), Records,
+                             SC.function->GetName().GetString(), WasEnabled});
+  }
+
+  std::vector<PatchRequest> Requests;
+  Requests.reserve(Wanted.size());
+  for (const Pending &P : Wanted)
+    Requests.push_back(P.Request);
+
+  const std::vector<FunctionPatchManager::InstallOutcome> Outcomes =
+      Patches.Install(Requests);
+
+  for (size_t I = 0; I < Wanted.size(); ++I) {
+    const Pending &P = Wanted[I];
+    ObservationSite &Site = *P.Site;
+    ObservationReport &Report = m_result.Observations[Site.Index];
+    const bool Records = P.Records;
+
+    if (!Outcomes[I].SiteID) {
       Site.Breakpoint->SetHitsComeFromCompiledCode(false);
-      Site.Breakpoint->SetEnabled(WasEnabled);
+      Site.Breakpoint->SetEnabled(P.WasEnabled);
       Report.FallbackReason =
-          OneLine(toString(Installed.takeError()), MaxFailureReasonChars);
+          OneLine(Outcomes[I].Refusal, MaxFailureReasonChars);
       continue;
     }
 
-    Site.CompiledIn = *Installed;
+    Site.CompiledIn = *Outcomes[I].SiteID;
     Site.RecordsWithoutStopping = Records;
-    Site.CompiledInFunction = SC.function->GetName().GetString();
+    Site.CompiledInFunction = P.FunctionName;
     Site.HitsBeforeCompile = Site.Hits;
     Site.ConditionTrueBeforeCompile = Site.ConditionTrue;
     Report.InProcess = true;
@@ -3264,8 +3294,8 @@ void ObservationEngine::CompileTracepointsIntoProcess() {
     // observation. The gate byte mirrors the tracepoint's own enabled bit,
     // which is the debugger's answer to whether this observation should be
     // doing anything at all.
-    if (Request.Gated)
-      Patches.SetGate(*Installed, WasEnabled);
+    if (P.Request.Gated)
+      Patches.SetGate(*Outcomes[I].SiteID, P.WasEnabled);
 
     // The function, not the observation: two tracepoints in one function are
     // one recompile, and it is the recompile the note is about.

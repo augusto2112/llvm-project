@@ -162,6 +162,28 @@ public:
   FunctionPatchManager(const FunctionPatchManager &) = delete;
   FunctionPatchManager &operator=(const FunctionPatchManager &) = delete;
 
+  /// What became of one request in a batch.
+  ///
+  /// Requests landing in the same function are compiled together, so they
+  /// succeed or fail together and every failure of a group carries the same
+  /// reason: what the compile could not do it could not do for any of them.
+  struct InstallOutcome {
+    std::optional<uint32_t> SiteID;
+
+    /// Why, set exactly when \ref SiteID is not.
+    std::string Refusal;
+  };
+
+  /// Installs every one of \p Requests, recompiling each function they land in
+  /// once for all the injections it gains, and answers for each in turn.
+  ///
+  /// One compile per function rather than one per injection. A compile runs clang
+  /// over the whole function body and JITs the result into the program, and each
+  /// one retires a copy that is kept for the life of the target and leaves a
+  /// location behind in every breakpoint over those lines -- so a plan with
+  /// several tracepoints in one function should pay for one.
+  std::vector<InstallOutcome> Install(llvm::ArrayRef<PatchRequest> Requests);
+
   /// Installs \p Request, recompiling its function with every injection already
   /// live in it. Returns the new site's id.
   llvm::Expected<uint32_t> Install(const PatchRequest &Request);
@@ -275,6 +297,13 @@ private:
   /// Compiles \p Fn's current injection set and points its trampoline at the
   /// result.
   llvm::Error Recompile(PatchedFunction &Fn);
+
+  /// Installs the requests of \p Requests named by \p Which, all of which land
+  /// in the function entered at \p Entry, with one compile between them.
+  void InstallInOneFunction(lldb::addr_t Entry,
+                            llvm::ArrayRef<PatchRequest> Requests,
+                            llvm::ArrayRef<size_t> Which,
+                            std::vector<InstallOutcome> &Outcomes);
 
   /// Every module describing a copy this manager has compiled, live or retired.
   std::vector<lldb::ModuleSP> CopyModules() const;

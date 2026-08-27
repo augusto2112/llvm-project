@@ -44,6 +44,7 @@
 #include "lldb/Utility/State.h"
 #include "lldb/Utility/SupportFile.h"
 #include "lldb/ValueObject/ValueObjectConstResult.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/ScopeExit.h"
 #include "llvm/Support/Casting.h"
@@ -434,9 +435,9 @@ llvm::Error CheckPatchRangeIsFree(Process &Proc, lldb::addr_t Entry) {
 /// A refusal here leaves the expression to be evaluated at a stop, which is
 /// slower and says so. Installing anyway would leave a breakpoint that reads as
 /// resolved and never fires again, which nothing says at all.
-llvm::Error CheckNoBreakpointNeedsTheOriginalBody(Target &Tgt,
-                                                  lldb::addr_t Entry,
-                                                  lldb::break_id_t Carried) {
+llvm::Error CheckNoBreakpointNeedsTheOriginalBody(
+    Target &Tgt, lldb::addr_t Entry,
+    llvm::ArrayRef<lldb::break_id_t> Carried) {
   std::string Orphaned;
   size_t Count = 0;
 
@@ -446,10 +447,10 @@ llvm::Error CheckNoBreakpointNeedsTheOriginalBody(Target &Tgt,
   for (bool Internal : {false, true}) {
     for (const lldb::BreakpointSP &Bp :
          Tgt.GetBreakpointList(Internal).Breakpoints()) {
-      // The breakpoint the injection is being installed for. Its locations
-      // stop trapping and its hits arrive from the trap instead, which is the
-      // whole of what the injection is for.
-      if (Bp->GetID() == Carried)
+      // The breakpoints the injections are being installed for. Their locations
+      // stop trapping and their hits arrive from the traps instead, which is the
+      // whole of what the injections are for.
+      if (llvm::is_contained(Carried, Bp->GetID()))
         continue;
 
       lldb::BreakpointResolverSP Resolver = Bp->GetResolver();
@@ -882,33 +883,80 @@ FunctionPatchManager::~FunctionPatchManager() = default;
 
 llvm::Expected<uint32_t>
 FunctionPatchManager::Install(const PatchRequest &Request) {
+  std::vector<InstallOutcome> Outcomes = Install(llvm::ArrayRef(Request));
+  assert(Outcomes.size() == 1 && "one request, one outcome");
+  if (Outcomes[0].SiteID)
+    return *Outcomes[0].SiteID;
+  return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                 Outcomes[0].Refusal);
+}
+
+std::vector<FunctionPatchManager::InstallOutcome>
+FunctionPatchManager::Install(llvm::ArrayRef<PatchRequest> Requests) {
+  std::vector<InstallOutcome> Outcomes(Requests.size());
+
+  // Grouped by the function each lands in, because a compile covers a function
+  // rather than an injection: several tracepoints in one function are one
+  // recompile of it. Compiling per injection instead would run clang over the
+  // same body once per tracepoint, and retire a copy each time -- and every
+  // retired copy is kept for the life of the target and leaves a location behind
+  // in each breakpoint over those lines.
+  //
+  // Order preserved so that the site ids a plan is given run in the order it
+  // asked for them.
+  llvm::MapVector<lldb::addr_t, std::vector<size_t>> ByFunction;
+  for (size_t I = 0; I < Requests.size(); ++I)
+    ByFunction[Requests[I].FunctionEntry].push_back(I);
+
+  for (const auto &[Entry, Which] : ByFunction)
+    InstallInOneFunction(Entry, Requests, Which, Outcomes);
+  return Outcomes;
+}
+
+void FunctionPatchManager::InstallInOneFunction(
+    lldb::addr_t Entry, llvm::ArrayRef<PatchRequest> Requests,
+    llvm::ArrayRef<size_t> Which, std::vector<InstallOutcome> &Outcomes) {
+  // Refused together, because they are compiled together: what the compile could
+  // not do it could not do for any of them.
+  auto RefuseGroup = [&](llvm::Error Err) {
+    const std::string Why = llvm::toString(std::move(Err));
+    for (size_t I : Which)
+      Outcomes[I].Refusal = Why;
+  };
+
   // The redirect is hand-encoded arm64 and nothing else has an encoding.
-  if (m_target.GetArchitecture().GetTriple().getArch() != llvm::Triple::aarch64)
-    return Refuse(PatchFailure::NotArm64);
+  if (m_target.GetArchitecture().GetTriple().getArch() !=
+      llvm::Triple::aarch64) {
+    RefuseGroup(Refuse(PatchFailure::NotArm64));
+    return;
+  }
 
   // Held still and past the loader's startup, rather than merely alive:
   // installing rewrites the inferior's code and reads every thread's PC, and a
   // copy the loader is about to forget describes nothing anyone can use.
-  if (!m_target.CanCompileCodeIntoProcess())
-    return Refuse(PatchFailure::NoProcess);
+  if (!m_target.CanCompileCodeIntoProcess()) {
+    RefuseGroup(Refuse(PatchFailure::NoProcess));
+    return;
+  }
   Process *Proc = m_target.GetProcessSP().get();
 
-  const lldb::addr_t Entry = Request.FunctionEntry;
-
-  // A function seen for the first time is built into a local and only entered
-  // into the map once its first site is installed, so a refusal anywhere below
-  // leaves nothing behind claiming the function is patched.
+  // A function seen for the first time is built into a local, and entered into
+  // the map below only once it is about to be compiled.
   std::unique_ptr<PatchedFunction> Fresh;
   PatchedFunction *Fn = nullptr;
   if (auto It = m_functions.find(Entry); It != m_functions.end()) {
     Fn = It->second.get();
   } else {
     llvm::Expected<FunctionFacts> Facts = ReadFunctionFacts(m_target, Entry);
-    if (!Facts)
-      return Facts.takeError();
+    if (!Facts) {
+      RefuseGroup(Facts.takeError());
+      return;
+    }
 
-    if (Facts->EntrySize < kEntryTrampolineSize)
-      return Refuse(PatchFailure::EntryTooSmall);
+    if (Facts->EntrySize < kEntryTrampolineSize) {
+      RefuseGroup(Refuse(PatchFailure::EntryTooSmall));
+      return;
+    }
 
     Fresh = std::make_unique<PatchedFunction>();
     Fresh->Entry = Entry;
@@ -923,67 +971,116 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
     Status ReadError;
     if (Proc->ReadMemory(Entry, Fresh->OriginalBytes.data(),
                          Fresh->OriginalBytes.size(),
-                         ReadError) != Fresh->OriginalBytes.size())
-      return Refuse(PatchFailure::InferiorAccessFailed,
-                    llvm::Twine("the function's entry could not be read: ") +
-                        ReadError.AsCString());
+                         ReadError) != Fresh->OriginalBytes.size()) {
+      RefuseGroup(
+          Refuse(PatchFailure::InferiorAccessFailed,
+                 llvm::Twine("the function's entry could not be read: ") +
+                     ReadError.AsCString()));
+      return;
+    }
 
     Fn = Fresh.get();
   }
 
   // Checked on every install rather than only the first, because every
   // recompile writes the redirect again over the same bytes.
-  if (llvm::Error Err = CheckPatchRangeIsFree(*Proc, Entry))
-    return std::move(Err);
+  if (llvm::Error Err = CheckPatchRangeIsFree(*Proc, Entry)) {
+    RefuseGroup(std::move(Err));
+    return;
+  }
 
   // Only while the entry still reaches the original body. Once it reaches a
   // copy instead, the body has already stopped being run, and a refusal now
   // would neither have caused that nor undo it.
-  if (Fn->CopyAddress == LLDB_INVALID_ADDRESS)
-    if (llvm::Error Err = CheckNoBreakpointNeedsTheOriginalBody(
-            m_target, Entry, Request.HitsCarriedBy))
-      return std::move(Err);
-
-  if (llvm::Error Err = EnsureRingBlock())
-    return std::move(Err);
-
-  llvm::Expected<lldb::addr_t> Slot = AllocateSiteSlot();
-  if (!Slot)
-    return Slot.takeError();
-
-  const uint32_t SiteID = m_next_site_id++;
-
-  // A gated site starts closed, because the debugger opens it when its own
-  // state says the site should do anything. An ungated site never reads the
-  // gate, so leaving it open costs nothing and describes the site honestly.
-  if (!Request.Gated) {
-    const uint8_t Open = 1;
-    Status GateError;
-    if (Proc->WriteMemory(*Slot + offsetof(PatchSiteSlot, Gate), &Open,
-                          sizeof(Open), GateError) != sizeof(Open))
-      return Refuse(PatchFailure::InferiorAccessFailed,
-                    llvm::Twine("the site's gate could not be written: ") +
-                        GateError.AsCString());
+  //
+  // Every breakpoint in the group is exempt, not just one: each of them is
+  // having an injection installed for it, so each of their locations in the body
+  // is one whose hits the injection will deliver.
+  if (Fn->CopyAddress == LLDB_INVALID_ADDRESS) {
+    llvm::SmallVector<lldb::break_id_t, 4> Carried;
+    for (size_t I : Which)
+      Carried.push_back(Requests[I].HitsCarriedBy);
+    if (llvm::Error Err =
+            CheckNoBreakpointNeedsTheOriginalBody(m_target, Entry, Carried)) {
+      RefuseGroup(std::move(Err));
+      return;
+    }
   }
 
-  PatchInjection Injection;
-  Injection.SiteID = SiteID;
-  Injection.Line = Request.Line;
-  Injection.SlotAddress = *Slot;
-  Injection.Condition = Request.Condition;
-  Injection.Captures = Request.Captures;
-  Injection.SkipFirst = Request.SkipFirst;
-  Injection.OnlyHit = Request.OnlyHit;
-  Injection.Gated = Request.Gated;
-  Injection.WantStop = Request.WantStop;
-  Fn->Injections.push_back(std::move(Injection));
+  if (llvm::Error Err = EnsureRingBlock()) {
+    RefuseGroup(std::move(Err));
+    return;
+  }
+
+  // Every injection prepared before anything is compiled, so that one compile
+  // carries all of them.
+  struct Prepared {
+    size_t Index;
+    uint32_t SiteID;
+    lldb::addr_t Slot;
+  };
+  std::vector<Prepared> Made;
+  auto Unprepare = [&] {
+    for (const Prepared &P : Made) {
+      llvm::erase_if(Fn->Injections, [&P](const PatchInjection &Inj) {
+        return Inj.SiteID == P.SiteID;
+      });
+      Fn->Callbacks.erase(P.SiteID);
+      m_captures.erase(P.SiteID);
+      m_dropped_captures.erase(P.SiteID);
+    }
+    if (!Made.empty())
+      ++Fn->Generation;
+  };
+
+  for (size_t I : Which) {
+    const PatchRequest &Request = Requests[I];
+
+    llvm::Expected<lldb::addr_t> Slot = AllocateSiteSlot();
+    if (!Slot) {
+      Unprepare();
+      RefuseGroup(Slot.takeError());
+      return;
+    }
+
+    // A gated site starts closed, because the debugger opens it when its own
+    // state says the site should do anything. An ungated site never reads the
+    // gate, so leaving it open costs nothing and describes the site honestly.
+    if (!Request.Gated) {
+      const uint8_t Open = 1;
+      Status GateError;
+      if (Proc->WriteMemory(*Slot + offsetof(PatchSiteSlot, Gate), &Open,
+                            sizeof(Open), GateError) != sizeof(Open)) {
+        Unprepare();
+        RefuseGroup(
+            Refuse(PatchFailure::InferiorAccessFailed,
+                   llvm::Twine("the site's gate could not be written: ") +
+                       GateError.AsCString()));
+        return;
+      }
+    }
+
+    const uint32_t SiteID = m_next_site_id++;
+    PatchInjection Injection;
+    Injection.SiteID = SiteID;
+    Injection.Line = Request.Line;
+    Injection.SlotAddress = *Slot;
+    Injection.Condition = Request.Condition;
+    Injection.Captures = Request.Captures;
+    Injection.SkipFirst = Request.SkipFirst;
+    Injection.OnlyHit = Request.OnlyHit;
+    Injection.Gated = Request.Gated;
+    Injection.WantStop = Request.WantStop;
+    Fn->Injections.push_back(std::move(Injection));
+    Fn->Callbacks[SiteID] = PatchSiteCallback{Request.OnTrap, Request.Baton};
+    Made.push_back(Prepared{I, SiteID, *Slot});
+  }
   ++Fn->Generation;
-  Fn->Callbacks[SiteID] = PatchSiteCallback{Request.OnTrap, Request.Baton};
 
   // Entered into the map before the compile rather than after it. Compiling
   // announces a module, and announcing one can reach a stop at which another
   // injection is installed in this same function; an install that could not see
-  // this one would read the function's injections as empty and build a second
+  // these would read the function's injections as empty and build a second
   // record of it from the original source, and whichever of the two committed
   // last would replace the other's.
   const bool Inserted = Fresh != nullptr;
@@ -991,36 +1088,30 @@ FunctionPatchManager::Install(const PatchRequest &Request) {
     m_functions[Entry] = std::move(Fresh);
 
   if (llvm::Error Err = Recompile(*Fn)) {
-    // A compile that failed installed nothing, so the site it was for must not
-    // be remembered as live in a function still running its previous copy.
-    // Erased by name rather than popped, since an install nested inside this
-    // one's compile may have appended after it.
-    llvm::erase_if(Fn->Injections, [SiteID](const PatchInjection &Inj) {
-      return Inj.SiteID == SiteID;
-    });
-    ++Fn->Generation;
-    Fn->Callbacks.erase(SiteID);
-    m_captures.erase(SiteID);
-    m_dropped_captures.erase(SiteID);
+    Unprepare();
     // And the function's own record goes only if this install is what put it
     // there and nothing else has made it worth keeping.
     if (Inserted && Fn->Injections.empty() &&
         Fn->CopyAddress == LLDB_INVALID_ADDRESS)
       m_functions.erase(Entry);
-    return std::move(Err);
+    RefuseGroup(std::move(Err));
+    return;
   }
 
-  m_site_to_function[SiteID] = Entry;
-  // Recorded once the site is live, because this is what makes its counters
-  // readable and there are none to read for a site that was refused.
-  m_site_slots[SiteID] = *Slot;
+  for (const Prepared &P : Made) {
+    m_site_to_function[P.SiteID] = Entry;
+    // Recorded once the site is live, because this is what makes its counters
+    // readable and there are none to read for a site that was refused.
+    m_site_slots[P.SiteID] = P.Slot;
+    Outcomes[P.Index].SiteID = P.SiteID;
+  }
 
   // Every site's counters, like every record in the ring, are only readable
   // while the process holding them is there, and a run whose condition never
   // held takes no other stop at which they could be read.
   EnsureExitDrainBreakpoint();
-  return SiteID;
 }
+
 
 llvm::Error FunctionPatchManager::Remove(uint32_t SiteID) {
   auto SiteIt = m_site_to_function.find(SiteID);

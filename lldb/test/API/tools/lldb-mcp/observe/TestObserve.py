@@ -1779,6 +1779,52 @@ class ObserveTestCase(TestBase):
     # everywhere else is the stopping path these tests exist to distinguish from.
     @skipUnlessDarwin
     @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
+    def test_two_tracepoints_in_one_function_share_its_copy(self):
+        """A plan's tracepoints in one function are compiled into one copy of it.
+
+        A compile runs clang over the whole function body and JITs the result
+        into the program, and each one retires a copy the target keeps for the
+        rest of its life -- leaving a location behind in every breakpoint over
+        those lines. So a plan is compiled a function at a time rather than a
+        tracepoint at a time, and every tracepoint of a function ends up in the
+        same copy.
+
+        What is asserted is the consequence: both of these are in the program, and
+        each counts its own hits. A plan that compiled per tracepoint would publish
+        one copy per tracepoint, and only the last one written would be reached.
+        """
+        self.build()
+
+        document = self.observe(
+            {
+                "program": self.getBuildArtifact("a.out"),
+                "timeout_seconds": 300,
+                "observe": [
+                    {"label": "never", "at": "accumulate", "when": "seed > 1000"},
+                    {"label": "twice", "at": "accumulate", "when": "rounds == 2"},
+                ],
+            }
+        )
+
+        self.assertEqual(document["outcome"], "exited", str(document))
+        never = document["plan_report"]["never"]
+        twice = document["plan_report"]["twice"]
+        self.assertEqual(never["eval"], "in-process", str(never))
+        self.assertEqual(twice["eval"], "in-process", str(twice))
+
+        # Both saw every call, because both are in the copy the entry reaches.
+        self.assertEqual(never["hits"], 25, str(never))
+        self.assertEqual(twice["hits"], 25, str(twice))
+        # And each tested its own condition: only accumulate_via passes two.
+        self.assertEqual(never["condition_true"], 0, str(never))
+        self.assertEqual(twice["condition_true"], 5, str(twice))
+
+        # One recompile, so the note names the function once.
+        notes = " ".join(document.get("notes", []))
+        self.assertIn("accumulate", notes, notes)
+
+    @skipUnlessDarwin
+    @skipIf(archs=no_match(["arm64", "arm64e", "aarch64"]))
     def test_a_condition_runs_in_process_by_default(self):
         """A plan's condition is compiled into the program unless refused.
 
